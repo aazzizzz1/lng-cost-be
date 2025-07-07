@@ -52,11 +52,20 @@ exports.login = async (req, res) => {
     data: { refreshToken },
   });
 
+  // Return user info along with tokens
   res.json({
+    message: 'Login successful',
+    user: {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+    },
     accessToken,
     refreshToken,
   });
 };
+
 
 exports.refreshToken = async (req, res) => {
   const { token } = req.body;
