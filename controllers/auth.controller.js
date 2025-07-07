@@ -141,6 +141,42 @@ exports.getUserById = async (req, res) => {
   }
 };
 
+exports.logout = async (req, res) => {
+  try {
+    const token = req.cookies?.refreshToken;
+
+    if (!token) {
+      return res.status(400).json({ message: 'No token found' });
+    }
+
+    const payload = jwt.verify(token, process.env.REFRESH_SECRET);
+    const user = await prisma.user.findUnique({
+      where: { id: payload.userId },
+    });
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Hapus refresh token dari database
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { refreshToken: null },
+    });
+
+    // Hapus cookie di browser
+    res.clearCookie('refreshToken', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'Strict',
+    });
+
+    res.json({ message: 'Logout successful' });
+  } catch (error) {
+    res.status(403).json({ error: 'Invalid or expired token' });
+  }
+};
+
 
 // exports.getUserById = async (req, res) => {
 //   const { id } = req.params;
