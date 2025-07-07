@@ -52,7 +52,14 @@ exports.login = async (req, res) => {
     data: { refreshToken },
   });
 
-  // Return user info along with tokens
+  // Send token via HTTP-only cookie
+  res.cookie('refreshToken', refreshToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production', // Only use secure in production
+    sameSite: 'Strict',
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+  });
+
   res.json({
     message: 'Login successful',
     user: {
@@ -62,13 +69,13 @@ exports.login = async (req, res) => {
       role: user.role,
     },
     accessToken,
-    refreshToken,
+    // refreshToken,
   });
 };
 
-
 exports.refreshToken = async (req, res) => {
-  const { token } = req.body;
+  // Cek dari body atau cookie
+  const token = req.body.token || req.cookies.refreshToken;
   if (!token) return res.status(401).json({ error: 'Token missing' });
 
   try {
@@ -87,6 +94,13 @@ exports.refreshToken = async (req, res) => {
       data: { refreshToken: newRefreshToken },
     });
 
+    res.cookie('refreshToken', newRefreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'Strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
     res.json({
       accessToken: newAccessToken,
       refreshToken: newRefreshToken,
@@ -100,7 +114,7 @@ exports.getUserById = async (req, res) => {
   const { id } = req.params;
   const requester = req.user;
 
-  // Izinkan jika admin atau user yang meminta data dirinya sendiri
+  // Cek apakah requester adalah admin atau user yang diminta
   if (requester.role !== 'admin' && requester.userId !== parseInt(id)) {
     return res.status(403).json({ error: 'Access denied' });
   }
