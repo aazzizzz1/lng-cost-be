@@ -86,3 +86,60 @@ exports.refreshToken = async (req, res) => {
     res.status(403).json({ error: 'Invalid refresh token' });
   }
 };
+
+exports.getUserById = async (req, res) => {
+  const { id } = req.params;
+  const requester = req.user;
+
+  // Izinkan jika admin atau user yang meminta data dirinya sendiri
+  if (requester.role !== 'admin' && requester.userId !== parseInt(id)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: parseInt(id) },
+      select: {
+        id: true,
+        username: true,
+        email: true,
+        role: true,
+        createdAt: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+
+// exports.getUserById = async (req, res) => {
+//   const { id } = req.params;
+
+//   try {
+//     const user = await prisma.user.findUnique({
+//       where: { id: parseInt(id) },
+//       select: {
+//         id: true,
+//         username: true,
+//         email: true,
+//         role: true,
+//         createdAt: true,
+//       },
+//     });
+
+//     if (!user) {
+//       return res.status(404).json({ error: 'User not found' });
+//     }
+
+//     res.json(user);
+//   } catch (err) {
+//     res.status(500).json({ error: 'Internal server error' });
+//   }
+// };
