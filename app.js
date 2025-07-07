@@ -28,7 +28,7 @@ app.use(
   })
 );
 
-const allowedOrigins = ['http://localhost:5000', 'https://yourdomain.com']; // ganti sesuai kebutuhan
+const allowedOrigins = ['http://localhost:3000','http://localhost:5000', 'https://lng-cost-fe.netlify.app/', 'https://yourdomain.com']; // ganti sesuai kebutuhan
 
 const corsOptions = {
   origin: (origin, callback) => {
