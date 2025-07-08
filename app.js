@@ -10,6 +10,7 @@ const authRoutes = require('./routes/auth.routes');
 const projectRoutes = require('./routes/project.routes');
 const unitPriceRoutes = require('./routes/unitPrice.routes');
 const constructionCostRoutes = require('./routes/constructionCost.routes');
+const uploadRoutes = require('./routes/upload.routes');
 
 const app = express();
 app.use(express.json());
@@ -53,5 +54,6 @@ app.use('/api/auth', authRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/unit-prices', unitPriceRoutes);
 app.use('/api/construction-costs', constructionCostRoutes);
+app.use('/api/upload', uploadRoutes);
 
 module.exports = app;
