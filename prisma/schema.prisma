@@ -22,3 +22,70 @@ model User {
   refreshToken String?
   createdAt DateTime @default(now())
 }
+
+model Project {
+  id         Int      @id @default(autoincrement())
+  name       String
+  jenis      String
+  kategori   String
+  lokasi     String
+  tahun      Int
+  levelAACE  Int
+  harga      Float
+  satuan     String?
+
+  constructionCosts ConstructionCost[]
+}
+
+model ConstructionCost {
+  id                    Int      @id @default(autoincrement())
+  uraian                String
+  specification         String?
+  qty                   Float
+  satuan                String
+  hargaSatuan           Float
+  totalHarga            Float
+  aaceClass             Int
+  accuracyLow           Int
+  accuracyHigh          Int
+  tahun                 Int
+  infrastruktur         String
+  volume                Float
+  satuanVolume          String
+  kapasitasRegasifikasi Float
+  satuanKapasitas       String
+  kelompok              String
+  kelompokDetail        String
+  lokasi                String
+  tipe                  String
+  createdAt             DateTime @default(now())
+
+  project   Project   @relation(fields: [projectId], references: [id])
+  projectId Int
+}
+
+model UnitPrice {
+  id                    Int      @id @default(autoincrement())
+  uraian                String
+  specification         String?
+  qty                   Float
+  satuan                String
+  hargaSatuan           Float
+  totalHarga            Float
+  aaceClass             Int
+  accuracyLow           Int
+  accuracyHigh          Int
+  tahun                 Int
+  infrastruktur         String
+  volume                Float
+  satuanVolume          String
+  kapasitasRegasifikasi Float
+  satuanKapasitas       String
+  kelompok              String
+  kelompokDetail        String
+  proyek                String
+  lokasi                String
+  tipe                  String
+  kategori              String
+  createdAt             DateTime @default(now())
+}
