@@ -17,3 +17,12 @@ exports.getAllUnitPrices = async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch unit prices' });
   }
 };
+
+exports.deleteAllUnitPrices = async (req, res) => {
+  try {
+    await prisma.unitPrice.deleteMany(); // Deletes all records in the UnitPrice table
+    res.status(200).json({ message: 'All unit prices have been deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete unit prices' });
+  }
+};
