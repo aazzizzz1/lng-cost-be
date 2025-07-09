@@ -4,7 +4,7 @@ const prisma = require('../config/db');
 const cleanNumber = (val) => {
   if (!val) return 0;
   if (typeof val === 'number') return val;
-  return parseFloat(String(val).replace(/[^0-9.-]/g, '')) || 0;
+  return parseFloat(String(val).replace(/[^0-9.-]/g, '')) || 0; // Input sanitization
 };
 
 exports.uploadExcel = async (req, res) => {
@@ -17,8 +17,14 @@ exports.uploadExcel = async (req, res) => {
 
     if (!data.length) return res.status(400).json({ error: 'Excel is empty or unreadable' });
 
+    const requiredColumns = ['Item', 'Specification', 'Qty', 'Cost', 'Total Cost'];
+    const missingColumns = requiredColumns.filter(col => !data[0].hasOwnProperty(col));
+    if (missingColumns.length) {
+      return res.status(400).json({ error: `Missing required columns: ${missingColumns.join(', ')}` });
+    }
+
     const unitPrices = data.map((row, idx) => {
-      if (!row['Item']) throw new Error(`Row ${idx + 2} missing "Item"`); // error jelas
+      if (!row['Item']) throw new Error(`Row ${idx + 2} missing "Item"`); // Input validation
       return {
         uraian: row['Item'] || 'Unknown',
         specification: row['Specification'] || '',
@@ -46,12 +52,12 @@ exports.uploadExcel = async (req, res) => {
 
     await prisma.unitPrice.createMany({
       data: unitPrices,
-      skipDuplicates: true,
+      skipDuplicates: true, // Prevent duplicate entries
     });
 
     res.status(200).json({ message: 'Data uploaded successfully.', count: unitPrices.length });
   } catch (error) {
-    console.error('Upload Excel Error:', error);
+    console.error('Upload Excel Error:', error); // Error logging
     res.status(500).json({ error: error.message });
   }
 };

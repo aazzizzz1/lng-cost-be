@@ -5,11 +5,11 @@ exports.authenticate = (req, res, next) => {
   const authHeader = req.headers.authorization;
 
   if (!authHeader) {
-    return res.status(401).json({ error: 'Authorization header missing' });
+    return res.status(401).json({ error: 'Authorization header missing' }); // Prevents unauthorized access
   }
 
   if (!authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Invalid token format. Use Bearer <token>' });
+    return res.status(401).json({ error: 'Invalid token format. Use Bearer <token>' }); // Validates token format
   }
 
   const token = authHeader.split(' ')[1];
@@ -22,7 +22,7 @@ exports.authenticate = (req, res, next) => {
       const message = err.name === 'TokenExpiredError'
         ? 'Token expired'
         : 'Invalid token';
-      return res.status(403).json({ error: message });
+      return res.status(403).json({ error: message }); // Verifies token integrity
     }
 
     req.user = decoded; // { userId, role, ... }
@@ -34,7 +34,7 @@ exports.authenticate = (req, res, next) => {
 exports.authorizeRoles = (...allowedRoles) => {
   return (req, res, next) => {
     if (!req.user || !allowedRoles.includes(req.user.role)) {
-      return res.status(403).json({ error: 'You do not have permission to access this resource' });
+      return res.status(403).json({ error: 'You do not have permission to access this resource' }); // Role-based access control
     }
     next();
   };
@@ -43,7 +43,7 @@ exports.authorizeRoles = (...allowedRoles) => {
 // === Admin Only Shortcut ===
 exports.isAdmin = (req, res, next) => {
   if (!req.user || req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Admin only access' });
+    return res.status(403).json({ error: 'Admin only access' }); // Restricts access to admin users
   }
   next();
 };

@@ -1,12 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const controller = require('../controllers/project.controller');
-const { authenticate } = require('../middlewares/auth.middleware');
+const { authenticate } = require('../middlewares/auth.middleware'); // Authentication middleware
 
 // Only authenticated users can see projects
-router.get('/', authenticate, controller.getAllProjects);
-router.get('/:id', authenticate, controller.getProjectById);
-router.post('/', authenticate, controller.createProject);
+router.get('/', authenticate, controller.getAllProjects); // Ensures only authenticated users can access
+router.get('/:id', authenticate, controller.getProjectById); // Prevents unauthorized access to project details
+router.post('/', authenticate, controller.createProject); // Ensures only authenticated users can create projects
 
 // Only admin can create project
 // router.post('/', authenticate, authorizeRoles('admin'), controller.createProject);

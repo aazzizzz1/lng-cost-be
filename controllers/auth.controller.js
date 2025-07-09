@@ -1,5 +1,5 @@
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt'); // Password hashing for secure storage
+const jwt = require('jsonwebtoken'); // Token generation for authentication
 const prisma = require('../config/db');
 
 const generateAccessToken = (user) => {
@@ -7,7 +7,7 @@ const generateAccessToken = (user) => {
     { userId: user.id, role: user.role },
     process.env.JWT_SECRET,
     { expiresIn: '15m' }
-  );
+  ); // Short-lived access token for security
 };
 
 const generateRefreshToken = (user) => {
@@ -15,7 +15,7 @@ const generateRefreshToken = (user) => {
     { userId: user.id },
     process.env.REFRESH_SECRET,
     { expiresIn: '7d' }
-  );
+  ); // Long-lived refresh token for session management
 };
 
 exports.register = async (req, res) => {
@@ -40,6 +40,7 @@ exports.login = async (req, res) => {
   const user = await prisma.user.findUnique({ where: { email } });
 
   if (!user || !(await bcrypt.compare(password, user.password))) {
+    console.error(`Failed login attempt for email: ${email}`); // Log failed login attempts
     return res.status(401).json({ error: 'Invalid credentials' });
   }
 
@@ -54,9 +55,9 @@ exports.login = async (req, res) => {
 
   // Send token via HTTP-only cookie
   res.cookie('refreshToken', refreshToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production', // Only use secure in production
-    sameSite: 'Strict',
+    httpOnly: true, // Prevents client-side access to cookies
+    secure: process.env.NODE_ENV === 'production', // Ensures secure cookies in production
+    sameSite: 'Strict', // Prevents CSRF attacks
     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
   });
 
@@ -74,12 +75,11 @@ exports.login = async (req, res) => {
 };
 
 exports.refreshToken = async (req, res) => {
-  // Cek dari body atau cookie
   const token = req.body.token || req.cookies.refreshToken;
   if (!token) return res.status(401).json({ error: 'Token missing' });
 
   try {
-    const payload = jwt.verify(token, process.env.REFRESH_SECRET);
+    const payload = jwt.verify(token, process.env.REFRESH_SECRET); // Verifies token integrity
     const user = await prisma.user.findUnique({ where: { id: payload.userId } });
 
     if (!user || user.refreshToken !== token) {
@@ -95,7 +95,7 @@ exports.refreshToken = async (req, res) => {
     });
 
     res.cookie('refreshToken', newRefreshToken, {
-      httpOnly: true,
+      httpOnly: true, // Secure cookie handling
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'Strict',
       maxAge: 7 * 24 * 60 * 60 * 1000,
@@ -149,7 +149,7 @@ exports.logout = async (req, res) => {
       return res.status(400).json({ message: 'No token found' });
     }
 
-    const payload = jwt.verify(token, process.env.REFRESH_SECRET);
+    const payload = jwt.verify(token, process.env.REFRESH_SECRET); // Token verification
     const user = await prisma.user.findUnique({
       where: { id: payload.userId },
     });
@@ -166,7 +166,7 @@ exports.logout = async (req, res) => {
 
     // Hapus cookie di browser
     res.clearCookie('refreshToken', {
-      httpOnly: true,
+      httpOnly: true, // Secure cookie clearing
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'Strict',
     });
