@@ -13,49 +13,74 @@ exports.uploadExcel = async (req, res) => {
     if (!buffer) return res.status(400).json({ error: 'No file uploaded' });
 
     const workbook = XLSX.read(buffer, { type: 'buffer' });
-    const data = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1 });
 
-    if (!data.length) return res.status(400).json({ error: 'Excel is empty or unreadable' });
+    if (!rawData.length) return res.status(400).json({ error: 'Excel is empty or unreadable' });
 
-    const requiredColumns = ['Item', 'Specification', 'Qty', 'Cost', 'Total Cost'];
-    const missingColumns = requiredColumns.filter(col => !data[0].hasOwnProperty(col));
+    // Normalize column names
+    const headers = rawData[0].map(header => header.trim().toLowerCase());
+    const data = rawData.slice(1).map(row => {
+      const normalizedRow = {};
+      headers.forEach((header, index) => {
+        normalizedRow[header] = row[index];
+      });
+      return normalizedRow;
+    });
+
+    const requiredColumns = ['item', 'specification', 'qty', 'cost', 'total cost'];
+    const missingColumns = requiredColumns.filter(col => !headers.includes(col));
     if (missingColumns.length) {
       return res.status(400).json({ error: `Missing required columns: ${missingColumns.join(', ')}` });
     }
 
-    const unitPrices = data.map((row, idx) => {
-      if (!row['Item']) throw new Error(`Row ${idx + 2} missing "Item"`); // Input validation
-      return {
-        uraian: row['Item'] || 'Unknown',
-        specification: row['Specification'] || '',
-        qty: cleanNumber(row['Qty']),
-        satuan: row['Satuan'] || '',
-        hargaSatuan: cleanNumber(row['Cost']),
-        totalHarga: cleanNumber(row['Total Cost']),
-        aaceClass: parseInt(row['AACE Class']) || 0,
-        accuracyLow: parseInt(String(row['Low']).replace('%', '')) || 0,
-        accuracyHigh: parseInt(String(row['High']).replace('%', '')) || 0,
-        tahun: parseInt(row['Year']) || new Date().getFullYear(),
-        infrastruktur: row['Infrastructure'] || '',
-        volume: cleanNumber(row['Volume']),
-        satuanVolume: row['Satuan'] || '',
+    const unitPrices = [];
+    const skippedRows = [];
+
+    data.forEach((row, idx) => {
+      if (!row['item']) {
+        skippedRows.push(idx + 2); // Log the row number (Excel rows start at 1)
+        return; // Skip rows with missing "Item"
+      }
+      const qty = cleanNumber(row['qty']);
+      const hargaSatuan = cleanNumber(row['cost']);
+      unitPrices.push({
+        uraian: row['item'] || 'Unknown',
+        specification: row['specification'] || '',
+        qty,
+        satuan: row['satuan'] || '',
+        hargaSatuan,
+        totalHarga: qty * hargaSatuan, // Calculate total cost
+        aaceClass: parseInt(row['aace class']) || 0,
+        accuracyLow: parseFloat(String(row['low']).replace(',', '.').replace('%', '')) || 0, // Handle commas as decimal points
+        accuracyHigh: parseFloat(String(row['high']).replace(',', '.').replace('%', '')) || 0, // Handle commas as decimal points
+        tahun: parseInt(row['year']) || new Date().getFullYear(),
+        infrastruktur: row['infrastructure'] || '',
+        volume: cleanNumber(row['volume']),
+        satuanVolume: row['satuan'] || '',
         kapasitasRegasifikasi: 0,
         satuanKapasitas: 'N/A',
-        kelompok: row['Group 1'] || '',
-        kelompokDetail: row['Group 1.1'] || '',
-        proyek: row['Project'] || '',
-        lokasi: row['Location'] || '',
-        tipe: row['Type'] || '',
+        kelompok: row['group 1'] || '',
+        kelompokDetail: row['group 1.1'] || '',
+        proyek: row['project'] || '',
+        lokasi: row['location'] || '',
+        tipe: row['type'] || '',
         kategori: 'Material Konstruksi',
-      };
+      });
     });
 
-    await prisma.unitPrice.createMany({
-      data: unitPrices,
-      skipDuplicates: true, // Prevent duplicate entries
-    });
+    if (unitPrices.length > 0) {
+      await prisma.unitPrice.createMany({
+        data: unitPrices,
+        skipDuplicates: true, // Prevent duplicate entries
+      });
+    }
 
-    res.status(200).json({ message: 'Data uploaded successfully.', count: unitPrices.length });
+    res.status(200).json({
+      message: 'Data uploaded successfully.',
+      count: unitPrices.length,
+      skippedRows,
+    });
   } catch (error) {
     console.error('Upload Excel Error:', error); // Error logging
     res.status(500).json({ error: error.message });

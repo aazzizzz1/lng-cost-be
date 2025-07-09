@@ -46,8 +46,8 @@ model ConstructionCost {
   hargaSatuan           Float
   totalHarga            Float
   aaceClass             Int
-  accuracyLow           Int
-  accuracyHigh          Int
+  accuracyLow           Float    // Changed from Int to Float
+  accuracyHigh          Float    // Changed from Int to Float
   tahun                 Int
   infrastruktur         String
   volume                Float
@@ -73,8 +73,8 @@ model UnitPrice {
   hargaSatuan           Float
   totalHarga            Float
   aaceClass             Int
-  accuracyLow           Int
-  accuracyHigh          Int
+  accuracyLow           Float    // Changed from Int to Float
+  accuracyHigh          Float    // Changed from Int to Float
   tahun                 Int
   infrastruktur         String
   volume                Float
