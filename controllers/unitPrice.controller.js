@@ -11,8 +11,11 @@ exports.createUnitPrice = async (req, res) => {
 
 exports.getAllUnitPrices = async (req, res) => {
   try {
-    const unitPrices = await prisma.unitPrice.findMany(); // Prevent over-fetching sensitive data
-    res.json(unitPrices);
+    const unitPrices = await prisma.unitPrice.findMany(); // Fetch all unit prices
+    res.json({
+      message: 'Objects retrieved successfully.',
+      data: unitPrices, // Include unit prices in the 'data' field
+    });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch unit prices' });
   }

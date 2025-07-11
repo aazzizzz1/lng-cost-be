@@ -4,7 +4,7 @@ const controller = require('../controllers/unitPrice.controller');
 const { authenticate, authorizeRoles } = require('../middlewares/auth.middleware'); // Authentication and Authorization middleware
 
 // Authenticated users can view unit prices
-router.get('/', authenticate, controller.getAllUnitPrices); // Ensures only authenticated users can view unit prices
+router.get('/', controller.getAllUnitPrices); // Ensures only authenticated users can view unit prices
 router.post('/', authenticate, controller.createUnitPrice); // Ensures only authenticated users can create unit prices
 router.delete('/', authenticate, authorizeRoles('admin'), controller.deleteAllUnitPrices); // Ensures only authenticated admin users can delete all unit prices
 
