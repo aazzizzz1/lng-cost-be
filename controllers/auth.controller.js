@@ -29,9 +29,12 @@ exports.register = async (req, res) => {
         password: hashedPassword,
       },
     });
-    res.status(201).json({ message: 'User registered', user });
+    res.status(201).json({
+      message: 'User registered successfully.',
+      data: user,
+    });
   } catch (err) {
-    res.status(400).json({ error: 'Email or username already exists' });
+    res.status(400).json({ message: 'Email or username already exists', data: null });
   }
 };
 
@@ -40,50 +43,48 @@ exports.login = async (req, res) => {
   const user = await prisma.user.findUnique({ where: { email } });
 
   if (!user || !(await bcrypt.compare(password, user.password))) {
-    console.error(`Failed login attempt for email: ${email}`); // Log failed login attempts
-    return res.status(401).json({ error: 'Invalid credentials' });
+    return res.status(401).json({ message: 'Invalid credentials', data: null });
   }
 
   const accessToken = generateAccessToken(user);
   const refreshToken = generateRefreshToken(user);
 
-  // Save refreshToken to DB
   await prisma.user.update({
     where: { id: user.id },
     data: { refreshToken },
   });
 
-  // Send token via HTTP-only cookie
   res.cookie('refreshToken', refreshToken, {
-    httpOnly: true, // Prevents client-side access to cookies
-    secure: process.env.NODE_ENV === 'production', // Ensures secure cookies in production
-    sameSite: 'Strict', // Prevents CSRF attacks
-    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'Strict',
+    maxAge: 7 * 24 * 60 * 60 * 1000,
   });
 
   res.json({
-    message: 'Login successful',
-    user: {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      role: user.role,
+    message: 'Login successful.',
+    data: {
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+      },
+      accessToken,
     },
-    accessToken,
-    // refreshToken,
   });
 };
 
 exports.refreshToken = async (req, res) => {
   const token = req.body.token || req.cookies.refreshToken;
-  if (!token) return res.status(401).json({ error: 'Token missing' });
+  if (!token) return res.status(401).json({ message: 'Token missing', data: null });
 
   try {
-    const payload = jwt.verify(token, process.env.REFRESH_SECRET); // Verifies token integrity
+    const payload = jwt.verify(token, process.env.REFRESH_SECRET);
     const user = await prisma.user.findUnique({ where: { id: payload.userId } });
 
     if (!user || user.refreshToken !== token) {
-      return res.status(403).json({ error: 'Invalid refresh token' });
+      return res.status(403).json({ message: 'Invalid refresh token', data: null });
     }
 
     const newAccessToken = generateAccessToken(user);
@@ -95,18 +96,21 @@ exports.refreshToken = async (req, res) => {
     });
 
     res.cookie('refreshToken', newRefreshToken, {
-      httpOnly: true, // Secure cookie handling
+      httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'Strict',
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
     res.json({
-      accessToken: newAccessToken,
-      refreshToken: newRefreshToken,
+      message: 'Token refreshed successfully.',
+      data: {
+        accessToken: newAccessToken,
+        refreshToken: newRefreshToken,
+      },
     });
   } catch (err) {
-    res.status(403).json({ error: 'Invalid refresh token' });
+    res.status(403).json({ message: 'Invalid refresh token', data: null });
   }
 };
 
@@ -146,34 +150,30 @@ exports.logout = async (req, res) => {
     const token = req.cookies?.refreshToken;
 
     if (!token) {
-      return res.status(400).json({ message: 'No token found' });
+      return res.status(400).json({ message: 'No token found', data: null });
     }
 
-    const payload = jwt.verify(token, process.env.REFRESH_SECRET); // Token verification
-    const user = await prisma.user.findUnique({
-      where: { id: payload.userId },
-    });
+    const payload = jwt.verify(token, process.env.REFRESH_SECRET);
+    const user = await prisma.user.findUnique({ where: { id: payload.userId } });
 
     if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+      return res.status(404).json({ message: 'User not found', data: null });
     }
 
-    // Hapus refresh token dari database
     await prisma.user.update({
       where: { id: user.id },
       data: { refreshToken: null },
     });
 
-    // Hapus cookie di browser
     res.clearCookie('refreshToken', {
-      httpOnly: true, // Secure cookie clearing
+      httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'Strict',
     });
 
-    res.json({ message: 'Logout successful' });
+    res.json({ message: 'Logout successful.', data: null });
   } catch (error) {
-    res.status(403).json({ error: 'Invalid or expired token' });
+    res.status(403).json({ message: 'Invalid or expired token', data: null });
   }
 };
 

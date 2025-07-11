@@ -3,18 +3,24 @@ const prisma = require('../config/db');
 exports.createProject = async (req, res) => {
   try {
     const project = await prisma.project.create({ data: req.body }); // Ensure req.body is sanitized
-    res.status(201).json(project);
+    res.status(201).json({
+      message: 'Project created successfully.',
+      data: project,
+    });
   } catch (error) {
-    res.status(400).json({ error: 'Failed to create project' });
+    res.status(400).json({ message: 'Failed to create project', data: null });
   }
 };
 
 exports.getAllProjects = async (req, res) => {
   try {
     const projects = await prisma.project.findMany();
-    res.json(projects);
+    res.json({
+      message: 'Objects retrieved successfully.',
+      data: projects,
+    });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch projects' });
+    res.status(500).json({ message: 'Failed to fetch projects', data: null });
   }
 };
 
@@ -25,9 +31,13 @@ exports.getProjectById = async (req, res) => {
       where: { id: parseInt(id) }, // Prevent SQL injection by using parameterized queries
       include: { constructionCosts: true },
     });
-    if (!project) return res.status(404).json({ error: 'Project not found' });
-    res.json(project);
+    if (!project)
+      return res.status(404).json({ message: 'Project not found', data: null });
+    res.json({
+      message: 'Object retrieved successfully.',
+      data: project,
+    });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch project' });
+    res.status(500).json({ message: 'Failed to fetch project', data: null });
   }
 };
