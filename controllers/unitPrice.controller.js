@@ -14,10 +14,36 @@ exports.createUnitPrice = async (req, res) => {
 
 exports.getAllUnitPrices = async (req, res) => {
   try {
-    const unitPrices = await prisma.unitPrice.findMany(); // Fetch all unit prices
+    const { page = 1, limit = 10, sort = 'createdAt', order = 'asc', search, tipe, infrastruktur, kelompok } = req.query;
+
+    const filters = {};
+    if (tipe) filters.tipe = tipe;
+    if (infrastruktur) filters.infrastruktur = infrastruktur;
+    if (kelompok) filters.kelompok = kelompok;
+    if (search) {
+      filters.OR = [
+        { uraian: { contains: search, mode: 'insensitive' } },
+        { specification: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
+    const unitPrices = await prisma.unitPrice.findMany({
+      where: filters,
+      orderBy: { [sort]: order },
+      skip: (page - 1) * limit,
+      take: parseInt(limit),
+    });
+
+    const total = await prisma.unitPrice.count({ where: filters });
+
     res.json({
       message: 'Objects retrieved successfully.',
-      data: unitPrices, // Include unit prices in the 'data' field
+      data: unitPrices,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+      },
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch unit prices', data: null });
