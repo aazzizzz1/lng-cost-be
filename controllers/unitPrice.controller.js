@@ -14,7 +14,7 @@ exports.createUnitPrice = async (req, res) => {
 
 exports.getAllUnitPrices = async (req, res) => {
   try {
-    const { page = 1, limit = 10, sort = 'createdAt', order = 'asc', search, tipe, infrastruktur, kelompok } = req.query;
+    const { page = 1, limit = 10, sort, order, search, tipe, infrastruktur, kelompok } = req.query;
 
     const filters = {};
     if (tipe) filters.tipe = { equals: tipe.toLowerCase(), mode: 'insensitive' };
@@ -27,26 +27,37 @@ exports.getAllUnitPrices = async (req, res) => {
       ];
     }
 
+    const total = await prisma.unitPrice.count({ where: filters });
+    const totalPages = Math.ceil(total / limit);
+
+    if (page > totalPages) {
+      return res.status(400).json({
+        message: 'Page exceeds total data available.',
+        totalData: total,
+        totalPages,
+      });
+    }
+
     const unitPrices = await prisma.unitPrice.findMany({
       where: filters,
-      orderBy: { [sort]: order },
+      orderBy: { [sort || 'createdAt']: order || 'asc' }, // Default sorting applied if empty
       skip: (page - 1) * limit,
       take: parseInt(limit),
     });
-
-    const total = await prisma.unitPrice.count({ where: filters });
 
     res.json({
       message: 'Objects retrieved successfully.',
       data: unitPrices,
       pagination: {
-        total,
-        page: parseInt(page),
+        totalData: total,
+        totalPages,
+        currentPage: parseInt(page),
         limit: parseInt(limit),
       },
     });
   } catch (error) {
-    res.status(500).json({ message: 'Failed to fetch unit prices', data: null });
+    console.error('Error fetching unit prices:', error); // Log the error for debugging
+    res.status(500).json({ message: 'Failed to fetch unit prices', error: error.message });
   }
 };
 
@@ -59,5 +70,35 @@ exports.deleteAllUnitPrices = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to delete unit prices', data: null });
+  }
+};
+
+exports.getUniqueFields = async (req, res) => {
+  try {
+    const uniqueTipe = await prisma.unitPrice.findMany({
+      select: { tipe: true },
+      distinct: ['tipe'],
+    });
+
+    const uniqueInfrastruktur = await prisma.unitPrice.findMany({
+      select: { infrastruktur: true },
+      distinct: ['infrastruktur'],
+    });
+
+    const uniqueKelompok = await prisma.unitPrice.findMany({
+      select: { kelompok: true },
+      distinct: ['kelompok'],
+    });
+
+    res.json({
+      message: 'Unique fields retrieved successfully.',
+      data: {
+        tipe: uniqueTipe.map((item) => item.tipe),
+        infrastruktur: uniqueInfrastruktur.map((item) => item.infrastruktur),
+        kelompok: uniqueKelompok.map((item) => item.kelompok),
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch unique fields', data: null });
   }
 };
