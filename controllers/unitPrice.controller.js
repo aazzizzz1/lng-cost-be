@@ -17,13 +17,13 @@ exports.getAllUnitPrices = async (req, res) => {
     const { page = 1, limit = 10, sort = 'createdAt', order = 'asc', search, tipe, infrastruktur, kelompok } = req.query;
 
     const filters = {};
-    if (tipe) filters.tipe = tipe;
-    if (infrastruktur) filters.infrastruktur = infrastruktur;
-    if (kelompok) filters.kelompok = kelompok;
+    if (tipe) filters.tipe = { equals: tipe.toLowerCase(), mode: 'insensitive' };
+    if (infrastruktur) filters.infrastruktur = { equals: infrastruktur.toLowerCase(), mode: 'insensitive' };
+    if (kelompok) filters.kelompok = { equals: kelompok.toLowerCase(), mode: 'insensitive' };
     if (search) {
       filters.OR = [
-        { uraian: { contains: search, mode: 'insensitive' } },
-        { specification: { contains: search, mode: 'insensitive' } },
+        { uraian: { contains: search.toLowerCase(), mode: 'insensitive' } },
+        { specification: { contains: search.toLowerCase(), mode: 'insensitive' } },
       ];
     }
 
