@@ -177,28 +177,25 @@ exports.logout = async (req, res) => {
   }
 };
 
+exports.validateToken = async (req, res) => {
+  const authHeader = req.headers.authorization;
 
-// exports.getUserById = async (req, res) => {
-//   const { id } = req.params;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Authorization header missing or invalid' });
+  }
 
-//   try {
-//     const user = await prisma.user.findUnique({
-//       where: { id: parseInt(id) },
-//       select: {
-//         id: true,
-//         username: true,
-//         email: true,
-//         role: true,
-//         createdAt: true,
-//       },
-//     });
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-//     if (!user) {
-//       return res.status(404).json({ error: 'User not found' });
-//     }
+    const user = await prisma.user.findUnique({ where: { id: decoded.userId } });
+    if (!user || !user.refreshToken) {
+      return res.status(403).json({ error: 'Access denied. Refresh token missing or invalid.' });
+    }
 
-//     res.json(user);
-//   } catch (err) {
-//     res.status(500).json({ error: 'Internal server error' });
-//   }
-// };
+    res.json({ message: 'Token is valid', data: { userId: decoded.userId, role: decoded.role } });
+  } catch (err) {
+    const message = err.name === 'TokenExpiredError' ? 'Token expired' : 'Invalid token';
+    res.status(403).json({ error: message });
+  }
+};

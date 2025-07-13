@@ -23,8 +23,6 @@ router.post('/refresh-token', authController.refreshToken); // Refreshes tokens 
 router.post('/logout', authController.logout); // Handles secure logout
 // Get user by ID → bisa diakses oleh user itu sendiri atau admin
 router.get('/user/:id', authenticate, authController.getUserById); // Ensures only authenticated users can access user details
-
-module.exports = router;
-router.get('/user/:id', authenticate, authController.getUserById);
+router.get('/validate-token', authController.validateToken); // Validates accessToken
 
 module.exports = router;
