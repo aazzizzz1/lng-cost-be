@@ -52,8 +52,8 @@ model ConstructionCost {
   infrastruktur         String
   volume                Float
   satuanVolume          String
-  kapasitasRegasifikasi Float
-  satuanKapasitas       String
+  kapasitasRegasifikasi Float?   // Make this field optional
+  satuanKapasitas       String?  // Make this field optional
   kelompok              String
   kelompokDetail        String
   lokasi                String

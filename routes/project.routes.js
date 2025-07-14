@@ -5,7 +5,7 @@ const { authenticate } = require('../middlewares/auth.middleware'); // Authentic
 
 // Only authenticated users can see projects
 router.get('/', authenticate, controller.getAllProjects); // Ensures only authenticated users can access
-router.get('/:id', authenticate, controller.getProjectById); // Prevents unauthorized access to project details
+router.get('/:id', controller.getProjectById); // Prevents unauthorized access to project details
 router.post('/', authenticate, controller.createProject); // Ensures only authenticated users can create projects
 
 // Only admin can create project

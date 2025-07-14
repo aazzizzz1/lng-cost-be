@@ -7,6 +7,55 @@ const cleanNumber = (val) => {
   return parseFloat(String(val).replace(/[^0-9.-]/g, '')) || 0; // Input sanitization
 };
 
+const syncUnitPriceToConstruction = async (unitPrices) => {
+  for (const unitPrice of unitPrices) {
+    const { proyek, volume, tipe, infrastruktur, satuanVolume } = unitPrice;
+
+    let project = await prisma.project.findFirst({
+      where: { name: proyek },
+    });
+
+    if (!project) {
+      project = await prisma.project.create({
+        data: {
+          name: proyek,
+          jenis: tipe,
+          lokasi: unitPrice.lokasi,
+          tahun: unitPrice.tahun,
+          kategori: 'Auto-generated',
+          levelAACE: 1,
+          harga: 0,
+        },
+      });
+    }
+
+    await prisma.constructionCost.create({
+      data: {
+        uraian: unitPrice.uraian,
+        specification: unitPrice.specification,
+        qty: unitPrice.qty,
+        satuan: unitPrice.satuan,
+        hargaSatuan: unitPrice.hargaSatuan,
+        totalHarga: unitPrice.totalHarga,
+        aaceClass: unitPrice.aaceClass,
+        accuracyLow: unitPrice.accuracyLow,
+        accuracyHigh: unitPrice.accuracyHigh,
+        tahun: unitPrice.tahun,
+        infrastruktur: infrastruktur,
+        volume: volume,
+        satuanVolume: satuanVolume,
+        kelompok: unitPrice.kelompok,
+        kelompokDetail: unitPrice.kelompokDetail,
+        lokasi: unitPrice.lokasi,
+        tipe: tipe,
+        projectId: project.id, // Correctly pass the projectId
+        kapasitasRegasifikasi: unitPrice.kapasitasRegasifikasi || null,
+        satuanKapasitas: unitPrice.satuanKapasitas || null,
+      },
+    });
+  }
+};
+
 exports.uploadExcel = async (req, res) => {
   try {
     const buffer = req.file?.buffer;
@@ -74,6 +123,8 @@ exports.uploadExcel = async (req, res) => {
         data: unitPrices,
         skipDuplicates: true, // Prevent duplicate entries
       });
+
+      await syncUnitPriceToConstruction(unitPrices); // Auto-map UnitPrice to ConstructionCost
     }
 
     res.status(200).json({

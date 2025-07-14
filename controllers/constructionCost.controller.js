@@ -2,7 +2,33 @@ const prisma = require('../config/db');
 
 exports.createConstructionCost = async (req, res) => {
   try {
-    const cost = await prisma.constructionCost.create({ data: req.body }); // Ensure req.body is sanitized
+    const { projectName, ...constructionData } = req.body;
+
+    let project = await prisma.project.findFirst({
+      where: { name: projectName },
+    });
+
+    if (!project) {
+      project = await prisma.project.create({
+        data: {
+          name: projectName,
+          jenis: constructionData.tipe || 'Unknown',
+          lokasi: constructionData.lokasi || 'Unknown',
+          tahun: constructionData.tahun || new Date().getFullYear(),
+          kategori: 'Auto-generated',
+          levelAACE: 1,
+          harga: 0, // Placeholder value
+        },
+      });
+    }
+
+    const cost = await prisma.constructionCost.create({
+      data: {
+        ...constructionData,
+        projectId: project.id, // Associate with the newly created or existing project
+      },
+    });
+
     res.status(201).json({
       message: 'Construction cost created successfully.',
       data: cost,
