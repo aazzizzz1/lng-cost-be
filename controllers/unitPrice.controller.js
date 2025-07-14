@@ -75,28 +75,23 @@ exports.deleteAllUnitPrices = async (req, res) => {
 
 exports.getUniqueFields = async (req, res) => {
   try {
-    const uniqueTipe = await prisma.unitPrice.findMany({
-      select: { tipe: true },
-      distinct: ['tipe'],
+    const unitPrices = await prisma.unitPrice.findMany({
+      select: { tipe: true, infrastruktur: true, kelompok: true },
     });
 
-    const uniqueInfrastruktur = await prisma.unitPrice.findMany({
-      select: { infrastruktur: true },
-      distinct: ['infrastruktur'],
-    });
-
-    const uniqueKelompok = await prisma.unitPrice.findMany({
-      select: { kelompok: true },
-      distinct: ['kelompok'],
-    });
+    const groupedData = unitPrices.reduce((acc, item) => {
+      const { tipe, infrastruktur, kelompok } = item;
+      if (!acc[tipe]) acc[tipe] = {};
+      if (!acc[tipe][infrastruktur]) acc[tipe][infrastruktur] = [];
+      if (!acc[tipe][infrastruktur].includes(kelompok)) {
+        acc[tipe][infrastruktur].push(kelompok);
+      }
+      return acc;
+    }, {});
 
     res.json({
-      message: 'Unique fields retrieved successfully.',
-      data: {
-        tipe: uniqueTipe.map((item) => item.tipe),
-        infrastruktur: uniqueInfrastruktur.map((item) => item.infrastruktur),
-        kelompok: uniqueKelompok.map((item) => item.kelompok),
-      },
+      message: 'Unique fields grouped successfully.',
+      data: groupedData,
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch unique fields', data: null });
