@@ -14,7 +14,7 @@ const uploadRoutes = require('./routes/upload.routes');
 const cciRoutes = require('./routes/cci.routes'); // Import CCI routes
 
 const app = express();
-app.use(express.json({ limit: '10kb' })); // Limit payload size to prevent abuse
+app.use(express.json({ limit: '50mb' })); // Increase payload size limit to 50MB
 app.use(helmet());
 app.use(cors());
 app.use(morgan('dev'));
