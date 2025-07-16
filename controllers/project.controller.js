@@ -66,11 +66,32 @@ exports.getProjectById = async (req, res) => {
       where: { id: parseInt(id) }, // Prevent SQL injection by using parameterized queries
       include: { constructionCosts: true },
     });
-    if (!project)
+
+    if (!project) {
       return res.status(404).json({ message: 'Project not found', data: null });
+    }
+
+    // Calculate total construction cost
+    const totalConstructionCost = project.constructionCosts.reduce((sum, cost) => sum + cost.totalHarga, 0);
+
+    // Define PPN and insurance rates
+    const ppnRate = 0.11; // 11% PPN
+    const insuranceRate = 0.025; // 2.5% insurance
+
+    // Calculate PPN, insurance, and total estimation
+    const ppn = totalConstructionCost * ppnRate;
+    const insurance = totalConstructionCost * insuranceRate;
+    const totalEstimation = totalConstructionCost + ppn + insurance;
+
     res.json({
       message: 'Object retrieved successfully.',
-      data: project,
+      data: {
+        ...project,
+        totalConstructionCost,
+        ppn,
+        insurance,
+        totalEstimation,
+      },
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch project', data: null });
@@ -248,5 +269,45 @@ exports.deleteProject = async (req, res) => {
     });
   } catch (error) {
     res.status(400).json({ message: 'Failed to delete project', error: error.message });
+  }
+};
+
+exports.calculateProjectEstimation = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Fetch the project and its associated construction costs
+    const project = await prisma.project.findUnique({
+      where: { id: parseInt(id) },
+      include: { constructionCosts: true },
+    });
+
+    if (!project) {
+      return res.status(404).json({ message: 'Project not found' });
+    }
+
+    // Calculate total construction cost
+    const totalConstructionCost = project.constructionCosts.reduce((sum, cost) => sum + cost.totalHarga, 0);
+
+    // Define PPN and insurance rates
+    const ppnRate = 0.11; // 11% PPN
+    const insuranceRate = 0.025; // 2.5% insurance
+
+    // Calculate PPN, insurance, and total estimation
+    const ppn = totalConstructionCost * ppnRate;
+    const insurance = totalConstructionCost * insuranceRate;
+    const totalEstimation = totalConstructionCost + ppn + insurance;
+
+    res.status(200).json({
+      message: 'Project estimation calculated successfully.',
+      data: {
+        totalConstructionCost,
+        ppn,
+        insurance,
+        totalEstimation,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to calculate project estimation', error: error.message });
   }
 };

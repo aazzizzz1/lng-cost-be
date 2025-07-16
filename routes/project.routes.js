@@ -10,6 +10,7 @@ router.post('/', controller.createProject); // Ensures only authenticated users 
 router.post('/recommend', controller.recommendConstructionCostsAndCreateProject); // Endpoint for recommending costs and creating project
 router.post('/recommend-and-save', authenticate, controller.recommendAndSaveProject); // Endpoint for recommending, saving costs, and creating project
 router.delete('/:id', authenticate, controller.deleteProject); // Add route for deleting a project
+router.get('/:id/estimation', authenticate, controller.calculateProjectEstimation); // Add route for project estimation
 
 // Only admin can create project
 // router.post('/', authenticate, authorizeRoles('admin'), controller.createProject);
