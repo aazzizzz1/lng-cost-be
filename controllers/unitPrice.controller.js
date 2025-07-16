@@ -17,7 +17,7 @@ exports.getAllUnitPrices = async (req, res) => {
     const { page = 1, limit = 10, sort, order, search, tipe, infrastruktur, kelompok } = req.query;
 
     const filters = {};
-    if (tipe) filters.tipe = { equals: tipe.toLowerCase(), mode: 'insensitive' };
+    if (tipe) filters.tipe = { equals: tipe.toLowerCase(), mode: 'insensitive' }; // Ensure case-insensitive matching
     if (infrastruktur) filters.infrastruktur = { equals: infrastruktur.toLowerCase(), mode: 'insensitive' };
     if (kelompok) filters.kelompok = { equals: kelompok.toLowerCase(), mode: 'insensitive' };
     if (search) {

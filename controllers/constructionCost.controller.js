@@ -51,3 +51,15 @@ exports.getAllConstructionCosts = async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch construction costs', data: null });
   }
 };
+
+exports.bulkCreateConstructionCosts = async (costs, projectId) => {
+  try {
+    const formattedCosts = costs.map((cost) => ({
+      ...cost,
+      projectId, // Associate with the project
+    }));
+    await prisma.constructionCost.createMany({ data: formattedCosts });
+  } catch (error) {
+    throw new Error('Failed to create construction costs.');
+  }
+};

@@ -26,13 +26,14 @@ model User {
 model Project {
   id         Int      @id @default(autoincrement())
   name       String
-  jenis      String
+  infrastruktur String? // Make the column optional
   kategori   String
   lokasi     String
   tahun      Int
   levelAACE  Int
   harga      Float
   satuan     String?
+  volume     Float?    // New field for project volume
 
   constructionCosts ConstructionCost[]
 }
@@ -86,6 +87,12 @@ model UnitPrice {
   proyek                String
   lokasi                String
   tipe                  String
-  kategori              String
   createdAt             DateTime @default(now())
+}
+
+model cci {
+  id           Int     @id @default(autoincrement())
+  kodeProvinsi Int
+  provinsi     String
+  cci          Float
 }
