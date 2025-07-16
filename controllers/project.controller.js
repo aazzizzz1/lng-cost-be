@@ -233,3 +233,20 @@ exports.recommendAndSaveProject = async (req, res) => {
     res.status(500).json({ message: 'Failed to save project and construction costs', error: error.message });
   }
 };
+
+exports.deleteProject = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Delete the project by ID
+    await prisma.project.delete({
+      where: { id: parseInt(id) },
+    });
+
+    res.status(200).json({
+      message: 'Project and associated construction costs deleted successfully.',
+    });
+  } catch (error) {
+    res.status(400).json({ message: 'Failed to delete project', error: error.message });
+  }
+};
