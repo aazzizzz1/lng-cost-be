@@ -114,7 +114,6 @@ exports.uploadExcel = async (req, res) => {
         proyek: row['project'] || '',
         lokasi: row['location'] || '',
         tipe: row['type'] || '',
-        kategori: 'Material Konstruksi',
       });
     });
 
