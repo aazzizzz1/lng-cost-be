@@ -2,14 +2,14 @@ const prisma = require('../config/db');
 
 exports.createProject = async (req, res) => {
   try {
-    const { constructionCosts, lokasi, infrastruktur, kategori, tahun, levelAACE, harga, name, volume } = req.body;
+    const { constructionCosts, lokasi, infrastruktur, kategori, tahun, name, volume } = req.body;
 
     // Validate required fields
-    if (!name || !infrastruktur || !lokasi || !kategori || !tahun || !levelAACE || !harga) {
+    if (!name || !infrastruktur || !lokasi || !kategori || !tahun) {
       return res.status(400).json({ message: 'Missing required fields.' });
     }
 
-    // Create the project
+    // Create the project with placeholder values for levelAACE and harga
     const project = await prisma.project.create({
       data: {
         name,
@@ -17,9 +17,9 @@ exports.createProject = async (req, res) => {
         lokasi,
         kategori,
         tahun,
-        levelAACE,
-        harga,
         volume,
+        levelAACE: 0, // Placeholder value
+        harga: 0, // Placeholder value
       },
     });
 
@@ -30,6 +30,20 @@ exports.createProject = async (req, res) => {
           ...cost,
           projectId: project.id, // Ensure projectId is included
         })),
+      });
+
+      // Calculate total harga and average levelAACE
+      const totalHarga = constructionCosts.reduce((sum, cost) => sum + cost.totalHarga, 0);
+      const averageLevelAACE =
+        constructionCosts.reduce((sum, cost) => sum + cost.aaceClass, 0) / constructionCosts.length;
+
+      // Update the project with calculated values
+      await prisma.project.update({
+        where: { id: project.id },
+        data: {
+          harga: Math.round(totalHarga),
+          levelAACE: Math.round(averageLevelAACE),
+        },
       });
     } else {
       return res.status(400).json({
@@ -74,6 +88,10 @@ exports.getProjectById = async (req, res) => {
     // Calculate total construction cost
     const totalConstructionCost = project.constructionCosts.reduce((sum, cost) => sum + cost.totalHarga, 0);
 
+    // Calculate average AACE level
+    const totalAACE = project.constructionCosts.reduce((sum, cost) => sum + cost.aaceClass, 0);
+    const averageAACE = project.constructionCosts.length > 0 ? totalAACE / project.constructionCosts.length : 0;
+
     // Define PPN and insurance rates
     const ppnRate = 0.11; // 11% PPN
     const insuranceRate = 0.025; // 2.5% insurance
@@ -88,6 +106,7 @@ exports.getProjectById = async (req, res) => {
       data: {
         ...project,
         totalConstructionCost,
+        averageAACE: Math.round(averageAACE),
         ppn,
         insurance,
         totalEstimation,

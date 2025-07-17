@@ -30,8 +30,8 @@ model Project {
   kategori   String
   lokasi     String
   tahun      Int
-  levelAACE  Int
-  harga      Float
+  levelAACE  Int      @default(0) // Auto-calculated based on construction costs
+  harga      Float    @default(0) // Auto-calculated based on construction costs
   satuan     String?
   volume     Float?    // New field for project volume
 
