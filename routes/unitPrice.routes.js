@@ -9,6 +9,9 @@ router.post('/', authenticate, controller.createUnitPrice); // Ensures only auth
 router.delete('/', authenticate, authorizeRoles('admin'), controller.deleteAllUnitPrices); // Ensures only authenticated admin users can delete all unit prices
 router.get('/unique-fields', controller.getUniqueFields); // Fetch unique values for tipe, infrastruktur, and kelompok
 
+// Route to recommend unit prices
+router.post('/recommend', controller.recommendUnitPrices);
+
 // Only admin can create unit price
 // router.post('/', authenticate, authorizeRoles('admin'), controller.createUnitPrice);
 

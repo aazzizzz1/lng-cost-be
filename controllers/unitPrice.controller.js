@@ -97,3 +97,97 @@ exports.getUniqueFields = async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch unique fields', data: null });
   }
 };
+
+exports.recommendUnitPrices = async (req, res) => {
+  try {
+    const { name, infrastruktur, lokasi, volume, tahun, inflasi } = req.body;
+
+    // Step 1: Query UnitPrice for matching items
+    const unitPrices = await prisma.unitPrice.findMany({
+      where: {
+        infrastruktur: { equals: infrastruktur.toLowerCase(), mode: 'insensitive' },
+        volume: { lte: volume },
+      },
+      orderBy: { volume: 'desc' },
+    });
+
+    if (unitPrices.length === 0) {
+      return res.status(400).json({ message: 'No matching UnitPrice items found for recommendation.' });
+    }
+
+    // Step 2: Fetch CCI for a province with a value within ±100 dynamically
+    const cciReference = await prisma.cci.findFirst({
+      where: {
+        cci: { gte: 99, lte: 101 }, // Fetch CCI within ±100 range
+      },
+    });
+
+    if (!cciReference) {
+      return res.status(400).json({ message: 'CCI reference data not found.' });
+    }
+
+    // Step 3: Fetch CCI for the project location
+    const projectCCI = await prisma.cci.findFirst({
+      where: { provinsi: { equals: lokasi, mode: 'insensitive' } },
+    });
+
+    if (!projectCCI) {
+      return res.status(400).json({ message: 'CCI data not found for the specified location.' });
+    }
+
+    const calculateQuantityUsingCapacityFactor = (baseQty, baseVolume, targetVolume) => {
+      const factor = 0.73; // Capacity factor exponent
+      return baseQty * Math.pow(targetVolume / baseVolume, factor);
+    };
+
+    const recommendedCosts = await Promise.all(
+      unitPrices.map(async (item) => {
+        const hargaSatuanItem = item.hargaSatuan || item.harga || 0; // Base price of the unit price item
+
+        // Step 4: Adjust price based on inflation
+        const n = Number(tahun) - Number(item.tahun || tahun); // Difference in years
+        const r = Number(inflasi) / 100; // Inflation rate as a decimal
+        let hargaTahunProject = hargaSatuanItem;
+        if (n > 0) {
+          hargaTahunProject = hargaSatuanItem * Math.pow(1 + r, n); // Adjust price for inflation
+        }
+
+        // Step 5: Convert price to reference CCI
+        const cciItem = await prisma.cci.findFirst({
+          where: { provinsi: { equals: item.lokasi || lokasi, mode: 'insensitive' } },
+        });
+        const cciItemValue = cciItem ? cciItem.cci : 100;
+        let hargaReferenceCCI = hargaTahunProject * (cciReference.cci / cciItemValue);
+
+        // Step 6: Convert price to project location CCI
+        let hargaLokasiProject = hargaReferenceCCI * (projectCCI.cci / cciReference.cci);
+
+        // Step 7: Adjust quantity using capacity factor
+        const adjustedQty = calculateQuantityUsingCapacityFactor(
+          item.qty || 1,
+          item.volume || 1,
+          volume || 1
+        );
+
+        return {
+          ...item,
+          tahun: tahun, // Update the item's year to match the project's year
+          proyek: name, // Update the item's project name to match the project's name
+          lokasi: lokasi, // Update the item's location to match the project's location
+          qty: Math.round(adjustedQty),
+          hargaSatuan: Math.round(hargaLokasiProject),
+          totalHarga: Math.round(adjustedQty * hargaLokasiProject),
+          volume: volume, // Adjust volume to match project volume
+        };
+      })
+    );
+
+    // Step 8: Send recommendations to frontend
+    res.status(200).json({
+      message: 'Recommended unit prices retrieved successfully.',
+      data: recommendedCosts,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to recommend unit prices', error: error.message });
+  }
+};
