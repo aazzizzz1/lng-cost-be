@@ -12,11 +12,16 @@ const syncUnitPriceToConstruction = async (unitPrices) => {
     const { proyek, volume, tipe, infrastruktur, satuanVolume } = unitPrice;
 
     let project = await prisma.project.findFirst({
-      where: { name: proyek },
+      where: {
+        name: proyek,
+        volume: volume, // Ensure the project is differentiated by volume
+      },
     });
 
     if (!project) {
-      const unitPricesForProject = unitPrices.filter((price) => price.proyek === proyek);
+      const unitPricesForProject = unitPrices.filter(
+        (price) => price.proyek === proyek && price.volume === volume // Filter by name and volume
+      );
 
       const totalHarga = unitPricesForProject.reduce((sum, price) => sum + price.totalHarga, 0);
       const averageLevelAACE =
@@ -31,6 +36,8 @@ const syncUnitPriceToConstruction = async (unitPrices) => {
           kategori: 'Auto-generated',
           levelAACE: Math.round(averageLevelAACE) || 1, // Calculate average AACE level
           harga: Math.round(totalHarga) || 0, // Calculate total harga
+          satuan: unitPrice.satuan || '',
+          volume: volume || 1, // Default to 1 if volume is not provided
         },
       });
     }
@@ -48,7 +55,7 @@ const syncUnitPriceToConstruction = async (unitPrices) => {
         accuracyHigh: unitPrice.accuracyHigh,
         tahun: unitPrice.tahun,
         infrastruktur: infrastruktur || tipe, // Ensure infrastruktur is populated
-        volume: volume,
+        volume: volume, // Include volume in construction cost
         satuanVolume: satuanVolume,
         kelompok: unitPrice.kelompok,
         kelompokDetail: unitPrice.kelompokDetail,
