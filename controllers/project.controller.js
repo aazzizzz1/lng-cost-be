@@ -20,6 +20,7 @@ exports.createProject = async (req, res) => {
         volume,
         levelAACE: 0, // Placeholder value
         harga: 0, // Placeholder value
+        createdAt: new Date(), // Add current date and time
       },
     });
 

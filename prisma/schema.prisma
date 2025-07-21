@@ -34,6 +34,7 @@ model Project {
   harga      Float    @default(0) // Auto-calculated based on construction costs
   satuan     String?
   volume     Float?    // New field for project volume
+  createdAt  DateTime @default(now()) // Add createdAt field
 
   constructionCosts ConstructionCost[]
 }

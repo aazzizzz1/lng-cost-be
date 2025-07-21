@@ -90,7 +90,7 @@ exports.uploadExcel = async (req, res) => {
       return normalizedRow;
     });
 
-    const requiredColumns = ['item', 'specification', 'qty', 'cost'];
+    const requiredColumns = ['item', 'qty', 'cost'];
     const missingColumns = requiredColumns.filter(col => !headers.includes(col));
     if (missingColumns.length) {
       return res.status(400).json({ error: `Missing required columns: ${missingColumns.join(', ')}` });
