@@ -6,7 +6,7 @@ const { authenticate } = require('../middlewares/auth.middleware');
 
 const limiter = (max) =>
   rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
+    windowMs: 30 * 60 * 1000, // 30 minutes
     max,
     message: { error: 'Too many requests, please try again later' },
   });
