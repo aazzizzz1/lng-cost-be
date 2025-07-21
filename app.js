@@ -51,6 +51,15 @@ app.use(cors(corsOptions)); // CORS configuration: prevents unauthorized cross-o
 app.use(cookieParser()); // Middleware for parsing cookies (can be used for secure session management)
 app.disable('x-powered-by'); // Disable X-Powered-By header to prevent information leakage
 
+// Middleware to handle caching globally
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  res.set('Surrogate-Control', 'no-store');
+  next();
+});
+
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/projects', projectRoutes);

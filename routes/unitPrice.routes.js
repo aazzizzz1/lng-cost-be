@@ -14,6 +14,7 @@ router.post('/recommend', controller.recommendUnitPrices);
 
 // Only admin can create unit price
 // router.post('/', authenticate, authorizeRoles('admin'), controller.createUnitPrice);
-//  authenticate, authorizeRoles('admin'), 
+//  authenticate, authorizeRoles('admin'),
 
-module.exports = router;
+module.exports = router; // Ensure the router is exported correctly
+

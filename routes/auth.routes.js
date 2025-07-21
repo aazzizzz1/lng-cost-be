@@ -1,24 +1,27 @@
 const express = require('express');
-const rateLimit = require('express-rate-limit'); // Rate limiting middleware
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const authController = require('../controllers/auth.controller');
-const validateRegister = require('../middlewares/validateRegister'); // Input validation middleware
-const { authenticate, isAdmin } = require('../middlewares/auth.middleware'); // Authentication and role-based access control
+const { authenticate } = require('../middlewares/auth.middleware');
 
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // Limit each IP to 10 login attempts per windowMs
-  message: { error: 'Too many login attempts, please try again later' },
-});
+const limiter = (max) =>
+  rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max,
+    message: { error: 'Too many requests, please try again later' },
+  });
 
-const registerLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // Limit each IP to 5 register attempts per windowMs
-  message: { error: 'Too many registration attempts, please try again later' },
-});
+router.post('/register', limiter(5), authController.register);
+router.post('/login', limiter(10), authController.login);
+router.post('/refresh-token', authController.refreshToken);
+router.post('/logout', authController.logout);
+router.get('/user/:id', authenticate, authController.getUserById);
+router.get('/validate-token', authenticate, (req, res, next) => {
+  res.set('Cache-Control', 'no-store'); // Prevent caching of token validation responses
+  next();
+}, authController.validateToken);
 
-router.post('/register', registerLimiter, validateRegister, authController.register); // Apply rate limiting to register
-router.post('/login', loginLimiter, authController.login); // Apply rate limiting to login
+module.exports = router;
 router.post('/refresh-token', authController.refreshToken); // Refreshes tokens securely
 router.post('/logout', authController.logout); // Handles secure logout
 // Get user by ID → bisa diakses oleh user itu sendiri atau admin

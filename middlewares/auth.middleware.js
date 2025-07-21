@@ -2,35 +2,43 @@ const jwt = require('jsonwebtoken');
 
 // === General Authentication Middleware ===
 exports.authenticate = (req, res, next) => {
-  const authHeader = req.headers.authorization;
+  const token =
+    req.headers.authorization?.startsWith('Bearer ')
+      ? req.headers.authorization.split(' ')[1]
+      : req.cookies?.accessToken;
 
-  if (!authHeader) {
-    return res.status(401).json({ error: 'Authorization header missing' }); // Prevents unauthorized access
-  }
-
-  if (!authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Invalid token format. Use Bearer <token>' }); // Validates token format
-  }
-
-  const token = authHeader.split(' ')[1];
   if (!token) {
-    return res.status(401).json({ error: 'Token not found after Bearer' });
+    console.error('Token not found');
+    return res.status(401).json({ error: 'Token not found. Please log in.' });
   }
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-    if (err) {
-      const message = err.name === 'TokenExpiredError'
-        ? 'Token expired'
-        : 'Invalid token';
-      return res.status(403).json({ error: message }); // Verifies token integrity
-    }
-
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded; // { userId, role, ... }
     next();
-  });
+  } catch (err) {
+    console.error('Token verification failed:', err);
+    const message = err.name === 'TokenExpiredError' ? 'Token expired' : 'Invalid token';
+    return res.status(403).json({ error: message });
+  }
 };
 
 // === Role-based Middleware ===
+exports.authorizeRoles = (...allowedRoles) => (req, res, next) => {
+  if (!req.user || !allowedRoles.includes(req.user.role)) {
+    return res.status(403).json({ error: 'Access denied. Insufficient permissions.' });
+  }
+  next();
+};
+
+// === Admin Only Shortcut ===
+exports.isAdmin = (req, res, next) => {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin only access' }); // Restricts access to admin users
+  }
+  next();
+};
+
 exports.authorizeRoles = (...allowedRoles) => {
   return (req, res, next) => {
     if (!req.user || !allowedRoles.includes(req.user.role)) {
