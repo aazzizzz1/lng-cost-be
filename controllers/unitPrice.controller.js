@@ -81,11 +81,16 @@ exports.getUniqueFields = async (req, res) => {
 
     const groupedData = unitPrices.reduce((acc, item) => {
       const { tipe, infrastruktur, kelompok } = item;
+
+      // Exclude entries with missing tipe or infrastruktur
+      if (!tipe || !infrastruktur) return acc;
+
       if (!acc[tipe]) acc[tipe] = {};
       if (!acc[tipe][infrastruktur]) acc[tipe][infrastruktur] = [];
       if (!acc[tipe][infrastruktur].includes(kelompok)) {
         acc[tipe][infrastruktur].push(kelompok);
       }
+
       return acc;
     }, {});
 
