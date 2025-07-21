@@ -12,7 +12,7 @@ exports.createConstructionCost = async (req, res) => {
       project = await prisma.project.create({
         data: {
           name: projectName,
-          jenis: constructionData.tipe || 'Unknown',
+          infrastruktur: constructionData.tipe || 'Unknown', // Replace jenis with infrastruktur
           lokasi: constructionData.lokasi || 'Unknown',
           tahun: constructionData.tahun || new Date().getFullYear(),
           kategori: 'Auto-generated',

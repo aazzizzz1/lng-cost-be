@@ -174,9 +174,9 @@ exports.recommendUnitPrices = async (req, res) => {
           tahun: tahun, // Update the item's year to match the project's year
           proyek: name, // Update the item's project name to match the project's name
           lokasi: lokasi, // Update the item's location to match the project's location
-          qty: Math.round(adjustedQty),
+          qty: Math.ceil(adjustedQty), // Use Math.ceil to round up to the nearest whole number
           hargaSatuan: Math.round(hargaLokasiProject),
-          totalHarga: Math.round(adjustedQty * hargaLokasiProject),
+          totalHarga: Math.round(Math.ceil(adjustedQty) * hargaLokasiProject), // Ensure consistency with rounded qty
           volume: volume, // Adjust volume to match project volume
         };
       })

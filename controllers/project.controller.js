@@ -13,7 +13,7 @@ exports.createProject = async (req, res) => {
     const project = await prisma.project.create({
       data: {
         name,
-        infrastruktur,
+        infrastruktur, // Replace jenis with infrastruktur
         lokasi,
         kategori,
         tahun,
@@ -213,12 +213,12 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
 
 exports.recommendAndSaveProject = async (req, res) => {
   try {
-    const { name, jenis, lokasi, volume, tahun, kategori, inflasi } = req.body;
+    const { name, infrastruktur, lokasi, volume, tahun, kategori, inflasi } = req.body;
 
     // Step 1: Query UnitPrice for matching items
     const unitPrices = await prisma.unitPrice.findMany({
       where: {
-        tipe: { equals: jenis.toLowerCase(), mode: 'insensitive' },
+        infrastruktur: { equals: infrastruktur.toLowerCase(), mode: 'insensitive' }, // Replace tipe with infrastruktur
         volume: { lte: volume },
       },
       orderBy: { volume: 'desc' },
@@ -271,7 +271,7 @@ exports.recommendAndSaveProject = async (req, res) => {
     const project = await prisma.project.create({
       data: {
         name,
-        jenis,
+        infrastruktur, // Replace jenis with infrastruktur
         lokasi,
         tahun,
         kategori,
