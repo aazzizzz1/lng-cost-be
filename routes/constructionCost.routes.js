@@ -11,3 +11,6 @@ router.post('/', controller.createConstructionCost); // Ensures only authenticat
 // router.post('/', authenticate, authorizeRoles('admin'), controller.createConstructionCost);
 
 module.exports = router;
+router.get('/unique-infrastruktur', controller.getUniqueInfrastruktur);
+
+module.exports = router;

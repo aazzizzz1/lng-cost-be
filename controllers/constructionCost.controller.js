@@ -63,3 +63,39 @@ exports.bulkCreateConstructionCosts = async (costs, projectId) => {
     throw new Error('Failed to create construction costs.');
   }
 };
+
+exports.getUniqueInfrastruktur = async (req, res) => {
+  try {
+    const groupedData = await prisma.constructionCost.findMany({
+      select: {
+        tipe: true,
+        infrastruktur: true,
+        volume: true,
+      },
+    });
+
+    const result = groupedData.reduce((acc, item) => {
+      if (!acc[item.tipe]) {
+        acc[item.tipe] = {};
+      }
+
+      if (!acc[item.tipe][item.infrastruktur]) {
+        acc[item.tipe][item.infrastruktur] = [];
+      }
+
+      // Add volume only if it doesn't already exist in the array
+      if (!acc[item.tipe][item.infrastruktur].some((v) => v.volume === item.volume)) {
+        acc[item.tipe][item.infrastruktur].push({ volume: item.volume });
+      }
+
+      return acc;
+    }, {});
+
+    res.status(200).json({
+      message: 'Grouped values retrieved successfully.',
+      data: result,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch grouped values', data: null });
+  }
+};
