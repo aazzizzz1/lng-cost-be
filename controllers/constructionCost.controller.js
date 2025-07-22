@@ -99,3 +99,24 @@ exports.getUniqueInfrastruktur = async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch grouped values', data: null });
   }
 };
+
+exports.getFilteredConstructionCosts = async (req, res) => {
+  try {
+    const { tipe, infrastruktur } = req.query; // Extract filters from query parameters
+
+    const filteredCosts = await prisma.constructionCost.findMany({
+      where: {
+        tipe: tipe || undefined, // Apply filter if provided
+        infrastruktur: infrastruktur || undefined, // Apply filter if provided
+      },
+      include: { project: true }, // Include related project data
+    });
+
+    res.status(200).json({
+      message: 'Filtered construction costs retrieved successfully.',
+      data: filteredCosts,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch filtered construction costs', data: null });
+  }
+};

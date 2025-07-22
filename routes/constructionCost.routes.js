@@ -10,6 +10,9 @@ router.post('/', controller.createConstructionCost); // Ensures only authenticat
 // Only admin can create construction cost
 // router.post('/', authenticate, authorizeRoles('admin'), controller.createConstructionCost);
 
+// Route to fetch construction costs based on filters
+router.get('/filter', controller.getFilteredConstructionCosts);
+
 module.exports = router;
 router.get('/unique-infrastruktur', controller.getUniqueInfrastruktur);
 
