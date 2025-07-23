@@ -79,20 +79,37 @@ exports.getUniqueFields = async (req, res) => {
       select: { tipe: true, infrastruktur: true, kelompok: true },
     });
 
-    const groupedData = unitPrices.reduce((acc, item) => {
-      const { tipe, infrastruktur, kelompok } = item;
+    // Helper function to normalize strings (trim, lowercase)
+    const normalize = (str) => {
+      if (!str) return '';
+      return str.trim().toLowerCase();
+    };
 
-      // Exclude entries with missing tipe or infrastruktur
-      if (!tipe || !infrastruktur) return acc;
+    const groupedData = unitPrices.reduce((acc, item) => {
+      const tipe = item.tipe?.trim();
+      const infrastruktur = item.infrastruktur?.trim();
+      const kelompok = item.kelompok?.trim();
+
+      // Exclude entries with missing tipe, infrastruktur, or kelompok
+      if (!tipe || !infrastruktur || !kelompok) return acc;
 
       if (!acc[tipe]) acc[tipe] = {};
       if (!acc[tipe][infrastruktur]) acc[tipe][infrastruktur] = [];
-      if (!acc[tipe][infrastruktur].includes(kelompok)) {
+      
+      // Only add kelompok if it's not empty and not already included
+      if (kelompok && !acc[tipe][infrastruktur].includes(kelompok)) {
         acc[tipe][infrastruktur].push(kelompok);
       }
 
       return acc;
     }, {});
+
+    // Sort kelompok arrays in ascending order
+    Object.keys(groupedData).forEach((tipe) => {
+      Object.keys(groupedData[tipe]).forEach((infrastruktur) => {
+        groupedData[tipe][infrastruktur].sort((a, b) => a.localeCompare(b));
+      });
+    });
 
     res.json({
       message: 'Unique fields grouped successfully.',
