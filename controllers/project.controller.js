@@ -122,12 +122,12 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
   try {
     const { name, infrastruktur, lokasi, volume, tahun, inflasi } = req.body;
 
-    // Step 1: Query UnitPrice for matching items
+    // Step 1: Query UnitPrice for matching items (read-only)
     const unitPrices = await prisma.unitPrice.findMany({
       where: {
         infrastruktur: { equals: infrastruktur.toLowerCase(), mode: 'insensitive' },
       },
-      orderBy: { volume: 'asc' }, // Order by volume in ascending order
+      orderBy: { volume: 'asc' },
     });
 
     // Step 2: Find the closest volume
@@ -148,7 +148,7 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
     // Step 4: Fetch CCI for a province with a value within ±100 dynamically
     const cciReference = await prisma.cci.findFirst({
       where: {
-        cci: { gte: 99, lte: 101 }, // Fetch CCI within ±100 range
+        cci: { gte: 99, lte: 101 },
       },
     });
 
@@ -166,20 +166,21 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
     }
 
     const calculateQuantityUsingCapacityFactor = (baseQty, baseVolume, targetVolume) => {
-      const factor = 0.73; // Capacity factor exponent
+      const factor = 0.73;
       return baseQty * Math.pow(targetVolume / baseVolume, factor);
     };
 
+    // Semua perhitungan dilakukan di objek baru, tidak mengubah/mengupdate tabel UnitPrice
     const recommendedCosts = await Promise.all(
       filteredUnitPrices.map(async (item) => {
-        const hargaSatuanItem = item.hargaSatuan || item.harga || 0; // Base price of the unit price item
+        const hargaSatuanItem = item.hargaSatuan || item.harga || 0;
 
         // Step 6: Adjust price based on inflation
-        const n = Number(tahun) - Number(item.tahun || tahun); // Difference in years
-        const r = Number(inflasi) / 100; // Inflation rate as a decimal
+        const n = Number(tahun) - Number(item.tahun || tahun);
+        const r = Number(inflasi) / 100;
         let hargaTahunProject = hargaSatuanItem;
         if (n > 0) {
-          hargaTahunProject = hargaSatuanItem * Math.pow(1 + r, n); // Adjust price for inflation
+          hargaTahunProject = hargaSatuanItem * Math.pow(1 + r, n);
         }
 
         // Step 7: Convert price to reference CCI
@@ -199,115 +200,26 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
           volume || 1
         );
 
+        // Return hasil rekomendasi sebagai objek baru, tidak mengubah tabel UnitPrice
         return {
           ...item,
-          tahun: tahun, // Update the item's year to match the project's year
-          proyek: name, // Update the item's project name to match the project's name
-          lokasi: lokasi, // Update the item's location to match the project's location
-          qty: Math.ceil(adjustedQty), // Use Math.ceil to round up to the nearest whole number
+          tahun: tahun,
+          proyek: name,
+          lokasi: lokasi,
+          qty: Math.floor(adjustedQty), // bulatkan ke bawah
           hargaSatuan: Math.round(hargaLokasiProject),
-          totalHarga: Math.round(Math.ceil(adjustedQty) * hargaLokasiProject), // Ensure consistency with rounded qty
-          volume: volume, // Adjust volume to match project volume
+          totalHarga: Math.round(Math.floor(adjustedQty) * hargaLokasiProject), // konsisten dengan pembulatan qty
+          volume: volume,
         };
       })
     );
 
-    // Step 10: Send recommendations to frontend
     res.status(200).json({
       message: 'Recommended construction costs retrieved successfully.',
       data: recommendedCosts,
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to recommend construction costs', error: error.message });
-  }
-};
-
-exports.recommendAndSaveProject = async (req, res) => {
-  try {
-    const { name, infrastruktur, lokasi, volume, tahun, kategori, inflasi } = req.body;
-
-    // Step 1: Query UnitPrice for matching items
-    const unitPrices = await prisma.unitPrice.findMany({
-      where: {
-        infrastruktur: { equals: infrastruktur.toLowerCase(), mode: 'insensitive' }, // Replace tipe with infrastruktur
-        volume: { lte: volume },
-      },
-      orderBy: { volume: 'desc' },
-    });
-
-    if (unitPrices.length === 0) {
-      return res.status(400).json({ message: 'No matching UnitPrice items found for recommendation.' });
-    }
-
-    // Step 2: Fetch CCI for the project location
-    const projectCCI = await prisma.cci.findFirst({
-      where: { provinsi: { equals: lokasi, mode: 'insensitive' } },
-    });
-
-    if (!projectCCI) {
-      return res.status(400).json({ message: 'CCI data not found for the specified location.' });
-    }
-
-    // Step 3: Adjust prices and quantities based on inflation, CCI, and capacity factor
-    const calculateQuantityUsingCapacityFactor = (baseQty, baseVolume, targetVolume) => {
-      const factor = 0.73;
-      return baseQty * Math.pow(targetVolume / baseVolume, factor);
-    };
-
-    const recommendedCosts = await Promise.all(
-      unitPrices.map(async (item) => {
-        const adjustedQty = calculateQuantityUsingCapacityFactor(item.qty, item.volume, volume);
-        const adjustedPrice = item.hargaSatuan * Math.pow(1 + inflasi / 100, tahun - item.tahun);
-
-        const itemCCI = await prisma.cci.findFirst({
-          where: { provinsi: { equals: item.lokasi, mode: 'insensitive' } },
-        });
-
-        if (!itemCCI) {
-          throw new Error(`CCI data not found for location: ${item.lokasi}`);
-        }
-
-        const cciAdjustedPrice = adjustedPrice * (projectCCI.cci / itemCCI.cci);
-
-        return {
-          ...item,
-          qty: Math.round(adjustedQty),
-          hargaSatuan: Math.round(cciAdjustedPrice),
-          totalHarga: Math.round(adjustedQty * cciAdjustedPrice),
-        };
-      })
-    );
-
-    // Step 4: Create the project
-    const project = await prisma.project.create({
-      data: {
-        name,
-        infrastruktur, // Replace jenis with infrastruktur
-        lokasi,
-        tahun,
-        kategori,
-        volume,
-        harga: recommendedCosts.reduce((sum, cost) => sum + cost.totalHarga, 0),
-        levelAACE: Math.round(
-          recommendedCosts.reduce((sum, cost) => sum + cost.aaceClass, 0) / recommendedCosts.length
-        ),
-      },
-    });
-
-    // Step 5: Save construction costs
-    await prisma.constructionCost.createMany({
-      data: recommendedCosts.map((cost) => ({
-        ...cost,
-        projectId: project.id,
-      })),
-    });
-
-    res.status(201).json({
-      message: 'Project and recommended construction costs saved successfully.',
-      data: { project, recommendedCosts },
-    });
-  } catch (error) {
-    res.status(500).json({ message: 'Failed to save project and construction costs', error: error.message });
   }
 };
 

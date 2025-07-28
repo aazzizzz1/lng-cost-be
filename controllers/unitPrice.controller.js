@@ -124,13 +124,13 @@ exports.recommendUnitPrices = async (req, res) => {
   try {
     const { name, infrastruktur, lokasi, volume, tahun, inflasi } = req.body;
 
-    // Step 1: Query UnitPrice for matching items
+    // Step 1: Query UnitPrice for matching items (read-only)
     const unitPrices = await prisma.unitPrice.findMany({
       where: {
         infrastruktur: { equals: infrastruktur.toLowerCase(), mode: 'insensitive' },
-        volume: { lte: volume }, // Fetch items with volume less than or equal to the target volume
+        volume: { lte: volume },
       },
-      orderBy: { volume: 'desc' }, // Order by volume in descending order to get the closest match first
+      orderBy: { volume: 'desc' },
     });
 
     if (unitPrices.length === 0) {
@@ -138,13 +138,13 @@ exports.recommendUnitPrices = async (req, res) => {
     }
 
     // Step 2: Filter items to only include those with the closest matching volume
-    const closestVolume = unitPrices[0].volume; // The first item has the closest volume due to descending order
+    const closestVolume = unitPrices[0].volume;
     const filteredUnitPrices = unitPrices.filter((item) => item.volume === closestVolume);
 
     // Step 3: Fetch CCI for a province with a value within ±100 dynamically
     const cciReference = await prisma.cci.findFirst({
       where: {
-        cci: { gte: 99, lte: 101 }, // Fetch CCI within ±100 range
+        cci: { gte: 99, lte: 101 },
       },
     });
 
@@ -162,20 +162,21 @@ exports.recommendUnitPrices = async (req, res) => {
     }
 
     const calculateQuantityUsingCapacityFactor = (baseQty, baseVolume, targetVolume) => {
-      const factor = 0.73; // Capacity factor exponent
+      const factor = 0.73;
       return baseQty * Math.pow(targetVolume / baseVolume, factor);
     };
 
+    // Semua perhitungan dilakukan di objek baru, tidak mengubah/mengupdate tabel UnitPrice
     const recommendedCosts = await Promise.all(
       filteredUnitPrices.map(async (item) => {
-        const hargaSatuanItem = item.hargaSatuan || item.harga || 0; // Base price of the unit price item
+        const hargaSatuanItem = item.hargaSatuan || item.harga || 0;
 
         // Step 5: Adjust price based on inflation
-        const n = Number(tahun) - Number(item.tahun || tahun); // Difference in years
-        const r = Number(inflasi) / 100; // Inflation rate as a decimal
+        const n = Number(tahun) - Number(item.tahun || tahun);
+        const r = Number(inflasi) / 100;
         let hargaTahunProject = hargaSatuanItem;
         if (n > 0) {
-          hargaTahunProject = hargaSatuanItem * Math.pow(1 + r, n); // Adjust price for inflation
+          hargaTahunProject = hargaSatuanItem * Math.pow(1 + r, n);
         }
 
         // Step 6: Convert price to reference CCI
@@ -195,20 +196,20 @@ exports.recommendUnitPrices = async (req, res) => {
           volume || 1
         );
 
+        // Return hasil rekomendasi sebagai objek baru, tidak mengubah tabel UnitPrice
         return {
           ...item,
-          tahun: tahun, // Update the item's year to match the project's year
-          proyek: name, // Update the item's project name to match the project's name
-          lokasi: lokasi, // Update the item's location to match the project's location
-          qty: Math.ceil(adjustedQty), // Use Math.ceil to round up to the nearest whole number
+          tahun: tahun,
+          proyek: name,
+          lokasi: lokasi,
+          qty: Math.floor(adjustedQty), // bulatkan ke bawah
           hargaSatuan: Math.round(hargaLokasiProject),
-          totalHarga: Math.round(Math.ceil(adjustedQty) * hargaLokasiProject), // Ensure consistency with rounded qty
-          volume: volume, // Adjust volume to match project volume
+          totalHarga: Math.round(Math.floor(adjustedQty) * hargaLokasiProject), // konsisten dengan pembulatan qty
+          volume: volume,
         };
       })
     );
 
-    // Step 9: Send recommendations to frontend
     res.status(200).json({
       message: 'Recommended unit prices retrieved successfully.',
       data: recommendedCosts,
