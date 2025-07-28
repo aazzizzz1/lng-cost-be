@@ -206,9 +206,9 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
           tahun: tahun,
           proyek: name,
           lokasi: lokasi,
-          qty: Math.floor(adjustedQty), // bulatkan ke bawah
+          qty: Math.round(adjustedQty), // tidak dibulatkan
           hargaSatuan: Math.round(hargaLokasiProject),
-          totalHarga: Math.round(Math.floor(adjustedQty) * hargaLokasiProject), // konsisten dengan pembulatan qty
+          totalHarga: Math.round(adjustedQty * hargaLokasiProject), // gunakan nilai asli adjustedQty
           volume: volume,
         };
       })
@@ -227,7 +227,12 @@ exports.deleteProject = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Delete the project by ID
+    // Hapus semua constructionCost yang terkait dengan project
+    await prisma.constructionCost.deleteMany({
+      where: { projectId: parseInt(id) },
+    });
+
+    // Hapus project berdasarkan ID
     await prisma.project.delete({
       where: { id: parseInt(id) },
     });
