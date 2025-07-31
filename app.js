@@ -12,6 +12,7 @@ const unitPriceRoutes = require('./routes/unitPrice.routes');
 const constructionCostRoutes = require('./routes/constructionCost.routes');
 const uploadRoutes = require('./routes/upload.routes');
 const cciRoutes = require('./routes/cci.routes'); // Import CCI routes
+const calculatorRoutes = require('./routes/calculator.routes'); // Import Calculator routes
 
 const app = express();
 app.use(express.json({ limit: '50mb' })); // Increase payload size limit to 50MB
@@ -67,5 +68,6 @@ app.use('/api/unit-prices', unitPriceRoutes);
 app.use('/api/construction-costs', constructionCostRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/cci', cciRoutes); // Add CCI routes
+app.use('/api/calculator', calculatorRoutes); // Add Calculator routes
 
 module.exports = app;

@@ -97,3 +97,17 @@ model cci {
   provinsi     String
   cci          Float
 }
+
+model CalculatorTotalCost {
+  id            Int      @id @default(autoincrement())
+  infrastructure String
+  volume         Float
+  unit           String
+  totalCost      Float
+  year           Int
+  location       String
+  low            Float
+  high           Float
+  information    String
+  createdAt      DateTime @default(now())
+}
