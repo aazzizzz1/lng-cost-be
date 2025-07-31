@@ -12,6 +12,9 @@ router.get('/unique-fields', controller.getUniqueFields); // Fetch unique values
 // Route to recommend unit prices
 router.post('/recommend', controller.recommendUnitPrices);
 
+// Endpoint untuk chart diagram unit price per infrastruktur
+router.get('/chart-data', controller.getUnitPriceChartData);
+
 // Only admin can create unit price
 // router.post('/', authenticate, authorizeRoles('admin'), controller.createUnitPrice);
 //  authenticate, authorizeRoles('admin'),

@@ -218,3 +218,33 @@ exports.recommendUnitPrices = async (req, res) => {
     res.status(500).json({ message: 'Failed to recommend unit prices', error: error.message });
   }
 };
+
+// Endpoint untuk chart diagram: labels = infrastruktur unik, series = jumlah item per infrastruktur
+exports.getUnitPriceChartData = async (req, res) => {
+  try {
+    // Ambil semua unit price, hanya field infrastruktur
+    const unitPrices = await prisma.unitPrice.findMany({
+      select: { infrastruktur: true }
+    });
+
+    // Hitung jumlah item per infrastruktur
+    const countMap = {};
+    unitPrices.forEach(item => {
+      const infra = (item.infrastruktur || '').trim();
+      if (!infra) return;
+      countMap[infra] = (countMap[infra] || 0) + 1;
+    });
+
+    // Urutkan label secara alfabetis
+    const labels = Object.keys(countMap).sort((a, b) => a.localeCompare(b));
+    const series = labels.map(label => countMap[label]);
+
+    res.json({
+      message: 'Chart data retrieved successfully.',
+      labels,
+      series
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch chart data', error: error.message });
+  }
+};
