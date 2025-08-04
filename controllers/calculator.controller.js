@@ -225,15 +225,20 @@ function capacityFactorMethod(data, x) {
 // POST /api/calculator/estimate
 exports.estimateCost = async (req, res) => {
   try {
-    const { infrastructure, location, year, inflation, desiredCapacity, method } = req.body;
+    const { infrastructure, location, year, inflation, desiredCapacity, method, information } = req.body;
     if (!infrastructure || !location || !year || !desiredCapacity || !method)
       return res.status(400).json({ message: 'Missing required fields.' });
 
-    // Ambil semua data referensi untuk infrastruktur (tanpa filter lokasi)
+    // Ambil data referensi untuk infrastruktur, dan filter by information jika ada
+    let whereClause = {
+      infrastructure: { equals: infrastructure, mode: 'insensitive' },
+    };
+    if (information) {
+      whereClause.information = { equals: information, mode: 'insensitive' };
+    }
+
     const rows = await prisma.calculatorTotalCost.findMany({
-      where: {
-        infrastructure: { equals: infrastructure, mode: 'insensitive' },
-      },
+      where: whereClause,
     });
 
     if (!rows || rows.length === 0)
@@ -268,27 +273,35 @@ exports.estimateCost = async (req, res) => {
 
     let estimatedCost = result.estimate;
 
-    // --- Adjust for CCI and inflation ---
-    // Reference CCI (±100)
-    const cciReference = await prisma.cci.findFirst({
-      where: { cci: { gte: 99, lte: 101 } },
-    });
-    // Project location CCI (sesuai lokasi dari frontend)
-    const projectCCI = await prisma.cci.findFirst({
-      where: { provinsi: { equals: location, mode: 'insensitive' } },
-    });
-
-    if (cciReference && projectCCI) {
-      estimatedCost = estimatedCost * (projectCCI.cci / cciReference.cci);
-    }
-
-    // Adjust for inflation
+    // --- Adjust for inflation first ---
     const baseYear = Math.min(...rows.map(r => r.year));
     const n = Number(year) - Number(baseYear);
     const r = Number(inflation) / 100;
+    // Rumus inflasi: estimatedCost * (1 + r)^n
+    // Jika tahun sama (n = 0), tidak perlu penyesuaian inflasi
     if (n > 0) {
       estimatedCost = estimatedCost * Math.pow(1 + r, n);
     }
+
+    // --- Then adjust for CCI/IKK ---
+    const cciReference = await prisma.cci.findFirst({
+      where: { cci: { gte: 99, lte: 101 } },
+    });
+    const projectCCI = await prisma.cci.findFirst({
+      where: { provinsi: { equals: location, mode: 'insensitive' } },
+    });
+    const referenceLocation = rows[0]?.location;
+
+    if (
+      cciReference &&
+      projectCCI &&
+      referenceLocation &&
+      referenceLocation.toLowerCase() !== location.toLowerCase()
+    ) {
+      // Jika lokasi referensi berbeda dengan lokasi proyek, lakukan penyesuaian CCI
+      estimatedCost = estimatedCost * (projectCCI.cci / cciReference.cci);
+    }
+    // Jika lokasi sama, tidak perlu penyesuaian CCI
 
     // --- Output ---
     res.status(200).json({
@@ -298,6 +311,7 @@ exports.estimateCost = async (req, res) => {
         estimatedCost: Math.round(estimatedCost),
         r2: r2 !== null ? Number(r2.toFixed(4)) : null,
         r2Interpretation,
+        information: information || null,
       },
     });
   } catch (error) {
