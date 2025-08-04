@@ -229,11 +229,10 @@ exports.estimateCost = async (req, res) => {
     if (!infrastructure || !location || !year || !desiredCapacity || !method)
       return res.status(400).json({ message: 'Missing required fields.' });
 
-    // Fetch reference data
+    // Ambil semua data referensi untuk infrastruktur (tanpa filter lokasi)
     const rows = await prisma.calculatorTotalCost.findMany({
       where: {
         infrastructure: { equals: infrastructure, mode: 'insensitive' },
-        location: { equals: location, mode: 'insensitive' },
       },
     });
 
@@ -274,7 +273,7 @@ exports.estimateCost = async (req, res) => {
     const cciReference = await prisma.cci.findFirst({
       where: { cci: { gte: 99, lte: 101 } },
     });
-    // Project location CCI
+    // Project location CCI (sesuai lokasi dari frontend)
     const projectCCI = await prisma.cci.findFirst({
       where: { provinsi: { equals: location, mode: 'insensitive' } },
     });
