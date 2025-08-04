@@ -17,4 +17,7 @@ router.post('/total-cost/upload', upload.single('file'), controller.uploadCalcul
 // DELETE all total costs
 router.delete('/total-cost', controller.deleteAllTotalCosts);
 
+// Kalkulasi estimasi cost dengan 3 metode
+router.post('/estimate', controller.estimateCost);
+
 module.exports = router;

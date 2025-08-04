@@ -163,3 +163,145 @@ exports.uploadCalculatorExcel = async (req, res) => {
     res.status(500).json({ message: 'Failed to upload calculator data', error: error.message, data: null });
   }
 };
+
+// Helper: Calculate R² for linear regression
+function calculateRSquared(data, predictFn) {
+  const meanY = data.reduce((acc, d) => acc + d.cost, 0) / data.length;
+  const ssTot = data.reduce((acc, d) => acc + Math.pow(d.cost - meanY, 2), 0);
+  const ssRes = data.reduce((acc, d) => acc + Math.pow(d.cost - predictFn(d.capacity), 2), 0);
+  return ssTot === 0 ? 1 : 1 - ssRes / ssTot;
+}
+
+// Helper: R² interpretation
+function interpretRSquared(r2) {
+  if (r2 === 0) return 'Model tidak menjelaskan sama sekali variasi data';
+  if (r2 < 0.3) return 'Sangat lemah — model hampir tidak menjelaskan variasi';
+  if (r2 < 0.5) return 'Lemah — ada sedikit hubungan antara variabel';
+  if (r2 < 0.7) return 'Cukup — model menjelaskan sebagian besar variasi';
+  if (r2 < 0.9) return 'Kuat — model menjelaskan sebagian besar variasi dengan baik';
+  if (r2 < 1.0) return 'Sangat kuat — model menjelaskan hampir semua variasi dalam data';
+  return 'Sempurna — model menjelaskan semua variasi data';
+}
+
+// Regression and capacity factor methods
+function linearRegression(data, x) {
+  const n = data.length;
+  const sumX = data.reduce((acc, d) => acc + d.capacity, 0);
+  const sumY = data.reduce((acc, d) => acc + d.cost, 0);
+  const sumXY = data.reduce((acc, d) => acc + d.capacity * d.cost, 0);
+  const sumX2 = data.reduce((acc, d) => acc + d.capacity * d.capacity, 0);
+  const b = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+  const a = (sumY - b * sumX) / n;
+  return { estimate: a + b * x, predictFn: (cx) => a + b * cx };
+}
+
+function logLogRegression(data, x) {
+  const n = data.length;
+  const sumLnX = data.reduce((acc, d) => acc + Math.log(d.capacity), 0);
+  const sumLnY = data.reduce((acc, d) => acc + Math.log(d.cost), 0);
+  const sumLnXLnY = data.reduce((acc, d) => acc + Math.log(d.capacity) * Math.log(d.cost), 0);
+  const sumLnX2 = data.reduce((acc, d) => acc + Math.log(d.capacity) ** 2, 0);
+  const b = (n * sumLnXLnY - sumLnX * sumLnY) / (n * sumLnX2 - sumLnX ** 2);
+  const a = (sumLnY - b * sumLnX) / n;
+  return { estimate: Math.exp(a) * x ** b, predictFn: (cx) => Math.exp(a) * cx ** b };
+}
+
+function capacityFactorMethod(data, x) {
+  if (data.length < 1) return { estimate: null, predictFn: () => null };
+  const n = 0.65;
+  let closest = data[0];
+  let minDiff = Math.abs(x - data[0].capacity);
+  for (let i = 1; i < data.length; i++) {
+    const diff = Math.abs(x - data[i].capacity);
+    if (diff < minDiff) {
+      closest = data[i];
+      minDiff = diff;
+    }
+  }
+  const { capacity: x1, cost: y1 } = closest;
+  return { estimate: y1 * Math.pow(x / x1, n), predictFn: () => y1 * Math.pow(x / x1, n) };
+}
+
+// POST /api/calculator/estimate
+exports.estimateCost = async (req, res) => {
+  try {
+    const { infrastructure, location, year, inflation, desiredCapacity, method } = req.body;
+    if (!infrastructure || !location || !year || !desiredCapacity || !method)
+      return res.status(400).json({ message: 'Missing required fields.' });
+
+    // Fetch reference data
+    const rows = await prisma.calculatorTotalCost.findMany({
+      where: {
+        infrastructure: { equals: infrastructure, mode: 'insensitive' },
+        location: { equals: location, mode: 'insensitive' },
+      },
+    });
+
+    if (!rows || rows.length === 0)
+      return res.status(404).json({ message: 'No reference data found.' });
+
+    // Prepare data for regression
+    const data = rows.map(r => ({
+      capacity: Number(r.volume),
+      cost: Number(r.totalCost),
+    })).filter(d => d.capacity > 0 && d.cost > 0);
+
+    let result, r2 = null, r2Interpretation = null;
+    if (method === 'Linear Regression') {
+      if (data.length < 2)
+        return res.status(400).json({ message: 'Data terlalu sedikit untuk regresi linear.' });
+      result = linearRegression(data, desiredCapacity);
+      r2 = calculateRSquared(data, result.predictFn);
+      r2Interpretation = interpretRSquared(r2);
+    } else if (method === 'Log-log Regression') {
+      if (data.length < 2)
+        return res.status(400).json({ message: 'Data terlalu sedikit untuk regresi log-log.' });
+      result = logLogRegression(data, desiredCapacity);
+      r2 = calculateRSquared(data, result.predictFn);
+      r2Interpretation = interpretRSquared(r2);
+    } else if (method === 'Capacity Factor Method') {
+      result = capacityFactorMethod(data, desiredCapacity);
+      r2 = null;
+      r2Interpretation = null;
+    } else {
+      return res.status(400).json({ message: 'Unknown method.' });
+    }
+
+    let estimatedCost = result.estimate;
+
+    // --- Adjust for CCI and inflation ---
+    // Reference CCI (±100)
+    const cciReference = await prisma.cci.findFirst({
+      where: { cci: { gte: 99, lte: 101 } },
+    });
+    // Project location CCI
+    const projectCCI = await prisma.cci.findFirst({
+      where: { provinsi: { equals: location, mode: 'insensitive' } },
+    });
+
+    if (cciReference && projectCCI) {
+      estimatedCost = estimatedCost * (projectCCI.cci / cciReference.cci);
+    }
+
+    // Adjust for inflation
+    const baseYear = Math.min(...rows.map(r => r.year));
+    const n = Number(year) - Number(baseYear);
+    const r = Number(inflation) / 100;
+    if (n > 0) {
+      estimatedCost = estimatedCost * Math.pow(1 + r, n);
+    }
+
+    // --- Output ---
+    res.status(200).json({
+      message: 'Estimasi cost berhasil dihitung.',
+      data: {
+        method,
+        estimatedCost: Math.round(estimatedCost),
+        r2: r2 !== null ? Number(r2.toFixed(4)) : null,
+        r2Interpretation,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to estimate cost', error: error.message });
+  }
+};
