@@ -122,97 +122,132 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
   try {
     const { name, infrastruktur, lokasi, volume, tahun, inflasi } = req.body;
 
-    // Step 1: Query UnitPrice for matching items (read-only)
+    // 1. Ambil semua UnitPrice untuk infrastruktur ini
     const unitPrices = await prisma.unitPrice.findMany({
       where: {
-        infrastruktur: { equals: infrastruktur.toLowerCase(), mode: 'insensitive' },
+        infrastruktur: { equals: infrastruktur, mode: 'insensitive' },
       },
       orderBy: { volume: 'asc' },
     });
 
-    // Step 2: Find the closest volume
-    const closestUnitPrices = unitPrices.reduce((closest, current) => {
-      if (!closest || Math.abs(current.volume - volume) < Math.abs(closest.volume - volume)) {
-        return current;
-      }
-      return closest;
-    }, null);
-
-    if (!closestUnitPrices) {
-      return res.status(400).json({ message: 'No matching UnitPrice items found for recommendation.' });
+    if (!unitPrices.length) {
+      return res.status(400).json({ message: 'No UnitPrice data found.' });
     }
 
-    // Step 3: Filter items with the closest matching volume
-    const filteredUnitPrices = unitPrices.filter((item) => item.volume === closestUnitPrices.volume);
+    // 2. Cari volume terdekat di bawah dan di atas target
+    let lower = unitPrices.filter((u) => u.volume <= volume).pop();
+    let upper = unitPrices.find((u) => u.volume >= volume);
 
-    // Step 4: Fetch CCI for a province with a value within ±100 dynamically
-    const cciReference = await prisma.cci.findFirst({
-      where: {
-        cci: { gte: 99, lte: 101 },
-      },
+    // Jika hanya ada satu data, tidak bisa interpolasi/extrapolasi
+    if (unitPrices.length < 2) {
+      return res.status(400).json({ message: 'Not enough data for interpolation.' });
+    }
+
+    // Pastikan lower dan upper memiliki volume berbeda
+    if (!lower || !upper || lower.volume === upper.volume) {
+      // Jika volume di bawah range, ambil dua data terkecil dengan volume berbeda
+      if (volume < unitPrices[0].volume) {
+        lower = unitPrices[0];
+        upper = unitPrices.find((u) => u.volume > lower.volume);
+      }
+      // Jika volume di atas range, ambil dua data terbesar dengan volume berbeda
+      else if (volume > unitPrices[unitPrices.length - 1].volume) {
+        upper = unitPrices[unitPrices.length - 1];
+        lower = unitPrices.slice(0, unitPrices.length - 1).reverse().find((u) => u.volume < upper.volume);
+      }
+      // Jika volume di tengah tapi lower dan upper sama, cari dua data terdekat dengan volume berbeda
+      else {
+        const idx = unitPrices.findIndex((u) => u.volume === lower.volume);
+        // Cari lower sebelumnya yang volume berbeda
+        let foundLower = null;
+        for (let i = idx - 1; i >= 0; i--) {
+          if (unitPrices[i].volume !== lower.volume) {
+            foundLower = unitPrices[i];
+            break;
+          }
+        }
+        // Cari upper berikutnya yang volume berbeda
+        let foundUpper = null;
+        for (let i = idx + 1; i < unitPrices.length; i++) {
+          if (unitPrices[i].volume !== lower.volume) {
+            foundUpper = unitPrices[i];
+            break;
+          }
+        }
+        lower = foundLower || lower;
+        upper = foundUpper || upper;
+      }
+      // Jika tetap tidak dapat dua volume berbeda, gagal
+      if (!lower || !upper || lower.volume === upper.volume) {
+        return res.status(400).json({ message: 'Not enough data for interpolation.' });
+      }
+    }
+
+    // 3. Ambil data untuk kedua volume (group by uraian)
+    const lowerItems = await prisma.unitPrice.findMany({
+      where: { infrastruktur, volume: lower.volume },
+    });
+    const upperItems = await prisma.unitPrice.findMany({
+      where: { infrastruktur, volume: upper.volume },
     });
 
-    if (!cciReference) {
-      return res.status(400).json({ message: 'CCI reference data not found.' });
-    }
-
-    // Step 5: Fetch CCI for the project location
-    const projectCCI = await prisma.cci.findFirst({
+    // Ambil CCI lokasi proyek
+    const cciLokasi = await prisma.cci.findFirst({
       where: { provinsi: { equals: lokasi, mode: 'insensitive' } },
     });
+    const cciLokasiValue = cciLokasi ? cciLokasi.cci : 100;
 
-    if (!projectCCI) {
-      return res.status(400).json({ message: 'CCI data not found for the specified location.' });
-    }
+    // Ambil CCI referensi (dekat 100)
+    const cciRef = await prisma.cci.findFirst({
+      where: { cci: { gte: 99, lte: 101 } },
+    });
+    const cciRefValue = cciRef ? cciRef.cci : 100;
 
-    const calculateQuantityUsingCapacityFactor = (baseQty, baseVolume, targetVolume) => {
-      const factor = 0.73;
-      return baseQty * Math.pow(targetVolume / baseVolume, factor);
-    };
+    // 4. Interpolasi Qty tiap item
+    const recommendedCosts = lowerItems
+      .map((item) => {
+        const matchUpper = upperItems.find((u) => u.uraian === item.uraian);
+        if (!matchUpper) return null;
 
-    // Semua perhitungan dilakukan di objek baru, tidak mengubah/mengupdate tabel UnitPrice
-    const recommendedCosts = await Promise.all(
-      filteredUnitPrices.map(async (item) => {
-        const hargaSatuanItem = item.hargaSatuan || item.harga || 0;
+        // 1. Penyesuaian harga satuan berdasarkan inflasi
+        const r = inflasi / 100;
+        const n = tahun - item.tahun;
+        const hargaInflasi = item.hargaSatuan * Math.pow(1 + r, n);
+        let rumusHargaInflasi = `hargaInflasi = ${item.hargaSatuan} * (1 + ${r})^${n}`;
 
-        // Step 6: Adjust price based on inflation
-        const n = Number(tahun) - Number(item.tahun || tahun);
-        const r = Number(inflasi) / 100;
-        let hargaTahunProject = hargaSatuanItem;
-        if (n > 0) {
-          hargaTahunProject = hargaSatuanItem * Math.pow(1 + r, n);
+        // 2. Penyesuaian harga dengan CCI lokasi
+        const hargaCCI = hargaInflasi * (cciLokasiValue / cciRefValue);
+        let rumusHargaCCI = `hargaCCI = hargaInflasi * (${cciLokasiValue} / ${cciRefValue})`;
+
+        // 3. Interpolasi/extrapolasi qty
+        const X1 = lower.volume;
+        const Y1 = item.qty;
+        const X2 = upper.volume;
+        const Y2 = matchUpper.qty;
+        const X = volume;
+        let interpolatedQty = Y1;
+        let rumusQty = `qty = ${Y1} + ((${X} - ${X1}) / (${X2} - ${X1})) * (${Y2} - ${Y1})`;
+        if (X2 !== X1) {
+          interpolatedQty = Y1 + ((X - X1) / (X2 - X1)) * (Y2 - Y1);
         }
+        // Pastikan qty selalu positif
+        if (interpolatedQty < 0) interpolatedQty = Math.abs(interpolatedQty);
 
-        // Step 7: Convert price to reference CCI
-        const cciItem = await prisma.cci.findFirst({
-          where: { provinsi: { equals: item.lokasi || lokasi, mode: 'insensitive' } },
-        });
-        const cciItemValue = cciItem ? cciItem.cci : 100;
-        let hargaReferenceCCI = hargaTahunProject * (cciReference.cci / cciItemValue);
-
-        // Step 8: Convert price to project location CCI
-        let hargaLokasiProject = hargaReferenceCCI * (projectCCI.cci / cciReference.cci);
-
-        // Step 9: Adjust quantity using capacity factor
-        const adjustedQty = calculateQuantityUsingCapacityFactor(
-          item.qty || 1,
-          item.volume || 1,
-          volume || 1
-        );
-
-        // Return hasil rekomendasi sebagai objek baru, tidak mengubah tabel UnitPrice
         return {
           ...item,
-          tahun: tahun,
           proyek: name,
-          lokasi: lokasi,
-          qty: Math.round(adjustedQty), // tidak dibulatkan
-          hargaSatuan: Math.round(hargaLokasiProject),
-          totalHarga: Math.round(adjustedQty * hargaLokasiProject), // gunakan nilai asli adjustedQty
-          volume: volume,
+          lokasi,
+          tahun,
+          volume: X,
+          qty: Math.round(interpolatedQty),
+          hargaSatuan: Math.round(hargaCCI),
+          totalHarga: Math.round(interpolatedQty * hargaCCI),
+          rumusQty,
+          rumusHargaInflasi,
+          rumusHargaCCI,
         };
       })
-    );
+      .filter(Boolean);
 
     res.status(200).json({
       message: 'Recommended construction costs retrieved successfully.',

@@ -248,42 +248,141 @@ exports.estimateCost = async (req, res) => {
     const data = rows.map(r => ({
       capacity: Number(r.volume),
       cost: Number(r.totalCost),
+      year: r.year,
+      location: r.location,
+      information: r.information,
     })).filter(d => d.capacity > 0 && d.cost > 0);
 
     let result, r2 = null, r2Interpretation = null;
+    let regressionStep = {};
+    let mathFormula = '';
+    let regressionData = {};
+    let referenceYear = null; // <-- Tambahan
+
     if (method === 'Linear Regression') {
       if (data.length < 2)
         return res.status(400).json({ message: 'Data terlalu sedikit untuk regresi linear.' });
+      // Rumus: y = a + bx
+      // a = (Σy - bΣx)/n
+      // b = (nΣxy - ΣxΣy)/(nΣx² - (Σx)²)
       result = linearRegression(data, desiredCapacity);
       r2 = calculateRSquared(data, result.predictFn);
       r2Interpretation = interpretRSquared(r2);
+      // Step detail
+      const n = data.length;
+      const sumX = data.reduce((acc, d) => acc + d.capacity, 0);
+      const sumY = data.reduce((acc, d) => acc + d.cost, 0);
+      const sumXY = data.reduce((acc, d) => acc + d.capacity * d.cost, 0);
+      const sumX2 = data.reduce((acc, d) => acc + d.capacity * d.capacity, 0);
+      const b = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+      const a = (sumY - b * sumX) / n;
+      regressionStep = { n, sumX, sumY, sumXY, sumX2, a, b };
+      mathFormula = 'y = a + b·x\na = (Σy - b·Σx)/n\nb = (n·Σxy - Σx·Σy)/(n·Σx² - (Σx)²)';
+      regressionData = { a, b, estimate: result.estimate };
+      // Pilih tahun dari data terdekat ke desiredCapacity
+      let closest = data[0];
+      let minDiff = Math.abs(desiredCapacity - data[0].capacity);
+      for (let i = 1; i < data.length; i++) {
+        const diff = Math.abs(desiredCapacity - data[i].capacity);
+        if (diff < minDiff) {
+          closest = data[i];
+          minDiff = diff;
+        }
+      }
+      referenceYear = closest.year;
     } else if (method === 'Log-log Regression') {
       if (data.length < 2)
         return res.status(400).json({ message: 'Data terlalu sedikit untuk regresi log-log.' });
+      // Rumus: ln(y) = a + b·ln(x) → y = exp(a)·x^b
       result = logLogRegression(data, desiredCapacity);
       r2 = calculateRSquared(data, result.predictFn);
       r2Interpretation = interpretRSquared(r2);
+      // Step detail
+      const n = data.length;
+      const sumLnX = data.reduce((acc, d) => acc + Math.log(d.capacity), 0);
+      const sumLnY = data.reduce((acc, d) => acc + Math.log(d.cost), 0);
+      const sumLnXLnY = data.reduce((acc, d) => acc + Math.log(d.capacity) * Math.log(d.cost), 0);
+      const sumLnX2 = data.reduce((acc, d) => acc + Math.log(d.capacity) ** 2, 0);
+      const b = (n * sumLnXLnY - sumLnX * sumLnY) / (n * sumLnX2 - sumLnX ** 2);
+      const a = (sumLnY - b * sumLnX) / n;
+      regressionStep = { n, sumLnX, sumLnY, sumLnXLnY, sumLnX2, a, b };
+      mathFormula = 'ln(y) = a + b·ln(x)\ny = exp(a)·x^b\na = (Σln(y) - b·Σln(x))/n\nb = (n·Σln(x)ln(y) - Σln(x)·Σln(y))/(n·Σln(x)² - (Σln(x))²)';
+      regressionData = { a, b, estimate: result.estimate };
+      // Pilih tahun dari data terdekat ke desiredCapacity
+      let closest = data[0];
+      let minDiff = Math.abs(desiredCapacity - data[0].capacity);
+      for (let i = 1; i < data.length; i++) {
+        const diff = Math.abs(desiredCapacity - data[i].capacity);
+        if (diff < minDiff) {
+          closest = data[i];
+          minDiff = diff;
+        }
+      }
+      referenceYear = closest.year;
     } else if (method === 'Capacity Factor Method') {
+      // Williams Rule: y2 = y1 * (x2/x1)^n, n biasanya 0.65
       result = capacityFactorMethod(data, desiredCapacity);
       r2 = null;
       r2Interpretation = null;
+      // Step detail
+      const n = 0.65;
+      let closest = data[0];
+      let minDiff = Math.abs(desiredCapacity - data[0].capacity);
+      for (let i = 1; i < data.length; i++) {
+        const diff = Math.abs(desiredCapacity - data[i].capacity);
+        if (diff < minDiff) {
+          closest = data[i];
+          minDiff = diff;
+        }
+      }
+      regressionStep = {
+        x1: closest.capacity,
+        y1: closest.cost,
+        x2: desiredCapacity,
+        n,
+        estimate: result.estimate
+      };
+      mathFormula = 'y₂ = y₁ × (x₂/x₁)^n\nn = 0.65 (Williams Rule)';
+      regressionData = { ...regressionStep };
+      referenceYear = regressionStep.x1 ? rows.find(r => Number(r.volume) === regressionStep.x1)?.year : null;
     } else {
       return res.status(400).json({ message: 'Unknown method.' });
     }
 
     let estimatedCost = result.estimate;
+    let stepInflasi = null;
+    let stepIKK = null;
 
     // --- Adjust for inflation first ---
-    const baseYear = Math.min(...rows.map(r => r.year));
-    const n = Number(year) - Number(baseYear);
-    const r = Number(inflation) / 100;
-    // Rumus inflasi: estimatedCost * (1 + r)^n
-    // Jika tahun sama (n = 0), tidak perlu penyesuaian inflasi
-    if (n > 0) {
-      estimatedCost = estimatedCost * Math.pow(1 + r, n);
+    // Gunakan referenceYear, fallback ke baseYear jika null
+    const baseYear = referenceYear || Math.min(...rows.map(r => r.year));
+    const nYear = Number(year) - Number(baseYear);
+    const rInflasi = Number(inflation) / 100;
+    let estimatedCostAfterInflasi = estimatedCost;
+    if (nYear > 0) {
+      estimatedCostAfterInflasi = estimatedCost * Math.pow(1 + rInflasi, nYear);
+      stepInflasi = {
+        formula: 'estimatedCost × (1 + r)^n',
+        estimatedCost,
+        r: rInflasi,
+        n: nYear,
+        referenceYear: baseYear,
+        result: estimatedCostAfterInflasi
+      };
+    } else {
+      stepInflasi = {
+        formula: 'estimatedCost × (1 + r)^n',
+        estimatedCost,
+        r: rInflasi,
+        n: nYear,
+        referenceYear: baseYear,
+        result: estimatedCostAfterInflasi,
+        note: 'Tahun sama, tidak ada penyesuaian inflasi'
+      };
     }
 
     // --- Then adjust for CCI/IKK ---
+    // Rumus: estimatedCost * (projectCCI.cci / cciReference.cci)
     const cciReference = await prisma.cci.findFirst({
       where: { cci: { gte: 99, lte: 101 } },
     });
@@ -291,26 +390,47 @@ exports.estimateCost = async (req, res) => {
       where: { provinsi: { equals: location, mode: 'insensitive' } },
     });
     const referenceLocation = rows[0]?.location;
-
+    let estimatedCostAfterIKK = estimatedCostAfterInflasi;
     if (
       cciReference &&
       projectCCI &&
       referenceLocation &&
       referenceLocation.toLowerCase() !== location.toLowerCase()
     ) {
-      // Jika lokasi referensi berbeda dengan lokasi proyek, lakukan penyesuaian CCI
-      estimatedCost = estimatedCost * (projectCCI.cci / cciReference.cci);
+      estimatedCostAfterIKK = estimatedCostAfterInflasi * (projectCCI.cci / cciReference.cci);
+      stepIKK = {
+        formula: 'estimatedCost × (IKK_lokasi_proyek / IKK_lokasi_referensi)',
+        estimatedCost: estimatedCostAfterInflasi,
+        IKK_lokasi_proyek: projectCCI.cci,
+        IKK_lokasi_referensi: cciReference.cci,
+        result: estimatedCostAfterIKK
+      };
+    } else {
+      stepIKK = {
+        formula: 'estimatedCost × (IKK_lokasi_proyek / IKK_lokasi_referensi)',
+        estimatedCost: estimatedCostAfterInflasi,
+        note: 'Lokasi sama atau data IKK tidak ditemukan, tidak ada penyesuaian IKK',
+        result: estimatedCostAfterIKK
+      };
     }
-    // Jika lokasi sama, tidak perlu penyesuaian CCI
 
     // --- Output ---
     res.status(200).json({
       message: 'Estimasi cost berhasil dihitung.',
       data: {
         method,
-        estimatedCost: Math.round(estimatedCost),
+        mathFormula,
+        regressionStep,
+        regressionData,
         r2: r2 !== null ? Number(r2.toFixed(4)) : null,
         r2Interpretation,
+        referenceData: data,
+        step: {
+          regressionEstimate: estimatedCost,
+          inflasi: stepInflasi,
+          ikk: stepIKK,
+        },
+        estimatedCost: Math.round(estimatedCostAfterIKK),
         information: information || null,
       },
     });
