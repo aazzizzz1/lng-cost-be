@@ -8,6 +8,7 @@ router.get('/', controller.getAllProjects); // Ensures only authenticated users 
 router.get('/:id',  controller.getProjectById); // Prevents unauthorized access to project details
 router.post('/', controller.createProject); // Ensures only authenticated users can create projects
 router.post('/recommend', controller.recommendConstructionCostsAndCreateProject); // Endpoint for recommending costs and creating project
+router.put('/:id', controller.updateProject); // Update project + construction costs
 router.delete('/:id', controller.deleteProject); // Add route for deleting a project
 router.get('/:id/estimation',  controller.calculateProjectEstimation); // Add route for project estimation
 

@@ -230,8 +230,8 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
         if (X2 !== X1) {
           interpolatedQty = Y1 + ((X - X1) / (X2 - X1)) * (Y2 - Y1);
         }
-        // Pastikan qty selalu positif
-        if (interpolatedQty < 0) interpolatedQty = Math.abs(interpolatedQty);
+        // // Pastikan qty selalu positif
+        // if (interpolatedQty < 0) interpolatedQty = Math.abs(interpolatedQty);
 
         return {
           ...item,
@@ -317,5 +317,92 @@ exports.calculateProjectEstimation = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to calculate project estimation', error: error.message });
+  }
+};
+
+exports.updateProject = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const {
+      name,
+      infrastruktur,
+      lokasi,
+      kategori,
+      tahun,
+      volume,
+      constructionCosts, // array item: jika ada id -> update, jika tidak -> create
+      deleteConstructionCostIds, // array id yang akan dihapus
+    } = req.body;
+
+    const projectData = {};
+    if (name !== undefined) projectData.name = name;
+    if (infrastruktur !== undefined) projectData.infrastruktur = infrastruktur;
+    if (lokasi !== undefined) projectData.lokasi = lokasi;
+    if (kategori !== undefined) projectData.kategori = kategori;
+    if (tahun !== undefined) projectData.tahun = tahun;
+    if (volume !== undefined) projectData.volume = volume;
+
+    const allowedCostFields = [
+      'uraian','specification','qty','satuan','hargaSatuan','totalHarga',
+      'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur','volume',
+      'satuanVolume','kapasitasRegasifikasi','satuanKapasitas','kelompok',
+      'kelompokDetail','lokasi','tipe'
+    ];
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const exists = await tx.project.findUnique({ where: { id } });
+      if (!exists) throw new Error('Project not found');
+
+      if (Object.keys(projectData).length) {
+        await tx.project.update({ where: { id }, data: projectData });
+      }
+
+      if (Array.isArray(deleteConstructionCostIds) && deleteConstructionCostIds.length) {
+        await tx.constructionCost.deleteMany({
+          where: { id: { in: deleteConstructionCostIds }, projectId: id },
+        });
+      }
+
+      if (Array.isArray(constructionCosts) && constructionCosts.length) {
+        for (const cost of constructionCosts) {
+          const { id: costId, ...rest } = cost || {};
+          const data = {};
+          for (const k of allowedCostFields) {
+            if (rest[k] !== undefined) data[k] = rest[k];
+          }
+
+          if (costId) {
+            const { count } = await tx.constructionCost.updateMany({
+              where: { id: costId, projectId: id },
+              data,
+            });
+            if (count === 0) {
+              throw new Error(`ConstructionCost ${costId} not found in this project`);
+            }
+          } else {
+            await tx.constructionCost.create({ data: { ...data, projectId: id } });
+          }
+        }
+      }
+
+      const costs = await tx.constructionCost.findMany({ where: { projectId: id } });
+      const totalHarga = costs.reduce((sum, c) => sum + (c.totalHarga || 0), 0);
+      const avgAACE = costs.length
+        ? costs.reduce((sum, c) => sum + (c.aaceClass || 0), 0) / costs.length
+        : 0;
+
+      const project = await tx.project.update({
+        where: { id },
+        data: { harga: Math.round(totalHarga), levelAACE: Math.round(avgAACE) },
+        include: { constructionCosts: true },
+      });
+
+      return project;
+    });
+
+    res.status(200).json({ message: 'Project updated successfully.', data: updated });
+  } catch (error) {
+    const status = error.message === 'Project not found' ? 404 : 400;
+    res.status(status).json({ message: 'Failed to update project', error: error.message });
   }
 };
