@@ -8,5 +8,5 @@ exports.validateProject = [
   body('levelAACE').isInt({ min: 1, max: 5 }).withMessage('AACE level must be between 1 and 5'),
   body('harga').isFloat().withMessage('Harga must be a number'),
   body('volume').isFloat({ min: 0 }).withMessage('Volume must be a positive number'),
-  body('inflasi').isFloat({ min: 0 }).withMessage('Inflasi must be a positive number'),
+  body('inflasi').optional().isFloat({ min: 0 }).withMessage('Inflasi must be a positive number'),
 ];

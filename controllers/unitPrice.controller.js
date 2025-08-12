@@ -2,7 +2,17 @@ const prisma = require('../config/db');
 
 exports.createUnitPrice = async (req, res) => {
   try {
-    const unitPrice = await prisma.unitPrice.create({ data: req.body }); // Ensure req.body is sanitized
+    const allowed = [
+      'workcode', // NEW
+      'uraian','specification','qty','satuan','hargaSatuan','totalHarga',
+      'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur',
+      'volume','satuanVolume','kelompok','kelompokDetail','proyek','lokasi','tipe'
+    ];
+    const data = {};
+    for (const k of allowed) {
+      if (req.body[k] !== undefined) data[k] = req.body[k];
+    }
+    const unitPrice = await prisma.unitPrice.create({ data });
     res.status(201).json({
       message: 'Unit price created successfully.',
       data: unitPrice,

@@ -44,8 +44,11 @@ const syncUnitPriceToConstruction = async (unitPrices) => {
 
     await prisma.constructionCost.create({
       data: {
+        workcode: unitPrice.workcode, // NEW
         uraian: unitPrice.uraian,
-        specification: unitPrice.specification,
+        specification: (unitPrice.specification && String(unitPrice.specification).trim())
+          ? String(unitPrice.specification).trim()
+          : 'n/a', // default to 'n/a' if empty
         qty: unitPrice.qty,
         satuan: unitPrice.satuan,
         hargaSatuan: unitPrice.hargaSatuan,
@@ -62,8 +65,6 @@ const syncUnitPriceToConstruction = async (unitPrices) => {
         lokasi: unitPrice.lokasi,
         tipe: tipe,
         projectId: project.id, // Correctly pass the projectId
-        kapasitasRegasifikasi: unitPrice.kapasitasRegasifikasi || null,
-        satuanKapasitas: unitPrice.satuanKapasitas || null,
       },
     });
   }
@@ -106,9 +107,13 @@ exports.uploadExcel = async (req, res) => {
       }
       const qty = cleanNumber(row['qty']);
       const hargaSatuan = cleanNumber(row['cost']);
+      const specRaw = row['specification'];
+      const specification =
+        (typeof specRaw === 'string' && specRaw.trim()) ? specRaw.trim() : 'n/a'; // default 'n/a'
       unitPrices.push({
+        workcode: row['work code'] || '', // NEW (optional if column exists)
         uraian: row['item'] || 'Unknown',
-        specification: row['specification'] || '',
+        specification, // use normalized specification
         qty,
         satuan: row['satuan'] || '',
         hargaSatuan,
@@ -120,8 +125,6 @@ exports.uploadExcel = async (req, res) => {
         infrastruktur: row['infrastructure'] || '',
         volume: cleanNumber(row['volume']),
         satuanVolume: row['satuan'] || '',
-        kapasitasRegasifikasi: 0,
-        satuanKapasitas: 'N/A',
         kelompok: row['group 1'] || '',
         kelompokDetail: row['group 1.1'] || '',
         proyek: row['project'] || '',

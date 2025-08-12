@@ -2,7 +2,7 @@ const prisma = require('../config/db');
 
 exports.createProject = async (req, res) => {
   try {
-    const { constructionCosts, lokasi, infrastruktur, kategori, tahun, name, volume } = req.body;
+    const { constructionCosts, lokasi, infrastruktur, kategori, tahun, name, volume, inflasi } = req.body;
 
     // Validate required fields
     if (!name || !infrastruktur || !lokasi || !kategori || !tahun) {
@@ -18,6 +18,7 @@ exports.createProject = async (req, res) => {
         kategori,
         tahun,
         volume,
+        inflasi: inflasi ?? 0, // NEW: store inflasi
         levelAACE: 0, // Placeholder value
         harga: 0, // Placeholder value
         createdAt: new Date(), // Add current date and time
@@ -330,6 +331,7 @@ exports.updateProject = async (req, res) => {
       kategori,
       tahun,
       volume,
+      inflasi, // NEW
       constructionCosts, // array item: jika ada id -> update, jika tidak -> create
       deleteConstructionCostIds, // array id yang akan dihapus
     } = req.body;
@@ -341,12 +343,13 @@ exports.updateProject = async (req, res) => {
     if (kategori !== undefined) projectData.kategori = kategori;
     if (tahun !== undefined) projectData.tahun = tahun;
     if (volume !== undefined) projectData.volume = volume;
+    if (inflasi !== undefined) projectData.inflasi = inflasi; // NEW
 
     const allowedCostFields = [
+      'workcode', // NEW
       'uraian','specification','qty','satuan','hargaSatuan','totalHarga',
       'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur','volume',
-      'satuanVolume','kapasitasRegasifikasi','satuanKapasitas','kelompok',
-      'kelompokDetail','lokasi','tipe'
+      'satuanVolume','kelompok','kelompokDetail','lokasi','tipe' // REMOVED kapasitasRegasifikasi, satuanKapasitas
     ];
 
     const updated = await prisma.$transaction(async (tx) => {

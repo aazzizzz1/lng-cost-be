@@ -49,35 +49,38 @@ async function main() {
       {
         id: 100,
         name: "FSRU Lampung",
-        jenis: "FSRU",
+        infrastruktur: "FSRU", // was: jenis
         kategori: "Big Scale FSRU > 150.000 m³",
         lokasi: "Jawa Timur",
         tahun: 2023,
         levelAACE: 2,
         harga: 5000000000,
         satuan: "m³ / MMSCFD",
+        inflasi: 0, // NEW
       },
       {
         id: 101,
         name: "Small LNG Plant Bau Bau",
-        jenis: "LNG Plant",
+        infrastruktur: "LNG Plant", // was: jenis
         kategori: "Small-Scale Liquefaction Plant (100 - 800 TPD)",
         lokasi: "Sulawesi",
         tahun: 2020,
         levelAACE: 5,
         harga: 3000000000,
         satuan: "MTPA",
+        inflasi: 0, // NEW
       },
       {
         id: 102,
         name: "LNGC Papua",
-        jenis: "LNGC",
+        infrastruktur: "LNGC", // was: jenis
         kategori: "Big Scale LNGC > 100.000 m³",
         lokasi: "Kepulauan Riau",
         tahun: 2023,
         levelAACE: 2,
         harga: 7000000000,
         satuan: "m³",
+        inflasi: 0, // NEW
       },
     ],
     skipDuplicates: true,
@@ -86,7 +89,7 @@ async function main() {
   await prisma.unitPrice.create({
     data: {
       uraian: "Project Management LNGC",
-      specification: "Manajemen proyek LNGC Papua", // tambahkan string
+      specification: "Manajemen proyek LNGC Papua",
       qty: 1,
       satuan: "Ls",
       hargaSatuan: 3500000000,
@@ -98,14 +101,11 @@ async function main() {
       infrastruktur: "Big Scale LNGC > 100.000 m³",
       volume: 125000,
       satuanVolume: "m³",
-      kapasitasRegasifikasi: 0,
-      satuanKapasitas: "",
       kelompok: "PROJECT MANAGEMENT DAN PEKERJAAN PERSIAPAN",
       kelompokDetail: "",
       proyek: "LNGC Papua",
       lokasi: "Kepulauan Riau",
       tipe: "LNGC",
-      kategori: "Material Konstruksi",
     },
   });
 
@@ -124,8 +124,6 @@ async function main() {
       infrastruktur: "Big Scale FSRU",
       volume: 200000,
       satuanVolume: "m³",
-      kapasitasRegasifikasi: 250,
-      satuanKapasitas: "MMSCFD",
       kelompok: "PROJECT MANAGEMENT DAN PEKERJAAN PERSIAPAN",
       kelompokDetail: "",
       lokasi: "Jawa Timur",

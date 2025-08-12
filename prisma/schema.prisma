@@ -34,6 +34,7 @@ model Project {
   harga      Float    @default(0) // Auto-calculated based on construction costs
   satuan     String?
   volume     Float?    // New field for project volume
+  inflasi    Float?   @default(0) // Optional project inflation
   createdAt  DateTime @default(now()) // Add createdAt field
 
   constructionCosts ConstructionCost[]
@@ -41,6 +42,7 @@ model Project {
 
 model ConstructionCost {
   id                    Int      @id @default(autoincrement())
+  workcode              String  // NEW
   uraian                String
   specification         String?
   qty                   Float
@@ -54,8 +56,6 @@ model ConstructionCost {
   infrastruktur         String
   volume                Float
   satuanVolume          String
-  kapasitasRegasifikasi Float?   // Make this field optional
-  satuanKapasitas       String?  // Make this field optional
   kelompok              String
   kelompokDetail        String
   lokasi                String
@@ -68,6 +68,7 @@ model ConstructionCost {
 
 model UnitPrice {
   id                    Int      @id @default(autoincrement())
+  workcode              String  // NEW
   uraian                String
   specification         String?
   qty                   Float
@@ -81,8 +82,6 @@ model UnitPrice {
   infrastruktur         String
   volume                Float
   satuanVolume          String
-  kapasitasRegasifikasi Float
-  satuanKapasitas       String
   kelompok              String
   kelompokDetail        String
   proyek                String
@@ -96,6 +95,7 @@ model cci {
   kodeProvinsi Int
   provinsi     String
   cci          Float
+  delivery     Float   @default(0) // NEW: delivery factor/index
 }
 
 model CalculatorTotalCost {

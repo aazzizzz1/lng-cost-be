@@ -22,9 +22,20 @@ exports.createConstructionCost = async (req, res) => {
       });
     }
 
+    const allowed = [
+      'workcode', // NEW
+      'uraian','specification','qty','satuan','hargaSatuan','totalHarga',
+      'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur','volume',
+      'satuanVolume','kelompok','kelompokDetail','lokasi','tipe'
+    ];
+    const data = {};
+    for (const k of allowed) {
+      if (constructionData[k] !== undefined) data[k] = constructionData[k];
+    }
+
     const cost = await prisma.constructionCost.create({
       data: {
-        ...constructionData,
+        ...data,
         projectId: project.id, // Associate with the newly created or existing project
       },
     });
