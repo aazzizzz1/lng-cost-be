@@ -123,53 +123,137 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
   try {
     const { name, infrastruktur, lokasi, volume, tahun, inflasi } = req.body;
 
-    // Fetch all UnitPrice items for the given infrastructure
+    const parseVol = (v) => {
+      if (v === null || v === undefined) return NaN;
+      if (typeof v === 'number') return v;
+      return Number(String(v).replace(',', '.').trim());
+    };
+    const targetVolume = parseVol(volume);
+
     const unitPrices = await prisma.unitPrice.findMany({
       where: { infrastruktur: { equals: infrastruktur, mode: 'insensitive' } },
       orderBy: { volume: 'asc' },
     });
-
     if (!unitPrices.length) {
       return res.status(400).json({ message: 'No UnitPrice data found.' });
     }
 
-    // Identify the closest volume bounds
-    const uniqueVolumes = Array.from(new Set(unitPrices.map(u => Number(u.volume)))).sort((a, b) => a - b);
-    let closestVolume = uniqueVolumes[0];
-    for (const vol of uniqueVolumes) {
-      if (Math.abs(vol - volume) < Math.abs(closestVolume - volume)) {
-        closestVolume = vol;
+    // Normalisasi volume dan kumpulkan per volume
+    const volumeMap = new Map(); // numVolume -> { vol, items, codes:Set }
+    for (const up of unitPrices) {
+      const numVol = parseVol(up.volume);
+      if (isNaN(numVol)) continue;
+      up._numVolume = numVol;
+      if (!volumeMap.has(numVol)) volumeMap.set(numVol, { vol: numVol, items: [], codes: new Set() });
+      const bucket = volumeMap.get(numVol);
+      bucket.items.push(up);
+      const code = (up.workcode || '').trim().toLowerCase();
+      if (code) bucket.codes.add(code);
+    }
+    const volumeEntries = Array.from(volumeMap.values()).sort((a, b) => a.vol - b.vol);
+    if (!volumeEntries.length || isNaN(targetVolume)) {
+      return res.status(400).json({ message: 'Invalid volume data.' });
+    }
+
+    const volumes = volumeEntries.map(v => v.vol);
+    const isExactVolume = volumes.includes(targetVolume);
+
+    const selectPairByMaxOverlap = (candidatesLower, candidatesUpper, context) => {
+      let best = null;
+      for (const L of candidatesLower) {
+        for (const U of candidatesUpper) {
+          if (L.vol === U.vol) continue;
+            // context in-range: enforce L<=target<=U
+            if (context === 'in-range' && !(L.vol <= targetVolume && targetVolume <= U.vol)) continue;
+          const interSize = [...L.codes].filter(c => U.codes.has(c)).length;
+          if (!best) {
+            best = { L, U, interSize };
+            continue;
+          }
+          if (
+            interSize > best.interSize ||
+            (interSize === best.interSize && (U.vol - L.vol) < (best.U.vol - best.L.vol)) ||
+            (interSize === best.interSize && (U.vol - L.vol) === (best.U.vol - best.L.vol) &&
+              Math.abs(targetVolume - ((L.vol + U.vol) / 2)) < Math.abs(targetVolume - ((best.L.vol + best.U.vol) / 2)))
+          ) {
+            best = { L, U, interSize };
+          }
+        }
+      }
+      return best;
+    };
+
+    let mode = 'single';
+    let lowerVol, upperVol;
+    let lowerItems = [];
+    let upperItems = [];
+
+    if (isExactVolume) {
+      lowerVol = upperVol = targetVolume;
+      lowerItems = upperItems = volumeMap.get(targetVolume).items;
+    } else if (targetVolume < volumes[0]) {
+      // extrapolation below: gunakan dua volume terbawah dengan overlap maksimum
+      mode = 'extrapolation-below';
+      const subset = volumeEntries.slice(0, Math.min(4, volumeEntries.length));
+      const pair = selectPairByMaxOverlap(subset, subset.slice(1), 'below') ||
+        { L: subset[0], U: subset[1] };
+      lowerVol = pair.L.vol;
+      upperVol = pair.U.vol;
+      lowerItems = pair.L.items;
+      upperItems = pair.U.items;
+    } else if (targetVolume > volumes[volumes.length - 1]) {
+      // extrapolation above
+      mode = 'extrapolation-above';
+      const subset = volumeEntries.slice(-Math.min(4, volumeEntries.length));
+      const pair = selectPairByMaxOverlap(subset, subset, 'above') ||
+        { L: subset[subset.length - 2], U: subset[subset.length - 1] };
+      // Ensure L < U
+      if (pair.L.vol > pair.U.vol) [pair.L, pair.U] = [pair.U, pair.L];
+      lowerVol = pair.L.vol;
+      upperVol = pair.U.vol;
+      lowerItems = pair.L.items;
+      upperItems = pair.U.items;
+    } else {
+      // in-range interpolation
+      mode = 'interpolation';
+      const lowers = volumeEntries.filter(v => v.vol <= targetVolume);
+      const uppers = volumeEntries.filter(v => v.vol >= targetVolume);
+      const pair = selectPairByMaxOverlap(lowers, uppers, 'in-range');
+      if (pair) {
+        lowerVol = pair.L.vol;
+        upperVol = pair.U.vol;
+        lowerItems = pair.L.items;
+        upperItems = pair.U.items;
+        if (lowerVol === upperVol) mode = 'single';
+      } else {
+        // fallback ke volumes terdekat
+        let closest = volumes[0];
+        for (const v of volumes) {
+          if (Math.abs(v - targetVolume) < Math.abs(closest - targetVolume)) closest = v;
+        }
+        lowerVol = upperVol = closest;
+        lowerItems = upperItems = volumeMap.get(closest).items;
+        mode = 'single';
       }
     }
 
-    // Filter items with the closest volume
-    const closestItems = unitPrices.filter(item => item.volume === closestVolume);
-
-    // Use other volumes for interpolation or extrapolation
-    const lowerVol = uniqueVolumes.find(v => v < volume) || closestVolume;
-    const upperVol = uniqueVolumes.find(v => v > volume) || closestVolume;
-    const lowerItems = unitPrices.filter(item => item.volume === lowerVol);
-    const upperItems = unitPrices.filter(item => item.volume === upperVol);
-
     const norm = (s) => (s || '').trim().toLowerCase();
-    const toMapByWorkcode = (arr) => {
+    const toMap = (arr) => {
       const m = new Map();
       for (const it of arr) {
         const k = norm(it.workcode);
-        if (!k) continue;
-        if (!m.has(k)) m.set(k, it);
+        if (k && !m.has(k)) m.set(k, it);
       }
       return m;
     };
-    const lowerMap = toMapByWorkcode(lowerItems);
-    const upperMap = toMapByWorkcode(upperItems);
-
+    const lowerMap = toMap(lowerItems);
+    const upperMap = toMap(upperItems);
     const unionCodes = new Set([...lowerMap.keys(), ...upperMap.keys()]);
     if (unionCodes.size === 0) {
-      return res.status(400).json({ message: 'No UnitPrice items found for bound volumes.' });
+      return res.status(400).json({ message: 'No UnitPrice items found for selected volumes.' });
     }
 
-    // Fetch CCI values
+    // CCI
     const cciRef = await prisma.cci.findFirst({ where: { cci: { gte: 99, lte: 101 } } });
     const cciRefValue = cciRef ? cciRef.cci : 100;
     const cciLokasi = await prisma.cci.findFirst({
@@ -181,22 +265,34 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
     const X1 = lowerVol;
     const X2 = upperVol;
 
-    // Interpolate or use original quantities and calculate costs
-    const recommendedCosts = closestItems.map((baseItem) => {
-      const code = norm(baseItem.workcode);
+    const recommendedCosts = [];
+    for (const code of unionCodes) {
       const itemLower = lowerMap.get(code);
       const itemUpper = upperMap.get(code);
+      const baseItem = itemLower || itemUpper;
 
       let qty;
       let rumusQty;
-      if (itemLower && itemUpper && X2 !== X1) {
+
+      if (isExactVolume && Number(baseItem._numVolume) === targetVolume) {
+        qty = baseItem.qty || 0;
+        rumusQty = `qty = ${qty} (exact volume match)`;
+      } else if (itemLower && itemUpper && X2 !== X1) {
         const Y1 = itemLower.qty || 0;
         const Y2 = itemUpper.qty || 0;
-        qty = Y1 + ((volume - X1) / (X2 - X1)) * (Y2 - Y1);
-        rumusQty = `qty = ${Y1} + ((${volume} - ${X1}) / (${X2} - ${X1})) * (${Y2} - ${Y1})`;
+        const label =
+          mode === 'interpolation'
+            ? 'interpolation'
+            : (mode === 'extrapolation-above'
+              ? 'extrapolation above'
+              : (mode === 'extrapolation-below'
+                ? 'extrapolation below'
+                : 'calculation'));
+        qty = Y1 + ((targetVolume - X1) / (X2 - X1)) * (Y2 - Y1);
+        rumusQty = `qty (${label}) = ${Y1} + ((${targetVolume} - ${X1}) / (${X2} - ${X1})) * (${Y2} - ${Y1})`;
       } else {
         qty = baseItem.qty || 0;
-        rumusQty = `qty = ${qty} (no interpolation)`;
+        rumusQty = `qty = ${qty} (single side, no pair)`;
       }
 
       const n = Number(tahun) - Number(baseItem.tahun || tahun);
@@ -205,24 +301,32 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
       const rumusHargaInflasi = `hargaInflasi = ${baseItem.hargaSatuan} * (1 + ${r})^${n}`;
       const rumusHargaCCI = `hargaCCI = hargaInflasi * (${cciLokasiValue} / ${cciRefValue})`;
 
-      return {
+      recommendedCosts.push({
         ...baseItem,
         proyek: name,
         lokasi,
         tahun,
-        volume,
+        volume: targetVolume,
         qty,
         hargaSatuan: Math.round(hargaCCI),
         totalHarga: Math.round(qty * hargaCCI),
         rumusQty,
         rumusHargaInflasi,
         rumusHargaCCI,
-      };
-    });
+        _mode: mode
+      });
+    }
 
     res.status(200).json({
       message: 'Recommended construction costs retrieved successfully.',
       data: recommendedCosts,
+      meta: {
+        targetVolume,
+        lowerVol,
+        upperVol,
+        mode,
+        overlapCodes: [...lowerMap.keys()].filter(c => upperMap.has(c)).length
+      }
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to recommend construction costs', error: error.message });
