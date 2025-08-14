@@ -75,6 +75,20 @@ exports.getAllProjects = async (req, res) => {
   }
 };
 
+exports.getManualProjects = async (req, res) => {
+  try {
+    const projects = await prisma.project.findMany({
+      where: { NOT: { kategori: 'Auto-generated' } },
+    });
+    res.json({
+      message: 'Manual projects retrieved successfully.',
+      data: projects,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch manual projects', data: null });
+  }
+};
+
 exports.getProjectById = async (req, res) => {
   const { id } = req.params;
   try {
