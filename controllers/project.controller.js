@@ -123,11 +123,9 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
   try {
     const { name, infrastruktur, lokasi, volume, tahun, inflasi } = req.body;
 
-    // 1. Ambil semua UnitPrice untuk infrastruktur ini
+    // Fetch all UnitPrice items for the given infrastructure
     const unitPrices = await prisma.unitPrice.findMany({
-      where: {
-        infrastruktur: { equals: infrastruktur, mode: 'insensitive' },
-      },
+      where: { infrastruktur: { equals: infrastruktur, mode: 'insensitive' } },
       orderBy: { volume: 'asc' },
     });
 
@@ -135,120 +133,92 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
       return res.status(400).json({ message: 'No UnitPrice data found.' });
     }
 
-    // 2. Cari volume terdekat di bawah dan di atas target
-    let lower = unitPrices.filter((u) => u.volume <= volume).pop();
-    let upper = unitPrices.find((u) => u.volume >= volume);
-
-    // Jika hanya ada satu data, tidak bisa interpolasi/extrapolasi
-    if (unitPrices.length < 2) {
-      return res.status(400).json({ message: 'Not enough data for interpolation.' });
-    }
-
-    // Pastikan lower dan upper memiliki volume berbeda
-    if (!lower || !upper || lower.volume === upper.volume) {
-      // Jika volume di bawah range, ambil dua data terkecil dengan volume berbeda
-      if (volume < unitPrices[0].volume) {
-        lower = unitPrices[0];
-        upper = unitPrices.find((u) => u.volume > lower.volume);
-      }
-      // Jika volume di atas range, ambil dua data terbesar dengan volume berbeda
-      else if (volume > unitPrices[unitPrices.length - 1].volume) {
-        upper = unitPrices[unitPrices.length - 1];
-        lower = unitPrices.slice(0, unitPrices.length - 1).reverse().find((u) => u.volume < upper.volume);
-      }
-      // Jika volume di tengah tapi lower dan upper sama, cari dua data terdekat dengan volume berbeda
-      else {
-        const idx = unitPrices.findIndex((u) => u.volume === lower.volume);
-        // Cari lower sebelumnya yang volume berbeda
-        let foundLower = null;
-        for (let i = idx - 1; i >= 0; i--) {
-          if (unitPrices[i].volume !== lower.volume) {
-            foundLower = unitPrices[i];
-            break;
-          }
-        }
-        // Cari upper berikutnya yang volume berbeda
-        let foundUpper = null;
-        for (let i = idx + 1; i < unitPrices.length; i++) {
-          if (unitPrices[i].volume !== lower.volume) {
-            foundUpper = unitPrices[i];
-            break;
-          }
-        }
-        lower = foundLower || lower;
-        upper = foundUpper || upper;
-      }
-      // Jika tetap tidak dapat dua volume berbeda, gagal
-      if (!lower || !upper || lower.volume === upper.volume) {
-        return res.status(400).json({ message: 'Not enough data for interpolation.' });
+    // Identify the closest volume bounds
+    const uniqueVolumes = Array.from(new Set(unitPrices.map(u => Number(u.volume)))).sort((a, b) => a - b);
+    let closestVolume = uniqueVolumes[0];
+    for (const vol of uniqueVolumes) {
+      if (Math.abs(vol - volume) < Math.abs(closestVolume - volume)) {
+        closestVolume = vol;
       }
     }
 
-    // 3. Ambil data untuk kedua volume (group by uraian)
-    const lowerItems = await prisma.unitPrice.findMany({
-      where: { infrastruktur, volume: lower.volume },
-    });
-    const upperItems = await prisma.unitPrice.findMany({
-      where: { infrastruktur, volume: upper.volume },
-    });
+    // Filter items with the closest volume
+    const closestItems = unitPrices.filter(item => item.volume === closestVolume);
 
-    // Ambil CCI lokasi proyek
+    // Use other volumes for interpolation or extrapolation
+    const lowerVol = uniqueVolumes.find(v => v < volume) || closestVolume;
+    const upperVol = uniqueVolumes.find(v => v > volume) || closestVolume;
+    const lowerItems = unitPrices.filter(item => item.volume === lowerVol);
+    const upperItems = unitPrices.filter(item => item.volume === upperVol);
+
+    const norm = (s) => (s || '').trim().toLowerCase();
+    const toMapByWorkcode = (arr) => {
+      const m = new Map();
+      for (const it of arr) {
+        const k = norm(it.workcode);
+        if (!k) continue;
+        if (!m.has(k)) m.set(k, it);
+      }
+      return m;
+    };
+    const lowerMap = toMapByWorkcode(lowerItems);
+    const upperMap = toMapByWorkcode(upperItems);
+
+    const unionCodes = new Set([...lowerMap.keys(), ...upperMap.keys()]);
+    if (unionCodes.size === 0) {
+      return res.status(400).json({ message: 'No UnitPrice items found for bound volumes.' });
+    }
+
+    // Fetch CCI values
+    const cciRef = await prisma.cci.findFirst({ where: { cci: { gte: 99, lte: 101 } } });
+    const cciRefValue = cciRef ? cciRef.cci : 100;
     const cciLokasi = await prisma.cci.findFirst({
       where: { provinsi: { equals: lokasi, mode: 'insensitive' } },
     });
     const cciLokasiValue = cciLokasi ? cciLokasi.cci : 100;
 
-    // Ambil CCI referensi (dekat 100)
-    const cciRef = await prisma.cci.findFirst({
-      where: { cci: { gte: 99, lte: 101 } },
+    const r = Number(inflasi || 0) / 100;
+    const X1 = lowerVol;
+    const X2 = upperVol;
+
+    // Interpolate or use original quantities and calculate costs
+    const recommendedCosts = closestItems.map((baseItem) => {
+      const code = norm(baseItem.workcode);
+      const itemLower = lowerMap.get(code);
+      const itemUpper = upperMap.get(code);
+
+      let qty;
+      let rumusQty;
+      if (itemLower && itemUpper && X2 !== X1) {
+        const Y1 = itemLower.qty || 0;
+        const Y2 = itemUpper.qty || 0;
+        qty = Y1 + ((volume - X1) / (X2 - X1)) * (Y2 - Y1);
+        rumusQty = `qty = ${Y1} + ((${volume} - ${X1}) / (${X2} - ${X1})) * (${Y2} - ${Y1})`;
+      } else {
+        qty = baseItem.qty || 0;
+        rumusQty = `qty = ${qty} (no interpolation)`;
+      }
+
+      const n = Number(tahun) - Number(baseItem.tahun || tahun);
+      const hargaInflasi = (baseItem.hargaSatuan || 0) * Math.pow(1 + r, n);
+      const hargaCCI = hargaInflasi * (cciLokasiValue / cciRefValue);
+      const rumusHargaInflasi = `hargaInflasi = ${baseItem.hargaSatuan} * (1 + ${r})^${n}`;
+      const rumusHargaCCI = `hargaCCI = hargaInflasi * (${cciLokasiValue} / ${cciRefValue})`;
+
+      return {
+        ...baseItem,
+        proyek: name,
+        lokasi,
+        tahun,
+        volume,
+        qty,
+        hargaSatuan: Math.round(hargaCCI),
+        totalHarga: Math.round(qty * hargaCCI),
+        rumusQty,
+        rumusHargaInflasi,
+        rumusHargaCCI,
+      };
     });
-    const cciRefValue = cciRef ? cciRef.cci : 100;
-
-    // 4. Interpolasi Qty tiap item
-    const recommendedCosts = lowerItems
-      .map((item) => {
-        const matchUpper = upperItems.find((u) => u.uraian === item.uraian);
-        if (!matchUpper) return null;
-
-        // 1. Penyesuaian harga satuan berdasarkan inflasi
-        const r = inflasi / 100;
-        const n = tahun - item.tahun;
-        const hargaInflasi = item.hargaSatuan * Math.pow(1 + r, n);
-        let rumusHargaInflasi = `hargaInflasi = ${item.hargaSatuan} * (1 + ${r})^${n}`;
-
-        // 2. Penyesuaian harga dengan CCI lokasi
-        const hargaCCI = hargaInflasi * (cciLokasiValue / cciRefValue);
-        let rumusHargaCCI = `hargaCCI = hargaInflasi * (${cciLokasiValue} / ${cciRefValue})`;
-
-        // 3. Interpolasi/extrapolasi qty
-        const X1 = lower.volume;
-        const Y1 = item.qty;
-        const X2 = upper.volume;
-        const Y2 = matchUpper.qty;
-        const X = volume;
-        let interpolatedQty = Y1;
-        let rumusQty = `qty = ${Y1} + ((${X} - ${X1}) / (${X2} - ${X1})) * (${Y2} - ${Y1})`;
-        if (X2 !== X1) {
-          interpolatedQty = Y1 + ((X - X1) / (X2 - X1)) * (Y2 - Y1);
-        }
-        // // Pastikan qty selalu positif
-        // if (interpolatedQty < 0) interpolatedQty = Math.abs(interpolatedQty);
-
-        return {
-          ...item,
-          proyek: name,
-          lokasi,
-          tahun,
-          volume: X,
-          qty: Math.round(interpolatedQty),
-          hargaSatuan: Math.round(hargaCCI),
-          totalHarga: Math.round(interpolatedQty * hargaCCI),
-          rumusQty,
-          rumusHargaInflasi,
-          rumusHargaCCI,
-        };
-      })
-      .filter(Boolean);
 
     res.status(200).json({
       message: 'Recommended construction costs retrieved successfully.',
