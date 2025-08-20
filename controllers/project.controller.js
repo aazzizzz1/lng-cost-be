@@ -309,6 +309,13 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
         rumusQty = `qty = ${qty} (single side, no pair)`;
       }
 
+      // NEW: if interpolated/extrapolated qty becomes negative, fallback to original database qty
+      if (qty < 0) {
+        const originalQty = baseItem.qty || 0;
+        rumusQty += ` => result negative (${qty}), fallback to original qty ${originalQty}`;
+        qty = originalQty;
+      }
+
       const n = Number(tahun) - Number(baseItem.tahun || tahun);
       const hargaInflasi = (baseItem.hargaSatuan || 0) * Math.pow(1 + r, n);
       const hargaCCI = hargaInflasi * (cciLokasiValue / cciRefValue);

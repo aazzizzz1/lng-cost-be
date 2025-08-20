@@ -225,7 +225,8 @@ function capacityFactorMethod(data, x) {
 // POST /api/calculator/estimate
 exports.estimateCost = async (req, res) => {
   try {
-    const { infrastructure, location, year, inflation, desiredCapacity, method, information } = req.body;
+    const { infrastructure, location, year, inflation, desiredCapacity, method, information, verbose: bodyVerbose } = req.body;
+    const verbose = bodyVerbose === true || req.query.verbose === '1';
     if (!infrastructure || !location || !year || !desiredCapacity || !method)
       return res.status(400).json({ message: 'Missing required fields.' });
 
@@ -244,31 +245,143 @@ exports.estimateCost = async (req, res) => {
     if (!rows || rows.length === 0)
       return res.status(404).json({ message: 'No reference data found.' });
 
-    // Prepare data for regression
-    const data = rows.map(r => ({
+    // Prepare original data
+    const originalData = rows.map(r => ({
       capacity: Number(r.volume),
       cost: Number(r.totalCost),
-      year: r.year,
+      year: Number(r.year),
       location: r.location,
       information: r.information,
     })).filter(d => d.capacity > 0 && d.cost > 0);
 
+    if (!originalData.length)
+      return res.status(400).json({ message: 'Reference data invalid.' });
+
+    // ---------------------------------------------------------
+    // 1. INFLASI (disesuaikan per baris ke target year)
+    // ---------------------------------------------------------
+    const targetYearNum = Number(year);
+    const rInflasi = Number(inflation) / 100 || 0;
+    const dataAfterInflasi = originalData.map(d => {
+      const nYear = targetYearNum - d.year;
+      const factor = nYear > 0 ? Math.pow(1 + rInflasi, nYear) : 1;
+      return {
+        ...d,
+        cost: d.cost * factor,
+        _inflasi: {
+          fromYear: d.year,
+            toYear: targetYearNum,
+            n: nYear,
+            r: rInflasi,
+            factor
+        }
+      };
+    });
+
+    // Ringkasan inflasi
+    const stepInflasi = {
+      formula: 'cost × (1 + r)^n (per baris)',
+      targetYear: targetYearNum,
+      r: rInflasi,
+      applied: rInflasi !== 0 && dataAfterInflasi.some(d => d._inflasi.n > 0),
+      note: rInflasi === 0 ? 'Inflasi = 0 atau tidak diberikan' : undefined
+    };
+
+    // ---------------------------------------------------------
+    // 2. IKK (CCI) – sesuaikan biaya ke lokasi proyek (2 langkah: origin -> benchmark -> project)
+    // ---------------------------------------------------------
+    const cciReference = await prisma.cci.findFirst({
+      where: { cci: { gte: 99, lte: 101 } },
+    });
+    const projectCCI = await prisma.cci.findFirst({
+      where: { provinsi: { equals: location, mode: 'insensitive' } },
+    });
+
+    // Kumpulkan lokasi origin unik untuk batch query
+    const distinctOriginLocations = [
+      ...new Set(dataAfterInflasi.map(d => (d.location || '').trim()).filter(Boolean))
+    ];
+    let originCCIMap = {};
+    if (distinctOriginLocations.length) {
+      const originCCIRecords = await prisma.cci.findMany({
+        where: { provinsi: { in: distinctOriginLocations } },
+      });
+      originCCIMap = originCCIRecords.reduce((acc, rec) => {
+        acc[rec.provinsi.toLowerCase()] = rec.cci;
+        return acc;
+      }, {});
+    }
+
+    const dataAfterIKK = dataAfterInflasi.map(d => {
+      const originCCI = originCCIMap[d.location?.toLowerCase()] || null;
+      const refCCI = cciReference?.cci || null;
+      const projCCI = projectCCI?.cci || null;
+
+      // Default (tanpa penyesuaian)
+      let toBenchmarkFactor = 1;      // = (CCI_reference / CCI_origin)
+      let toProjectFactor = 1;        // = (CCI_project / CCI_reference)
+      let totalIKKFactor = 1;         // = (CCI_project / CCI_origin)
+      let costBenchmark = d.cost;
+
+      if (originCCI && refCCI && projCCI) {
+        toBenchmarkFactor = refCCI / originCCI;
+        costBenchmark = d.cost * toBenchmarkFactor;
+        toProjectFactor = projCCI/100;              // FIX: gunakan rasio, bukan nilai mentah
+        totalIKKFactor = toBenchmarkFactor * toProjectFactor; // = (ref/origin)*(proj/ref) = proj/origin
+      }
+
+      const finalCost = d.cost * totalIKKFactor;
+
+      return {
+        ...d,
+        cost: finalCost,
+        _ikk: {
+          fromLocation: d.location,
+          toLocation: location,
+          originCCI,
+          referenceCCI: refCCI,
+          projectCCI: projCCI,
+          toBenchmarkFactor,   // CCI_ref / CCI_origin
+          toProjectFactor,     // CCI_project / CCI_reference
+          factor: totalIKKFactor, // CCI_project / CCI_origin
+          costBenchmark,
+          overInflated: totalIKKFactor > 10 // indikator debugging
+        }
+      };
+    });
+
+    const stepIKK = {
+      formula: 'cost_project = cost_inflasi × (CCI_project / CCI_origin)',
+      viaBenchmark: 'costBenchmark = cost_inflasi × (CCI_reference / CCI_origin); lalu × CCI_project ',
+      applied: dataAfterIKK.some(d => d._ikk.factor !== 1),
+      projectCCI: projectCCI?.cci || null,
+      referenceCCI: cciReference?.cci || null
+    };
+
+    // Data untuk metode (ringan)
+    const data = dataAfterIKK.map(d => ({
+      capacity: d.capacity,
+      cost: d.cost,
+      year: d.year,
+      location: d.location,
+      information: d.information
+    }));
+
+    // ---------------------------------------------------------
+    // 3. METODE (regresi / capacity factor)
+    // ---------------------------------------------------------
     let result, r2 = null, r2Interpretation = null;
     let regressionStep = {};
     let mathFormula = '';
     let regressionData = {};
-    let referenceYear = null; // <-- Tambahan
+    let methodCalculation; // tambahan: detail perhitungan formula
 
     if (method === 'Linear Regression') {
       if (data.length < 2)
         return res.status(400).json({ message: 'Data terlalu sedikit untuk regresi linear.' });
-      // Rumus: y = a + bx
-      // a = (Σy - bΣx)/n
-      // b = (nΣxy - ΣxΣy)/(nΣx² - (Σx)²)
       result = linearRegression(data, desiredCapacity);
       r2 = calculateRSquared(data, result.predictFn);
       r2Interpretation = interpretRSquared(r2);
-      // Step detail
       const n = data.length;
       const sumX = data.reduce((acc, d) => acc + d.capacity, 0);
       const sumY = data.reduce((acc, d) => acc + d.cost, 0);
@@ -277,27 +390,20 @@ exports.estimateCost = async (req, res) => {
       const b = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
       const a = (sumY - b * sumX) / n;
       regressionStep = { n, sumX, sumY, sumXY, sumX2, a, b };
-      mathFormula = 'y = a + b·x\na = (Σy - b·Σx)/n\nb = (n·Σxy - Σx·Σy)/(n·Σx² - (Σx)²)';
+      mathFormula = 'y = a + b·x';
       regressionData = { a, b, estimate: result.estimate };
-      // Pilih tahun dari data terdekat ke desiredCapacity
-      let closest = data[0];
-      let minDiff = Math.abs(desiredCapacity - data[0].capacity);
-      for (let i = 1; i < data.length; i++) {
-        const diff = Math.abs(desiredCapacity - data[i].capacity);
-        if (diff < minDiff) {
-          closest = data[i];
-          minDiff = diff;
-        }
-      }
-      referenceYear = closest.year;
+      methodCalculation = {
+        type: 'linear',
+        formula: 'y = a + b*x',
+        variables: { a, b, x: desiredCapacity },
+        estimateBeforeRounding: result.estimate
+      };
     } else if (method === 'Log-log Regression') {
       if (data.length < 2)
         return res.status(400).json({ message: 'Data terlalu sedikit untuk regresi log-log.' });
-      // Rumus: ln(y) = a + b·ln(x) → y = exp(a)·x^b
       result = logLogRegression(data, desiredCapacity);
       r2 = calculateRSquared(data, result.predictFn);
       r2Interpretation = interpretRSquared(r2);
-      // Step detail
       const n = data.length;
       const sumLnX = data.reduce((acc, d) => acc + Math.log(d.capacity), 0);
       const sumLnY = data.reduce((acc, d) => acc + Math.log(d.cost), 0);
@@ -306,26 +412,23 @@ exports.estimateCost = async (req, res) => {
       const b = (n * sumLnXLnY - sumLnX * sumLnY) / (n * sumLnX2 - sumLnX ** 2);
       const a = (sumLnY - b * sumLnX) / n;
       regressionStep = { n, sumLnX, sumLnY, sumLnXLnY, sumLnX2, a, b };
-      mathFormula = 'ln(y) = a + b·ln(x)\ny = exp(a)·x^b\na = (Σln(y) - b·Σln(x))/n\nb = (n·Σln(x)ln(y) - Σln(x)·Σln(y))/(n·Σln(x)² - (Σln(x))²)';
+      mathFormula = 'ln(y) = a + b·ln(x) → y = exp(a)·x^b';
       regressionData = { a, b, estimate: result.estimate };
-      // Pilih tahun dari data terdekat ke desiredCapacity
-      let closest = data[0];
-      let minDiff = Math.abs(desiredCapacity - data[0].capacity);
-      for (let i = 1; i < data.length; i++) {
-        const diff = Math.abs(desiredCapacity - data[i].capacity);
-        if (diff < minDiff) {
-          closest = data[i];
-          minDiff = diff;
-        }
-      }
-      referenceYear = closest.year;
+      methodCalculation = {
+        type: 'loglog',
+        formula: 'ln(y)=a + b ln(x) -> y = exp(a)*x^b',
+        variables: {
+          a,
+          b,
+          x: desiredCapacity,
+          expA: Math.exp(a),
+          xPowB: Math.pow(desiredCapacity, b)
+        },
+        estimateBeforeRounding: result.estimate
+      };
     } else if (method === 'Capacity Factor Method') {
-      // Williams Rule: y2 = y1 * (x2/x1)^n, n biasanya 0.65
       result = capacityFactorMethod(data, desiredCapacity);
-      r2 = null;
-      r2Interpretation = null;
-      // Step detail
-      const n = 0.65;
+      const nConst = 0.65;
       let closest = data[0];
       let minDiff = Math.abs(desiredCapacity - data[0].capacity);
       for (let i = 1; i < data.length; i++) {
@@ -339,100 +442,193 @@ exports.estimateCost = async (req, res) => {
         x1: closest.capacity,
         y1: closest.cost,
         x2: desiredCapacity,
-        n,
+        n: nConst,
         estimate: result.estimate
       };
-      mathFormula = 'y₂ = y₁ × (x₂/x₁)^n\nn = 0.65 (Williams Rule)';
+      mathFormula = 'y₂ = y₁ × (x₂/x₁)^n (n=0.65)';
       regressionData = { ...regressionStep };
-      referenceYear = regressionStep.x1 ? rows.find(r => Number(r.volume) === regressionStep.x1)?.year : null;
+      methodCalculation = {
+        type: 'capacityFactor',
+        formula: 'y2 = y1 * (x2/x1)^n',
+        variables: {
+          x1: regressionStep.x1,
+          y1: regressionStep.y1,
+          x2: regressionStep.x2,
+          n: regressionStep.n,
+          ratio: regressionStep.x2 / regressionStep.x1,
+          ratioPow: Math.pow(regressionStep.x2 / regressionStep.x1, regressionStep.n)
+        },
+        estimateBeforeRounding: result.estimate
+      };
     } else {
       return res.status(400).json({ message: 'Unknown method.' });
     }
 
-    let estimatedCost = result.estimate;
-    let stepInflasi = null;
-    let stepIKK = null;
+    const estimatedCost = Math.round(result.estimate);
 
-    // --- Adjust for inflation first ---
-    // Gunakan referenceYear, fallback ke baseYear jika null
-    const baseYear = referenceYear || Math.min(...rows.map(r => r.year));
-    const nYear = Number(year) - Number(baseYear);
-    const rInflasi = Number(inflation) / 100;
-    let estimatedCostAfterInflasi = estimatedCost;
-    if (nYear > 0) {
-      estimatedCostAfterInflasi = estimatedCost * Math.pow(1 + rInflasi, nYear);
-      stepInflasi = {
-        formula: 'estimatedCost × (1 + r)^n',
-        estimatedCost,
-        r: rInflasi,
-        n: nYear,
-        referenceYear: baseYear,
-        result: estimatedCostAfterInflasi
-      };
-    } else {
-      stepInflasi = {
-        formula: 'estimatedCost × (1 + r)^n',
-        estimatedCost,
-        r: rInflasi,
-        n: nYear,
-        referenceYear: baseYear,
-        result: estimatedCostAfterInflasi,
-        note: 'Tahun sama, tidak ada penyesuaian inflasi'
-      };
+    // RINGKAS faktor rata-rata (untuk ringkasan sederhana)
+    const avgIKKFactor = Number(
+      (dataAfterIKK.reduce((acc, d) => acc + (d._ikk.factor || 1), 0) / dataAfterIKK.length).toFixed(4)
+    );
+    const avgInflasiFactor = Number(
+      (dataAfterInflasi.reduce((acc, d) => acc + (d._inflasi.factor || 1), 0) / dataAfterInflasi.length).toFixed(4)
+    );
+
+    // Tambahan: rata-rata biaya setelah inflasi & setelah IKK
+    const avgCostAfterInflasi = Number(
+      (dataAfterInflasi.reduce((acc, d) => acc + d.cost, 0) / dataAfterInflasi.length).toFixed(2)
+    );
+    const avgCostAfterIKK = Number(
+      (dataAfterIKK.reduce((acc, d) => acc + d.cost, 0) / dataAfterIKK.length).toFixed(2)
+    );
+
+    // Sisipkan ke object step detail (akan ikut di verbose)
+    stepInflasi.avgCost = avgCostAfterInflasi;
+    stepIKK.avgCost = avgCostAfterIKK;
+
+    // Data referensi ringkas untuk simple mode
+    const referenceDataOriginalSimple = originalData.map(d => ({
+      capacity: d.capacity,
+      cost: d.cost,
+      year: d.year,
+      location: d.location,
+      information: d.information
+    }));
+    const referenceDataAdjustedSimple = data.map(d => ({
+      capacity: d.capacity,
+      cost: d.cost,
+      year: d.year,
+      location: d.location,
+      information: d.information
+    }));
+
+    // Bangun payload sederhana (default)
+    const basePayload = {
+      method,
+      mathFormula,
+      estimatedCost,
+      r2: r2 !== null ? Number(r2.toFixed(4)) : null,
+      r2Interpretation,
+      referenceCount: originalData.length,
+      adjustedReferenceCount: data.length,
+      inputs: {
+        infrastructure,
+        location,
+        year: targetYearNum,
+        desiredCapacity,
+        inflationRate: rInflasi
+      },
+      step: {
+        inflasi: {
+          applied: stepInflasi.applied,
+          avgFactor: avgInflasiFactor,
+          avgCost: avgCostAfterInflasi // harga setelah inflasi
+        },
+        ikk: {
+          applied: stepIKK.applied,
+          avgFactor: avgIKKFactor,
+          avgCost: avgCostAfterIKK // harga setelah IKK
+        },
+        method: {
+          name: method,
+          calculation: methodCalculation // detail formula ditampilkan di simple mode
+        }
+      },
+      // Ditambahkan: data referensi yang digunakan untuk perhitungan
+      referenceDataOriginal: referenceDataOriginalSimple,
+      referenceDataAdjusted: referenceDataAdjustedSimple,
+      information: information || null
+    };
+
+    if (!verbose) {
+      return res.status(200).json({
+        message: 'Estimasi cost berhasil dihitung (simple mode).',
+        data: basePayload
+      });
     }
 
-    // --- Then adjust for CCI/IKK ---
-    // Rumus: estimatedCost * (projectCCI.cci / cciReference.cci)
-    const cciReference = await prisma.cci.findFirst({
-      where: { cci: { gte: 99, lte: 101 } },
-    });
-    const projectCCI = await prisma.cci.findFirst({
-      where: { provinsi: { equals: location, mode: 'insensitive' } },
-    });
-    const referenceLocation = rows[0]?.location;
-    let estimatedCostAfterIKK = estimatedCostAfterInflasi;
-    if (
-      cciReference &&
-      projectCCI &&
-      referenceLocation &&
-      referenceLocation.toLowerCase() !== location.toLowerCase()
-    ) {
-      estimatedCostAfterIKK = estimatedCostAfterInflasi * (projectCCI.cci / cciReference.cci);
-      stepIKK = {
-        formula: 'estimatedCost × (IKK_lokasi_proyek / IKK_lokasi_referensi)',
-        estimatedCost: estimatedCostAfterInflasi,
-        IKK_lokasi_proyek: projectCCI.cci,
-        IKK_lokasi_referensi: cciReference.cci,
-        result: estimatedCostAfterIKK
-      };
-    } else {
-      stepIKK = {
-        formula: 'estimatedCost × (IKK_lokasi_proyek / IKK_lokasi_referensi)',
-        estimatedCost: estimatedCostAfterInflasi,
-        note: 'Lokasi sama atau data IKK tidak ditemukan, tidak ada penyesuaian IKK',
-        result: estimatedCostAfterIKK
-      };
-    }
+    // ---------------------------------------------------------
+    // VERBOSE MODE (bangun detail hanya jika diminta)
+    // ---------------------------------------------------------
+    // Optimized lookup map to avoid O(n^2)
+    const key = (d) => `${d.capacity}|${d.year}|${d.location}`;
+    const originalCostMap = {};
+    originalData.forEach(o => { originalCostMap[key(o)] = o.cost; });
 
-    // --- Output ---
+    const inflasiData = dataAfterInflasi.map(d => ({
+      capacity: d.capacity,
+      year: d.year,
+      location: d.location,
+      originalCost: originalCostMap[key(d)],
+      costAfterInflasi: d.cost,
+      inflasiFactor: d._inflasi.factor,
+      nYear: d._inflasi.n,
+      r: d._inflasi.r
+    }));
+
+    const inflasiMap = {};
+    inflasiData.forEach(r => { inflasiMap[key(r)] = r; });
+
+    const ikkData = dataAfterIKK.map(d => {
+      const k = key(d);
+      return {
+        capacity: d.capacity,
+        year: d.year,
+        location: d.location,
+        costAfterInflasi: inflasiMap[k]?.costAfterInflasi,
+        costBenchmark: d._ikk.costBenchmark,
+        costAfterIKK: d.cost,
+        ikkFactor: d._ikk.factor,
+        originCCI: d._ikk.originCCI,
+        referenceCCI: d._ikk.referenceCCI,
+        projectCCI: d._ikk.projectCCI,
+        toBenchmarkFactor: d._ikk.toBenchmarkFactor,
+        toProjectFactor: d._ikk.toProjectFactor
+      };
+    });
+
+    // FIX: perbaiki syntax map
+    const auditPenyesuaian = ikkData.map(row => {
+      const infl = inflasiMap[`${row.capacity}|${row.year}|${row.location}`];
+      return {
+        capacity: row.capacity,
+        year: row.year,
+        location: row.location,
+        originalCost: infl?.originalCost,
+        costAfterInflasi: row.costAfterInflasi,
+        costBenchmark: row.costBenchmark,
+        costAfterIKK: row.costAfterIKK,
+        inflasiFactor: infl?.inflasiFactor,
+        toBenchmarkFactor: row.toBenchmarkFactor,
+        toProjectFactor: row.toProjectFactor,
+        ikkFactor: row.ikkFactor,
+        originCCI: row.originCCI,
+        referenceCCI: row.referenceCCI,
+        projectCCI: row.projectCCI
+      };
+    });
+
     res.status(200).json({
-      message: 'Estimasi cost berhasil dihitung.',
+      message: 'Estimasi cost berhasil dihitung (verbose mode).',
       data: {
-        method,
-        mathFormula,
+        ...basePayload,
         regressionStep,
         regressionData,
-        r2: r2 !== null ? Number(r2.toFixed(4)) : null,
-        r2Interpretation,
-        referenceData: data,
+        referenceDataOriginal: originalData,
+        referenceDataAfterInflasi: inflasiData,
+        referenceDataAfterIKK: ikkData,
+        auditPenyesuaian,
+        referenceDataAdjusted: data,
         step: {
-          regressionEstimate: estimatedCost,
           inflasi: stepInflasi,
           ikk: stepIKK,
-        },
-        estimatedCost: Math.round(estimatedCostAfterIKK),
-        information: information || null,
-      },
+          method: {
+            name: method,
+            estimateBeforeRounding: result.estimate,
+            calculation: methodCalculation // juga tampil di verbose
+          }
+        }
+      }
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to estimate cost', error: error.message });
