@@ -275,6 +275,20 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
     });
     const cciLokasiValue = cciLokasi ? cciLokasi.cci : 100;
 
+    // NEW: cache helper for original location CCI
+    const cciCache = new Map();
+    const getCCIValue = async (prov) => {
+      if (!prov) return 100;
+      const key = prov.trim().toLowerCase();
+      if (cciCache.has(key)) return cciCache.get(key);
+      const found = await prisma.cci.findFirst({
+        where: { provinsi: { equals: prov, mode: 'insensitive' } },
+      });
+      const val = found ? found.cci : 100;
+      cciCache.set(key, val);
+      return val;
+    };
+
     const r = Number(inflasi || 0) / 100;
     const X1 = lowerVol;
     const X2 = upperVol;
@@ -318,9 +332,14 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
 
       const n = Number(tahun) - Number(baseItem.tahun || tahun);
       const hargaInflasi = (baseItem.hargaSatuan || 0) * Math.pow(1 + r, n);
-      const hargaCCI = hargaInflasi * (cciLokasiValue / cciRefValue);
+      const cciOriginalValue = await getCCIValue(baseItem.lokasi); // NEW
+      // REFACTORED two-step CCI normalization
+      const toBenchmark = hargaInflasi * (cciRefValue / cciOriginalValue);
+      const hargaCCI = toBenchmark * (cciLokasiValue / 100);
+
       const rumusHargaInflasi = `hargaInflasi = ${baseItem.hargaSatuan} * (1 + ${r})^${n}`;
-      const rumusHargaCCI = `hargaCCI = hargaInflasi * (${cciLokasiValue} / ${cciRefValue})`;
+      const rumusBenchmark = `toBenchmark = ${hargaInflasi} * (${cciRefValue} / ${cciOriginalValue})`;
+      const rumusHargaCCI = `hargaCCI = toBenchmark * (${cciLokasiValue} / 100)`;
 
       recommendedCosts.push({
         ...baseItem,
@@ -333,7 +352,9 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
         totalHarga: Math.round(qty * hargaCCI),
         rumusQty,
         rumusHargaInflasi,
-        rumusHargaCCI,
+        rumusBenchmark,       // NEW
+        rumusHargaCCI,        // UPDATED meaning
+        toBenchmark,          // NEW (raw value, not rounded)
         _mode: mode
       });
     }

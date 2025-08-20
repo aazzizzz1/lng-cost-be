@@ -326,8 +326,8 @@ exports.estimateCost = async (req, res) => {
       if (originCCI && refCCI && projCCI) {
         toBenchmarkFactor = refCCI / originCCI;
         costBenchmark = d.cost * toBenchmarkFactor;
-        toProjectFactor = projCCI/100;              // FIX: gunakan rasio, bukan nilai mentah
-        totalIKKFactor = toBenchmarkFactor * toProjectFactor; // = (ref/origin)*(proj/ref) = proj/origin
+        toProjectFactor = projCCI/100;              
+        totalIKKFactor = toBenchmarkFactor * toProjectFactor; 
       }
 
       const finalCost = d.cost * totalIKKFactor;
