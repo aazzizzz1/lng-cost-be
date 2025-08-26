@@ -24,12 +24,27 @@ exports.createUnitPrice = async (req, res) => {
 
 exports.getAllUnitPrices = async (req, res) => {
   try {
-    const { page = 1, limit = 10, sort, order, search, tipe, infrastruktur, kelompok } = req.query;
+    const { page = 1, limit = 10, sort, order, search, tipe, infrastruktur, kelompok, volume } = req.query;
 
     const filters = {};
-    if (tipe) filters.tipe = { equals: tipe.toLowerCase(), mode: 'insensitive' }; // Ensure case-insensitive matching
+    if (tipe) filters.tipe = { equals: tipe.toLowerCase(), mode: 'insensitive' };
     if (infrastruktur) filters.infrastruktur = { equals: infrastruktur.toLowerCase(), mode: 'insensitive' };
     if (kelompok) filters.kelompok = { equals: kelompok.toLowerCase(), mode: 'insensitive' };
+
+    // NEW: volume filter supports single value or comma-separated list
+    if (volume) {
+      if (typeof volume === 'string' && volume.includes(',')) {
+        const vols = volume
+          .split(',')
+          .map(v => parseFloat(v.trim()))
+          .filter(v => !Number.isNaN(v));
+        if (vols.length) filters.volume = { in: vols };
+      } else {
+        const v = parseFloat(volume);
+        if (!Number.isNaN(v)) filters.volume = { equals: v };
+      }
+    }
+
     if (search) {
       filters.OR = [
         { uraian: { contains: search.toLowerCase(), mode: 'insensitive' } },
