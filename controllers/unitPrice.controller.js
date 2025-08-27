@@ -86,6 +86,21 @@ exports.getAllUnitPrices = async (req, res) => {
   }
 };
 
+// NEW: get all unit prices without filters/pagination
+exports.getAllUnitPricesAll = async (req, res) => {
+  try {
+    const unitPrices = await prisma.unitPrice.findMany({
+      orderBy: { createdAt: 'asc' },
+    });
+    res.json({
+      message: 'All unit prices retrieved successfully.',
+      data: unitPrices,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch all unit prices', error: error.message });
+  }
+};
+
 exports.deleteAllUnitPrices = async (req, res) => {
   try {
     await prisma.unitPrice.deleteMany(); // Deletes all records in the UnitPrice table
@@ -169,7 +184,7 @@ exports.recommendUnitPrices = async (req, res) => {
     // Step 3: Fetch CCI for a province with a value within ±100 dynamically
     const cciReference = await prisma.cci.findFirst({
       where: {
-        cci: { gte: 99, lte: 101 },
+        cci: { gte: 100, lte: 100 },
       },
     });
 

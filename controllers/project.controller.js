@@ -268,7 +268,7 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
     }
 
     // CCI
-    const cciRef = await prisma.cci.findFirst({ where: { cci: { gte: 99, lte: 101 } } });
+    const cciRef = await prisma.cci.findFirst({ where: { cci: { gte: 100, lte: 100 } } });
     const cciRefValue = cciRef ? cciRef.cci : 100;
     const cciLokasi = await prisma.cci.findFirst({
       where: { provinsi: { equals: lokasi, mode: 'insensitive' } },

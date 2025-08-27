@@ -3,8 +3,11 @@ const router = express.Router();
 const controller = require('../controllers/unitPrice.controller');
 const { authenticate, authorizeRoles } = require('../middlewares/auth.middleware'); // Authentication and Authorization middleware
 
-// Authenticated users can view unit prices
-router.get('/', controller.getAllUnitPrices); // Ensures only authenticated users can view unit prices
+// Filtered + paginated
+router.get('/', controller.getAllUnitPrices);
+// Get all (no filters/pagination)
+router.get('/all', controller.getAllUnitPricesAll);
+
 router.post('/', controller.createUnitPrice); // Ensures only authenticated users can create unit prices
 router.delete('/',controller.deleteAllUnitPrices); // Ensures only authenticated admin users can delete all unit prices
 router.get('/unique-fields', controller.getUniqueFields); // Fetch unique values for tipe, infrastruktur, and kelompok
