@@ -152,122 +152,76 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
       return res.status(400).json({ message: 'No UnitPrice data found.' });
     }
 
-    // Normalisasi volume dan kumpulkan per volume
-    const volumeMap = new Map(); // numVolume -> { vol, items, codes:Set }
+    // Kumpulkan per volume, siapkan map per workcode di setiap volume
+    const norm = (s) => (s || '').trim().toLowerCase();
+    const byVolume = new Map(); // vol -> { vol, items, map: Map(code->item), codes:Set }
     for (const up of unitPrices) {
       const numVol = parseVol(up.volume);
       if (isNaN(numVol)) continue;
       up._numVolume = numVol;
-      if (!volumeMap.has(numVol)) volumeMap.set(numVol, { vol: numVol, items: [], codes: new Set() });
-      const bucket = volumeMap.get(numVol);
+      if (!byVolume.has(numVol)) {
+        byVolume.set(numVol, { vol: numVol, items: [], map: new Map(), codes: new Set() });
+      }
+      const bucket = byVolume.get(numVol);
       bucket.items.push(up);
-      const code = (up.workcode || '').trim().toLowerCase();
-      if (code) bucket.codes.add(code);
+      const code = norm(up.workcode);
+      if (code) {
+        if (!bucket.map.has(code)) bucket.map.set(code, up);
+        bucket.codes.add(code);
+      }
     }
-    const volumeEntries = Array.from(volumeMap.values()).sort((a, b) => a.vol - b.vol);
-    if (!volumeEntries.length || isNaN(targetVolume)) {
+    const entries = Array.from(byVolume.values()).sort((a, b) => a.vol - b.vol);
+    if (!entries.length || isNaN(targetVolume)) {
       return res.status(400).json({ message: 'Invalid volume data.' });
     }
 
-    const volumes = volumeEntries.map(v => v.vol);
-    const isExactVolume = volumes.includes(targetVolume);
+    // Temukan lower/upper di sekitar target
+    let lowerIdx = -1;
+    let upperIdx = -1;
+    for (let i = 0; i < entries.length; i++) {
+      if (entries[i].vol <= targetVolume) lowerIdx = i;
+      if (entries[i].vol >= targetVolume) { upperIdx = i; break; }
+    }
+    if (upperIdx === -1) upperIdx = entries.length - 1;
+    if (lowerIdx === -1) lowerIdx = 0;
 
-    const selectPairByMaxOverlap = (candidatesLower, candidatesUpper, context) => {
-      let best = null;
-      for (const L of candidatesLower) {
-        for (const U of candidatesUpper) {
-          if (L.vol === U.vol) continue;
-            // context in-range: enforce L<=target<=U
-            if (context === 'in-range' && !(L.vol <= targetVolume && targetVolume <= U.vol)) continue;
-          const interSize = [...L.codes].filter(c => U.codes.has(c)).length;
-          if (!best) {
-            best = { L, U, interSize };
-            continue;
-          }
-          if (
-            interSize > best.interSize ||
-            (interSize === best.interSize && (U.vol - L.vol) < (best.U.vol - best.L.vol)) ||
-            (interSize === best.interSize && (U.vol - L.vol) === (best.U.vol - best.L.vol) &&
-              Math.abs(targetVolume - ((L.vol + U.vol) / 2)) < Math.abs(targetVolume - ((best.L.vol + best.U.vol) / 2)))
-          ) {
-            best = { L, U, interSize };
-          }
-        }
-      }
-      return best;
-    };
+    const lowerEntry = entries[lowerIdx];
+    const upperEntry = entries[upperIdx];
+    const isExactVolume = lowerIdx === upperIdx;
 
+    // Referensi volume: pilih yang paling dekat ke target. Jika seri, pilih lower.
+    let refEntry = lowerEntry;
+    if (!isExactVolume) {
+      const distLower = Math.abs(targetVolume - lowerEntry.vol);
+      const distUpper = Math.abs(upperEntry.vol - targetVolume);
+      refEntry = distUpper < distLower ? upperEntry : lowerEntry;
+    }
+
+    // Tetapkan tetangga untuk interpolasi/extrapolasi (hanya untuk hitung qty, bukan menambah item)
     let mode = 'single';
-    let lowerVol, upperVol;
-    let lowerItems = [];
-    let upperItems = [];
-
-    if (isExactVolume) {
-      lowerVol = upperVol = targetVolume;
-      lowerItems = upperItems = volumeMap.get(targetVolume).items;
-    } else if (targetVolume < volumes[0]) {
-      // extrapolation below: gunakan dua volume terbawah dengan overlap maksimum
-      mode = 'extrapolation-below';
-      const subset = volumeEntries.slice(0, Math.min(4, volumeEntries.length));
-      const pair = selectPairByMaxOverlap(subset, subset.slice(1), 'below') ||
-        { L: subset[0], U: subset[1] };
-      lowerVol = pair.L.vol;
-      upperVol = pair.U.vol;
-      lowerItems = pair.L.items;
-      upperItems = pair.U.items;
-    } else if (targetVolume > volumes[volumes.length - 1]) {
-      // extrapolation above
-      mode = 'extrapolation-above';
-      const subset = volumeEntries.slice(-Math.min(4, volumeEntries.length));
-      const pair = selectPairByMaxOverlap(subset, subset, 'above') ||
-        { L: subset[subset.length - 2], U: subset[subset.length - 1] };
-      // Ensure L < U
-      if (pair.L.vol > pair.U.vol) [pair.L, pair.U] = [pair.U, pair.L];
-      lowerVol = pair.L.vol;
-      upperVol = pair.U.vol;
-      lowerItems = pair.L.items;
-      upperItems = pair.U.items;
-    } else {
-      // in-range interpolation
-      mode = 'interpolation';
-      const lowers = volumeEntries.filter(v => v.vol <= targetVolume);
-      const uppers = volumeEntries.filter(v => v.vol >= targetVolume);
-      const pair = selectPairByMaxOverlap(lowers, uppers, 'in-range');
-      if (pair) {
-        lowerVol = pair.L.vol;
-        upperVol = pair.U.vol;
-        lowerItems = pair.L.items;
-        upperItems = pair.U.items;
-        if (lowerVol === upperVol) mode = 'single';
-      } else {
-        // fallback ke volumes terdekat
-        let closest = volumes[0];
-        for (const v of volumes) {
-          if (Math.abs(v - targetVolume) < Math.abs(closest - targetVolume)) closest = v;
-        }
-        lowerVol = upperVol = closest;
-        lowerItems = upperItems = volumeMap.get(closest).items;
-        mode = 'single';
+    let pairEntry = null;
+    if (!isExactVolume) {
+      if (lowerEntry && upperEntry && lowerEntry.vol < targetVolume && targetVolume < upperEntry.vol) {
+        mode = 'interpolation';
+        pairEntry = refEntry === lowerEntry ? upperEntry : lowerEntry;
+      } else if (targetVolume < entries[0].vol) {
+        mode = 'extrapolation-below';
+        pairEntry = entries[Math.min(1, entries.length - 1)];
+        refEntry = entries[0];
+      } else if (targetVolume > entries[entries.length - 1].vol) {
+        mode = 'extrapolation-above';
+        pairEntry = entries[Math.max(entries.length - 2, 0)];
+        refEntry = entries[entries.length - 1];
       }
     }
 
-    const norm = (s) => (s || '').trim().toLowerCase();
-    const toMap = (arr) => {
-      const m = new Map();
-      for (const it of arr) {
-        const k = norm(it.workcode);
-        if (k && !m.has(k)) m.set(k, it);
-      }
-      return m;
-    };
-    const lowerMap = toMap(lowerItems);
-    const upperMap = toMap(upperItems);
-    const unionCodes = new Set([...lowerMap.keys(), ...upperMap.keys()]);
-    if (unionCodes.size === 0) {
-      return res.status(400).json({ message: 'No UnitPrice items found for selected volumes.' });
-    }
+    // Peta lower/upper untuk rumus interpolasi per item (jika ada keduanya)
+    const lowerMap = lowerEntry ? lowerEntry.map : new Map();
+    const upperMap = upperEntry ? upperEntry.map : new Map();
+    const X1 = lowerEntry ? lowerEntry.vol : refEntry.vol;
+    const X2 = upperEntry ? upperEntry.vol : refEntry.vol;
 
-    // CCI
+    // CCI target lokasi dan referensi 100
     const cciRef = await prisma.cci.findFirst({ where: { cci: { gte: 100, lte: 100 } } });
     const cciRefValue = cciRef ? cciRef.cci : 100;
     const cciLokasi = await prisma.cci.findFirst({
@@ -275,7 +229,7 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
     });
     const cciLokasiValue = cciLokasi ? cciLokasi.cci : 100;
 
-    // NEW: cache helper for original location CCI
+    // Cache CCI asal item
     const cciCache = new Map();
     const getCCIValue = async (prov) => {
       if (!prov) return 100;
@@ -290,14 +244,12 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
     };
 
     const r = Number(inflasi || 0) / 100;
-    const X1 = lowerVol;
-    const X2 = upperVol;
 
+    // Hanya gunakan item dari volume referensi
     const recommendedCosts = [];
-    for (const code of unionCodes) {
-      const itemLower = lowerMap.get(code);
-      const itemUpper = upperMap.get(code);
-      const baseItem = itemLower || itemUpper;
+    for (const code of refEntry.codes) {
+      const baseItem = refEntry.map.get(code);
+      if (!baseItem) continue; // safety
 
       let qty;
       let rumusQty;
@@ -305,9 +257,9 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
       if (isExactVolume && Number(baseItem._numVolume) === targetVolume) {
         qty = baseItem.qty || 0;
         rumusQty = `qty = ${qty} (exact volume match)`;
-      } else if (itemLower && itemUpper && X2 !== X1) {
-        const Y1 = itemLower.qty || 0;
-        const Y2 = itemUpper.qty || 0;
+      } else if (lowerEntry && upperEntry && lowerMap.has(code) && upperMap.has(code) && X2 !== X1) {
+        const Y1 = (lowerMap.get(code).qty || 0);
+        const Y2 = (upperMap.get(code).qty || 0);
         const label =
           mode === 'interpolation'
             ? 'interpolation'
@@ -320,20 +272,20 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
         rumusQty = `qty (${label}) = ${Y1} + ((${targetVolume} - ${X1}) / (${X2} - ${X1})) * (${Y2} - ${Y1})`;
       } else {
         qty = baseItem.qty || 0;
-        rumusQty = `qty = ${qty} (single side, no pair)`;
+        rumusQty = `qty = ${qty} (reference volume only)`;
       }
 
-      // NEW: if interpolated/extrapolated qty becomes negative, fallback to original database qty
+      // Jika hasil negatif, fallback ke qty asli
       if (qty < 0) {
         const originalQty = baseItem.qty || 0;
         rumusQty += ` => result negative (${qty}), fallback to original qty ${originalQty}`;
         qty = originalQty;
       }
 
+      // Inflasi + normalisasi CCI (dua tahap) tetap sama
       const n = Number(tahun) - Number(baseItem.tahun || tahun);
       const hargaInflasi = (baseItem.hargaSatuan || 0) * Math.pow(1 + r, n);
-      const cciOriginalValue = await getCCIValue(baseItem.lokasi); // NEW
-      // REFACTORED two-step CCI normalization
+      const cciOriginalValue = await getCCIValue(baseItem.lokasi);
       const toBenchmark = hargaInflasi * (cciRefValue / cciOriginalValue);
       const hargaCCI = toBenchmark * (cciLokasiValue / 100);
 
@@ -352,10 +304,11 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
         totalHarga: Math.round(qty * hargaCCI),
         rumusQty,
         rumusHargaInflasi,
-        rumusBenchmark,       // NEW
-        rumusHargaCCI,        // UPDATED meaning
-        toBenchmark,          // NEW (raw value, not rounded)
-        _mode: mode
+        rumusBenchmark,
+        rumusHargaCCI,
+        toBenchmark,
+        _mode: mode,
+        _referenceVolume: refEntry.vol
       });
     }
 
@@ -364,10 +317,10 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
       data: recommendedCosts,
       meta: {
         targetVolume,
-        lowerVol,
-        upperVol,
+        referenceVolume: refEntry.vol,
+        neighborVolume: pairEntry ? pairEntry.vol : null,
         mode,
-        overlapCodes: [...lowerMap.keys()].filter(c => upperMap.has(c)).length
+        itemCount: recommendedCosts.length
       }
     });
   } catch (error) {
