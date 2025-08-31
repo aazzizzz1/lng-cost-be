@@ -175,47 +175,57 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
       return res.status(400).json({ message: 'Invalid volume data.' });
     }
 
-    // Temukan lower/upper di sekitar target
+    // Temukan lower/upper di sekitar target (tanpa fallback ke indeks valid)
     let lowerIdx = -1;
     let upperIdx = -1;
     for (let i = 0; i < entries.length; i++) {
-      if (entries[i].vol <= targetVolume) lowerIdx = i;
-      if (entries[i].vol >= targetVolume) { upperIdx = i; break; }
-    }
-    if (upperIdx === -1) upperIdx = entries.length - 1;
-    if (lowerIdx === -1) lowerIdx = 0;
-
-    const lowerEntry = entries[lowerIdx];
-    const upperEntry = entries[upperIdx];
-    const isExactVolume = lowerIdx === upperIdx;
-
-    // Referensi volume: pilih yang paling dekat ke target. Jika seri, pilih lower.
-    let refEntry = lowerEntry;
-    if (!isExactVolume) {
-      const distLower = Math.abs(targetVolume - lowerEntry.vol);
-      const distUpper = Math.abs(upperEntry.vol - targetVolume);
-      refEntry = distUpper < distLower ? upperEntry : lowerEntry;
+      const v = entries[i].vol;
+      if (v <= targetVolume) lowerIdx = i;
+      if (upperIdx === -1 && v >= targetVolume) upperIdx = i;
     }
 
-    // Tetapkan tetangga untuk interpolasi/extrapolasi (hanya untuk hitung qty, bukan menambah item)
+    // Siapkan entries untuk perhitungan
+    let lowerEntry = lowerIdx !== -1 ? entries[lowerIdx] : null;
+    let upperEntry = upperIdx !== -1 ? entries[upperIdx] : null;
+
     let mode = 'single';
+    let refEntry = null;
     let pairEntry = null;
-    if (!isExactVolume) {
-      if (lowerEntry && upperEntry && lowerEntry.vol < targetVolume && targetVolume < upperEntry.vol) {
-        mode = 'interpolation';
-        pairEntry = refEntry === lowerEntry ? upperEntry : lowerEntry;
-      } else if (targetVolume < entries[0].vol) {
-        mode = 'extrapolation-below';
-        pairEntry = entries[Math.min(1, entries.length - 1)];
-        refEntry = entries[0];
-      } else if (targetVolume > entries[entries.length - 1].vol) {
-        mode = 'extrapolation-above';
-        pairEntry = entries[Math.max(entries.length - 2, 0)];
-        refEntry = entries[entries.length - 1];
-      }
+
+    const belowRange = lowerIdx === -1;
+    const aboveRange = upperIdx === -1;
+
+    // isExactVolume hanya true jika benar-benar ketemu volume yang sama (bukan hasil fallback)
+    let isExactVolume = false;
+
+    if (belowRange && entries.length >= 1) {
+      // extrapolasi di bawah range database
+      mode = 'extrapolation-below';
+      refEntry = entries[0];
+      pairEntry = entries[1] || null;
+      // gunakan pasangan [min, next] untuk perhitungan qty (X1, X2)
+      lowerEntry = refEntry;
+      upperEntry = pairEntry || refEntry;
+    } else if (aboveRange && entries.length >= 1) {
+      // extrapolasi di atas range database
+      mode = 'extrapolation-above';
+      refEntry = entries[entries.length - 1];
+      pairEntry = entries[entries.length - 2] || null;
+      // gunakan pasangan [prev, max] untuk perhitungan qty (X1, X2)
+      lowerEntry = pairEntry || refEntry;
+      upperEntry = refEntry;
+    } else {
+      // di dalam range database
+      isExactVolume = lowerEntry && upperEntry && lowerEntry.vol === upperEntry.vol;
+      // pilih reference volume terdekat (jika seri, pilih lower)
+      refEntry = isExactVolume
+        ? lowerEntry
+        : (Math.abs(targetVolume - lowerEntry.vol) <= Math.abs(upperEntry.vol - targetVolume) ? lowerEntry : upperEntry);
+      mode = isExactVolume ? 'single' : 'interpolation';
+      pairEntry = refEntry === lowerEntry ? upperEntry : lowerEntry;
     }
 
-    // Peta lower/upper untuk rumus interpolasi per item (jika ada keduanya)
+    // Peta untuk interpolasi/extrapolasi qty per item
     const lowerMap = lowerEntry ? lowerEntry.map : new Map();
     const upperMap = upperEntry ? upperEntry.map : new Map();
     const X1 = lowerEntry ? lowerEntry.vol : refEntry.vol;
@@ -249,7 +259,7 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
     const recommendedCosts = [];
     for (const code of refEntry.codes) {
       const baseItem = refEntry.map.get(code);
-      if (!baseItem) continue; // safety
+      if (!baseItem) continue;
 
       let qty;
       let rumusQty;
