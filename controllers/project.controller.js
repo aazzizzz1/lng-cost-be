@@ -175,54 +175,60 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
       return res.status(400).json({ message: 'Invalid volume data.' });
     }
 
-    // Temukan lower/upper di sekitar target (tanpa fallback ke indeks valid)
-    let lowerIdx = -1;
-    let upperIdx = -1;
-    for (let i = 0; i < entries.length; i++) {
-      const v = entries[i].vol;
-      if (v <= targetVolume) lowerIdx = i;
-      if (upperIdx === -1 && v >= targetVolume) upperIdx = i;
+    // Cari volume template terdekat, jika tepat di tengah maka pilih yang lebih besar
+    let closestIdx = 0;
+    let minDist = Math.abs(entries[0].vol - targetVolume);
+    for (let i = 1; i < entries.length; i++) {
+      const dist = Math.abs(entries[i].vol - targetVolume);
+      if (
+        dist < minDist ||
+        (dist === minDist && entries[i].vol > entries[closestIdx].vol) // jika sama, pilih yang lebih besar
+      ) {
+        minDist = dist;
+        closestIdx = i;
+      }
     }
+    // Jika target tepat di tengah dua volume, pilih yang lebih besar
+    for (let i = 1; i < entries.length; i++) {
+      const v1 = entries[i - 1].vol;
+      const v2 = entries[i].vol;
+      if (targetVolume > v1 && targetVolume < v2) {
+        const mid = (v1 + v2) / 2;
+        if (targetVolume === mid) {
+          closestIdx = i; // pilih yang atas
+        }
+      }
+    }
+    const refEntry = entries[closestIdx];
 
-    // Siapkan entries untuk perhitungan
-    let lowerEntry = lowerIdx !== -1 ? entries[lowerIdx] : null;
-    let upperEntry = upperIdx !== -1 ? entries[upperIdx] : null;
+    // Cari pasangan lower/upper untuk interpolasi qty
+    let lowerEntry = null, upperEntry = null;
+    for (let i = 0; i < entries.length; i++) {
+      if (entries[i].vol <= targetVolume) lowerEntry = entries[i];
+      if (!upperEntry && entries[i].vol >= targetVolume) upperEntry = entries[i];
+    }
+    if (!lowerEntry) lowerEntry = entries[0];
+    if (!upperEntry) upperEntry = entries[entries.length - 1];
 
+    // Mode penentuan
     let mode = 'single';
-    let refEntry = null;
     let pairEntry = null;
-
-    const belowRange = lowerIdx === -1;
-    const aboveRange = upperIdx === -1;
-
-    // isExactVolume hanya true jika benar-benar ketemu volume yang sama (bukan hasil fallback)
-    let isExactVolume = false;
-
-    if (belowRange && entries.length >= 1) {
-      // extrapolasi di bawah range database
+    let isExactVolume = refEntry.vol === targetVolume;
+    if (isExactVolume) {
+      mode = 'single';
+      pairEntry = null;
+    } else if (refEntry.vol < targetVolume && upperEntry && upperEntry.vol !== refEntry.vol) {
+      mode = 'interpolation';
+      pairEntry = upperEntry;
+    } else if (refEntry.vol > targetVolume && lowerEntry && lowerEntry.vol !== refEntry.vol) {
+      mode = 'interpolation';
+      pairEntry = lowerEntry;
+    } else if (targetVolume < entries[0].vol) {
       mode = 'extrapolation-below';
-      refEntry = entries[0];
       pairEntry = entries[1] || null;
-      // gunakan pasangan [min, next] untuk perhitungan qty (X1, X2)
-      lowerEntry = refEntry;
-      upperEntry = pairEntry || refEntry;
-    } else if (aboveRange && entries.length >= 1) {
-      // extrapolasi di atas range database
+    } else if (targetVolume > entries[entries.length - 1].vol) {
       mode = 'extrapolation-above';
-      refEntry = entries[entries.length - 1];
       pairEntry = entries[entries.length - 2] || null;
-      // gunakan pasangan [prev, max] untuk perhitungan qty (X1, X2)
-      lowerEntry = pairEntry || refEntry;
-      upperEntry = refEntry;
-    } else {
-      // di dalam range database
-      isExactVolume = lowerEntry && upperEntry && lowerEntry.vol === upperEntry.vol;
-      // pilih reference volume terdekat (jika seri, pilih lower)
-      refEntry = isExactVolume
-        ? lowerEntry
-        : (Math.abs(targetVolume - lowerEntry.vol) <= Math.abs(upperEntry.vol - targetVolume) ? lowerEntry : upperEntry);
-      mode = isExactVolume ? 'single' : 'interpolation';
-      pairEntry = refEntry === lowerEntry ? upperEntry : lowerEntry;
     }
 
     // Peta untuk interpolasi/extrapolasi qty per item
@@ -255,7 +261,7 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
 
     const r = Number(inflasi || 0) / 100;
 
-    // Hanya gunakan item dari volume referensi
+    // Hanya gunakan item dari volume template (refEntry)
     const recommendedCosts = [];
     for (const code of refEntry.codes) {
       const baseItem = refEntry.map.get(code);
@@ -267,7 +273,11 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
       if (isExactVolume && Number(baseItem._numVolume) === targetVolume) {
         qty = baseItem.qty || 0;
         rumusQty = `qty = ${qty} (exact volume match)`;
-      } else if (lowerEntry && upperEntry && lowerMap.has(code) && upperMap.has(code) && X2 !== X1) {
+      } else if (
+        lowerEntry && upperEntry &&
+        lowerMap.has(code) && upperMap.has(code) &&
+        X2 !== X1
+      ) {
         const Y1 = (lowerMap.get(code).qty || 0);
         const Y2 = (upperMap.get(code).qty || 0);
         const label =
