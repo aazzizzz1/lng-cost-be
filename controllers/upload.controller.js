@@ -1,11 +1,8 @@
 const XLSX = require('xlsx');
 const prisma = require('../config/db');
+const parseExcelNumber = require('../utils/parseExcelNumber'); // Tambahkan import
 
-const cleanNumber = (val) => {
-  if (!val) return 0;
-  if (typeof val === 'number') return val;
-  return parseFloat(String(val).replace(/[^0-9.-]/g, '')) || 0; // Input sanitization
-};
+const cleanNumber = (val) => parseExcelNumber(val); // Gunakan util pembulatan
 
 const syncUnitPriceToConstruction = async (unitPrices) => {
   for (const unitPrice of unitPrices) {
@@ -105,7 +102,8 @@ exports.uploadExcel = async (req, res) => {
         skippedRows.push(idx + 2); // Log the row number (Excel rows start at 1)
         return; // Skip rows with missing "Item"
       }
-      const qty = cleanNumber(row['qty']);
+      // Preserve all decimals for qty
+      const qty = parseExcelNumber(row['qty']); // Do not round or format
       const hargaSatuan = cleanNumber(row['cost']);
       const specRaw = row['specification'];
       const specification =
@@ -114,10 +112,10 @@ exports.uploadExcel = async (req, res) => {
         workcode: row['work code'] || '', // NEW (optional if column exists)
         uraian: row['item'] || 'Unknown',
         specification, // use normalized specification
-        qty,
+        qty, // keep full precision
         satuan: row['satuan'] || '',
-        hargaSatuan,
-        totalHarga: qty * hargaSatuan, // Calculate total cost
+        hargaSatuan: cleanNumber(row['cost']), // Pastikan hargaSatuan dibulatkan
+        totalHarga: cleanNumber(qty * cleanNumber(row['cost'])), // Gunakan pembulatan util
         aaceClass: parseInt(row['aace class']) || 0,
         accuracyLow: parseFloat(String(row['low']).replace(',', '.').replace('%', '')) || 0, // Handle commas as decimal points
         accuracyHigh: parseFloat(String(row['high']).replace(',', '.').replace('%', '')) || 0, // Handle commas as decimal points

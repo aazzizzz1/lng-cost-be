@@ -175,14 +175,14 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
       return res.status(400).json({ message: 'Invalid volume data.' });
     }
 
-    // Cari volume template terdekat, jika tepat di tengah maka pilih yang lebih besar
+    // Cari volume template terdekat
     let closestIdx = 0;
     let minDist = Math.abs(entries[0].vol - targetVolume);
     for (let i = 1; i < entries.length; i++) {
       const dist = Math.abs(entries[i].vol - targetVolume);
       if (
         dist < minDist ||
-        (dist === minDist && entries[i].vol > entries[closestIdx].vol) // jika sama, pilih yang lebih besar
+        (dist === minDist && entries[i].vol > entries[closestIdx].vol)
       ) {
         minDist = dist;
         closestIdx = i;
@@ -195,20 +195,26 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
       if (targetVolume > v1 && targetVolume < v2) {
         const mid = (v1 + v2) / 2;
         if (targetVolume === mid) {
-          closestIdx = i; // pilih yang atas
+          closestIdx = i;
         }
       }
     }
     const refEntry = entries[closestIdx];
 
-    // Cari pasangan lower/upper untuk interpolasi qty
+    // Perbaikan penentuan lowerEntry dan upperEntry untuk extrapolasi
     let lowerEntry = null, upperEntry = null;
     for (let i = 0; i < entries.length; i++) {
       if (entries[i].vol <= targetVolume) lowerEntry = entries[i];
-      if (!upperEntry && entries[i].vol >= targetVolume) upperEntry = entries[i];
+      if (upperEntry === null && entries[i].vol >= targetVolume) upperEntry = entries[i];
     }
-    if (!lowerEntry) lowerEntry = entries[0];
-    if (!upperEntry) upperEntry = entries[entries.length - 1];
+    // Untuk extrapolasi bawah dan atas, ambil dua volume terdekat
+    if (targetVolume < entries[0].vol) {
+      lowerEntry = entries[0];
+      upperEntry = entries[1] || entries[0];
+    } else if (targetVolume > entries[entries.length - 1].vol) {
+      lowerEntry = entries[entries.length - 2] || entries[entries.length - 1];
+      upperEntry = entries[entries.length - 1];
+    }
 
     // Mode penentuan
     let mode = 'single';
@@ -217,18 +223,19 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
     if (isExactVolume) {
       mode = 'single';
       pairEntry = null;
-    } else if (refEntry.vol < targetVolume && upperEntry && upperEntry.vol !== refEntry.vol) {
+    } else if (
+      targetVolume < entries[0].vol && entries.length > 1
+    ) {
+      mode = 'extrapolation-below';
+      pairEntry = upperEntry;
+    } else if (
+      targetVolume > entries[entries.length - 1].vol && entries.length > 1
+    ) {
+      mode = 'extrapolation-above';
+      pairEntry = lowerEntry;
+    } else if (lowerEntry && upperEntry && lowerEntry.vol !== upperEntry.vol) {
       mode = 'interpolation';
       pairEntry = upperEntry;
-    } else if (refEntry.vol > targetVolume && lowerEntry && lowerEntry.vol !== refEntry.vol) {
-      mode = 'interpolation';
-      pairEntry = lowerEntry;
-    } else if (targetVolume < entries[0].vol) {
-      mode = 'extrapolation-below';
-      pairEntry = entries[1] || null;
-    } else if (targetVolume > entries[entries.length - 1].vol) {
-      mode = 'extrapolation-above';
-      pairEntry = entries[entries.length - 2] || null;
     }
 
     // Peta untuk interpolasi/extrapolasi qty per item
@@ -320,8 +327,8 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
         tahun,
         volume: targetVolume,
         qty,
-        hargaSatuan: Math.round(hargaCCI),
-        totalHarga: Math.round(qty * hargaCCI),
+        hargaSatuan: hargaCCI,
+        totalHarga: qty * hargaCCI,
         rumusQty,
         rumusHargaInflasi,
         rumusBenchmark,
@@ -334,6 +341,7 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
 
     res.status(200).json({
       message: 'Recommended construction costs retrieved successfully.',
+      total: recommendedCosts.reduce((sum, c) => sum + c.totalHarga, 0),
       data: recommendedCosts,
       meta: {
         targetVolume,
