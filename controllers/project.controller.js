@@ -175,6 +175,13 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
       return res.status(400).json({ message: 'Invalid volume data.' });
     }
 
+    // Williams rule if only one entry
+    let williamsRule = false;
+    let nWilliams = 0.66;
+    if (entries.length === 1) {
+      williamsRule = true;
+    }
+
     // Cari volume template terdekat
     let closestIdx = 0;
     let minDist = Math.abs(entries[0].vol - targetVolume);
@@ -277,7 +284,14 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
       let qty;
       let rumusQty;
 
-      if (isExactVolume && Number(baseItem._numVolume) === targetVolume) {
+      if (williamsRule) {
+        // Williams rule: qty = qty_ref * (V_target / V_ref)^n
+        const qtyRef = baseItem.qty || 0;
+        const Vref = refEntry.vol;
+        const Vtarget = targetVolume;
+        qty = qtyRef * Math.pow(Vtarget / Vref, nWilliams);
+        rumusQty = `qty (Williams rule) = ${qtyRef} * (${Vtarget} / ${Vref})^${nWilliams}`;
+      } else if (isExactVolume && Number(baseItem._numVolume) === targetVolume) {
         qty = baseItem.qty || 0;
         rumusQty = `qty = ${qty} (exact volume match)`;
       } else if (
