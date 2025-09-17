@@ -18,6 +18,9 @@ router.post('/recommend', controller.recommendUnitPrices);
 // Endpoint untuk chart diagram unit price per infrastruktur
 router.get('/chart-data', controller.getUnitPriceChartData);
 
+// Route untuk unique infrastruktur, volume, proyek
+router.get('/unique-infrastruktur-proyek', controller.getUniqueInfrastrukturAndProyek);
+
 // Only admin can create unit price
 // router.post('/', authenticate, authorizeRoles('admin'), controller.createUnitPrice);
 //  authenticate, authorizeRoles('admin'),

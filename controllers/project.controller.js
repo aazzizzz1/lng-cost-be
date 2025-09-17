@@ -135,7 +135,7 @@ exports.getProjectById = async (req, res) => {
 
 exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
   try {
-    const { name, infrastruktur, lokasi, volume, tahun, inflasi } = req.body;
+    const { name, infrastruktur, lokasi, volume, tahun, inflasi, proyek } = req.body; // tambah proyek
 
     const parseVol = (v) => {
       if (v === null || v === undefined) return NaN;
@@ -206,7 +206,36 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
         }
       }
     }
-    const refEntry = entries[closestIdx];
+
+    // Ambil semua entry dengan volume sama (jika ada duplikat volume)
+    let candidateEntries = entries.filter(e => e.vol === entries[closestIdx].vol);
+    let refEntry;
+    if (candidateEntries.length > 1 && proyek) {
+      // Jika ada parameter proyek, pilih yang sesuai
+      refEntry = candidateEntries.find(e =>
+        e.items.some(item => (item.proyek || '').toLowerCase() === proyek.toLowerCase())
+      );
+      if (!refEntry) refEntry = candidateEntries[0]; // fallback jika tidak ketemu
+    } else {
+      refEntry = candidateEntries[0];
+    }
+
+    // FILTER: Jika proyek diberikan dan refEntry ditemukan, filter items, map, codes agar hanya proyek tsb
+    if (proyek && refEntry) {
+      const normProyek = proyek.trim().toLowerCase();
+      // Filter items
+      refEntry.items = refEntry.items.filter(item => (item.proyek || '').trim().toLowerCase() === normProyek);
+      // Rebuild map dan codes
+      refEntry.map = new Map();
+      refEntry.codes = new Set();
+      for (const item of refEntry.items) {
+        const code = norm(item.workcode);
+        if (code) {
+          if (!refEntry.map.has(code)) refEntry.map.set(code, item);
+          refEntry.codes.add(code);
+        }
+      }
+    }
 
     // Perbaikan penentuan lowerEntry dan upperEntry untuk extrapolasi
     let lowerEntry = null, upperEntry = null;
@@ -360,6 +389,7 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
       meta: {
         targetVolume,
         referenceVolume: refEntry.vol,
+        referenceProject: proyek || null,
         neighborVolume: pairEntry ? pairEntry.vol : null,
         mode,
         itemCount: recommendedCosts.length

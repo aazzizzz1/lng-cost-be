@@ -288,3 +288,45 @@ exports.getUnitPriceChartData = async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch chart data', error: error.message });
   }
 };
+
+// NEW: Get unique infrastruktur and proyek (show all infrastruktur, proyek only if same volume)
+exports.getUniqueInfrastrukturAndProyek = async (req, res) => {
+  try {
+    const unitPrices = await prisma.unitPrice.findMany({
+      select: { infrastruktur: true, volume: true, proyek: true },
+    });
+
+    // Step 1: Kelompokkan per infrastruktur dan volume
+    const infraMap = {};
+    for (const item of unitPrices) {
+      const infra = (item.infrastruktur || '').trim();
+      const vol = item.volume != null ? String(item.volume) : '';
+      const proyek = (item.proyek || '').trim();
+      if (!infra || !vol) continue;
+      if (!infraMap[infra]) infraMap[infra] = {};
+      if (!infraMap[infra][vol]) infraMap[infra][vol] = new Set();
+      if (proyek) infraMap[infra][vol].add(proyek);
+    }
+
+    // Step 2: Untuk setiap infrastruktur, cek volume yang sama (duplikat)
+    const result = {};
+    Object.keys(infraMap).forEach(infra => {
+      const volumes = Object.keys(infraMap[infra]);
+      // Cari volume yang muncul lebih dari satu proyek (duplikat volume)
+      const proyekSet = new Set();
+      volumes.forEach(vol => {
+        if (infraMap[infra][vol].size > 1) {
+          infraMap[infra][vol].forEach(proyek => proyekSet.add(proyek));
+        }
+      });
+      result[infra] = Array.from(proyekSet); // kosong jika tidak ada volume sama
+    });
+
+    res.json({
+      message: 'Unique infrastruktur and proyek (with same volume) grouped successfully.',
+      data: result,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch unique infrastruktur/proyek', data: null });
+  }
+};
