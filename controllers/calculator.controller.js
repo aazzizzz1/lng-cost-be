@@ -464,7 +464,7 @@ exports.estimateCost = async (req, res) => {
       return res.status(400).json({ message: 'Unknown method.' });
     }
 
-    const estimatedCost = Math.round(result.estimate);
+    const estimatedCost = result.estimate;
 
     // RINGKAS faktor rata-rata (untuk ringkasan sederhana)
     const avgIKKFactor = Number(

@@ -21,6 +21,9 @@ router.get('/chart-data', controller.getUnitPriceChartData);
 // Route untuk unique infrastruktur, volume, proyek
 router.get('/unique-infrastruktur-proyek', controller.getUniqueInfrastrukturAndProyek);
 
+// New route for best price recommendation per workcode
+router.get('/best-prices', controller.getBestPricesByWorkcode);
+
 // Only admin can create unit price
 // router.post('/', authenticate, authorizeRoles('admin'), controller.createUnitPrice);
 //  authenticate, authorizeRoles('admin'),

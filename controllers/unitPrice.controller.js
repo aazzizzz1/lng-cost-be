@@ -330,3 +330,138 @@ exports.getUniqueInfrastrukturAndProyek = async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch unique infrastruktur/proyek', data: null });
   }
 };
+
+// NEW: Get best price per workcode with outlier analysis
+exports.getBestPricesByWorkcode = async (req, res) => {
+  try {
+    // 1. Fetch all unit prices
+    const unitPrices = await prisma.unitPrice.findMany();
+
+    // 2. Group by workcode
+    const grouped = {};
+    for (const item of unitPrices) {
+      const code = item.workcode || 'NO_WORKCODE';
+      if (!grouped[code]) grouped[code] = [];
+      grouped[code].push(item);
+    }
+
+    // Helper functions
+    const median = arr => {
+      const sorted = [...arr].sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      return sorted.length % 2 !== 0
+        ? sorted[mid]
+        : (sorted[mid - 1] + sorted[mid]) / 2;
+    };
+    const mad = (arr, med) => {
+      const deviations = arr.map(x => Math.abs(x - med));
+      return median(deviations);
+    };
+    const iqr = arr => {
+      const sorted = [...arr].sort((a, b) => a - b);
+      const q1 = median(sorted.slice(0, Math.floor(sorted.length / 2)));
+      const q3 = median(sorted.slice(Math.ceil(sorted.length / 2)));
+      return { q1, q3, iqr: q3 - q1 };
+    };
+
+    // 3. Analyze each group
+    const recommendations = [];
+    for (const [workcode, items] of Object.entries(grouped)) {
+      // Consider only items with numeric hargaSatuan
+      const pricedItems = items.filter(i => typeof i.hargaSatuan === 'number' && !Number.isNaN(i.hargaSatuan));
+      const prices = pricedItems.map(i => i.hargaSatuan);
+
+      let recommended = null;
+      let analysis = {};
+      // Show all columns for composingPrices (keep as-is)
+      let composingPrices = items.map(i => ({
+        id: i.id,
+        workcode: i.workcode,
+        uraian: i.uraian,
+        specification: i.specification,
+        qty: i.qty,
+        satuan: i.satuan,
+        hargaSatuan: i.hargaSatuan,
+        totalHarga: i.totalHarga,
+        aaceClass: i.aaceClass,
+        accuracyLow: i.accuracyLow,
+        accuracyHigh: i.accuracyHigh,
+        tahun: i.tahun,
+        infrastruktur: i.infrastruktur,
+        volume: i.volume,
+        satuanVolume: i.satuanVolume,
+        kelompok: i.kelompok,
+        kelompokDetail: i.kelompokDetail,
+        proyek: i.proyek,
+        lokasi: i.lokasi,
+        tipe: i.tipe,
+        createdAt: i.createdAt,
+      }));
+
+      if (prices.length === 1) {
+        recommended = prices[0];
+        analysis.method = 'single';
+      } else if (prices.length === 2) {
+        recommended = Math.min(...prices);
+        analysis.method = 'min-of-two';
+      } else if (prices.length === 3) {
+        // Median & MAD
+        const med = median(prices);
+        const deviations = prices.map(x => Math.abs(x - med));
+        const madVal = mad(prices, med);
+        // Modified Z-score
+        const zscores = deviations.map(d => madVal === 0 ? 0 : 0.6745 * (d / madVal));
+        const outliers = zscores.map(z => z > 3.5);
+        recommended = med;
+        analysis = {
+          method: 'median-mad',
+          median: med,
+          deviations,
+          mad: madVal,
+          zscores,
+          outliers,
+        };
+      } else if (prices.length >= 4) {
+        // Interquartile Range
+        const { q1, q3, iqr: iqrVal } = iqr(prices);
+        const low = q1 - 1.5 * iqrVal;
+        const high = q3 + 1.5 * iqrVal;
+        const filtered = prices.filter(p => p >= low && p <= high);
+        recommended = filtered.length ? filtered.reduce((a, b) => a + b, 0) / filtered.length : null;
+        analysis = {
+          method: 'iqr',
+          q1, q3, iqr: iqrVal, low, high,
+          filteredPrices: filtered,
+          outliers: prices.map(p => p < low || p > high),
+        };
+      }
+
+      // Pick representative item (full record) closest to recommendedPrice
+      let recommendedItem = null;
+      if (recommended != null && pricedItems.length) {
+        recommendedItem = pricedItems.reduce((best, curr) => {
+          if (!best) return curr;
+          const bestDiff = Math.abs(best.hargaSatuan - recommended);
+          const currDiff = Math.abs(curr.hargaSatuan - recommended);
+          return currDiff < bestDiff ? curr : best;
+        }, null);
+      }
+
+      recommendations.push({
+        workcode,
+        recommendedPrice: recommended,
+        recommendedItem, // Full row with other columns from table harga satuan
+        composingPrices,
+        analysis,
+      });
+    }
+
+    res.json({
+      message: 'Best price recommendation per workcode with outlier analysis.',
+      recommendations,
+      // allUnitPrices: unitPrices,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to get best prices', error: error.message });
+  }
+};
