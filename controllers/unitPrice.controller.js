@@ -465,3 +465,106 @@ exports.getBestPricesByWorkcode = async (req, res) => {
     res.status(500).json({ message: 'Failed to get best prices', error: error.message });
   }
 };
+
+// NEW: Update UnitPrice dan sinkronkan ConstructionCost pada project yang sama (berdasarkan nama project = unitPrice.proyek)
+exports.updateUnitPrice = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+
+    const allowed = [
+      'workcode',
+      'uraian','specification','qty','satuan','hargaSatuan','totalHarga',
+      'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur',
+      'volume','satuanVolume','kelompok','kelompokDetail','proyek','lokasi','tipe'
+    ];
+    const data = {};
+    for (const k of allowed) {
+      if (req.body[k] !== undefined) data[k] = req.body[k];
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const before = await tx.unitPrice.findUnique({ where: { id } });
+      if (!before) throw new Error('UnitPrice not found');
+
+      // Update unit price
+      const updated = await tx.unitPrice.update({
+        where: { id },
+        data
+      });
+
+      // Cari project dengan nama sama seperti unitPrice.proyek (sebelum diupdate)
+      const projectName = (before.proyek || '').trim();
+      let projectIds = [];
+      if (projectName) {
+        const projects = await tx.project.findMany({
+          where: { name: { equals: projectName, mode: 'insensitive' } },
+          select: { id: true }
+        });
+        projectIds = projects.map(p => p.id);
+      }
+
+      let updatedCostCount = 0;
+
+      if (projectIds.length) {
+        // Ambil construction cost yang workcode-nya sama (pakai workcode lama) dan projectId cocok
+        const costs = await tx.constructionCost.findMany({
+          where: {
+            projectId: { in: projectIds },
+            workcode: before.workcode
+          },
+          select: { id: true, qty: true, projectId: true }
+        });
+
+        const payloadKeys = new Set(Object.keys(data));
+
+        for (const cost of costs) {
+          const patch = {};
+          if (payloadKeys.has('workcode')) patch.workcode = updated.workcode;
+          if (payloadKeys.has('uraian')) patch.uraian = updated.uraian;
+          if (payloadKeys.has('specification')) patch.specification = updated.specification;
+          if (payloadKeys.has('satuan')) patch.satuan = updated.satuan;
+          if (payloadKeys.has('hargaSatuan')) {
+            patch.hargaSatuan = updated.hargaSatuan;
+            patch.totalHarga = (cost.qty || 0) * (updated.hargaSatuan || 0);
+          }
+
+          if (Object.keys(patch).length) {
+            await tx.constructionCost.update({
+              where: { id: cost.id },
+              data: patch
+            });
+            updatedCostCount++;
+          }
+        }
+
+        // Recalculate total harga dan rata-rata AACE untuk setiap project terdampak
+        const affectedProjectIds = Array.from(new Set(costs.map(c => c.projectId)));
+        for (const pid of affectedProjectIds) {
+          const pCosts = await tx.constructionCost.findMany({ where: { projectId: pid } });
+          const totalHarga = pCosts.reduce((sum, c) => sum + (c.totalHarga || 0), 0);
+          const avgAACE = pCosts.length
+            ? pCosts.reduce((sum, c) => sum + (c.aaceClass || 0), 0) / pCosts.length
+            : 0;
+
+          await tx.project.update({
+            where: { id: pid },
+            data: { harga: Math.round(totalHarga), levelAACE: Math.round(avgAACE) }
+          });
+        }
+      }
+
+      return { updated, updatedCostCount, projectIds };
+    });
+
+    res.json({
+      message: 'Unit price updated and related construction costs synced.',
+      data: result.updated,
+      affected: {
+        updatedCosts: result.updatedCostCount,
+        affectedProjects: result.projectIds
+      }
+    });
+  } catch (error) {
+    res.status(400).json({ message: 'Failed to update unit price', error: error.message });
+  }
+};

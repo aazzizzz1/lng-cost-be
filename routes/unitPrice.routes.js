@@ -24,6 +24,9 @@ router.get('/unique-infrastruktur-proyek', controller.getUniqueInfrastrukturAndP
 // New route for best price recommendation per workcode
 router.get('/best-prices', controller.getBestPricesByWorkcode);
 
+// NEW: update unit price + sync construction costs in the same project
+router.put('/:id', controller.updateUnitPrice);
+
 // Only admin can create unit price
 // router.post('/', authenticate, authorizeRoles('admin'), controller.createUnitPrice);
 //  authenticate, authorizeRoles('admin'),
