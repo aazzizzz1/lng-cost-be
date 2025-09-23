@@ -466,7 +466,7 @@ exports.getBestPricesByWorkcode = async (req, res) => {
   }
 };
 
-// NEW: Update UnitPrice dan sinkronkan ConstructionCost pada project yang sama (berdasarkan nama project = unitPrice.proyek)
+// NEW: Update UnitPrice dan sinkronkan ConstructionCost pada project yang sama (berdasarkan nama project + volume + workcode)
 exports.updateUnitPrice = async (req, res) => {
   try {
     const id = parseInt(req.params.id);
@@ -492,12 +492,17 @@ exports.updateUnitPrice = async (req, res) => {
         data
       });
 
-      // Cari project dengan nama sama seperti unitPrice.proyek (sebelum diupdate)
+      // Cari project dengan nama sama + volume sama (jika tersedia) dari nilai sebelum update
       const projectName = (before.proyek || '').trim();
+      const unitVol = before.volume;
       let projectIds = [];
       if (projectName) {
+        const whereProject = {
+          name: { equals: projectName, mode: 'insensitive' },
+          ...(unitVol != null ? { volume: unitVol } : {}),
+        };
         const projects = await tx.project.findMany({
-          where: { name: { equals: projectName, mode: 'insensitive' } },
+          where: whereProject,
           select: { id: true }
         });
         projectIds = projects.map(p => p.id);
@@ -506,11 +511,12 @@ exports.updateUnitPrice = async (req, res) => {
       let updatedCostCount = 0;
 
       if (projectIds.length) {
-        // Ambil construction cost yang workcode-nya sama (pakai workcode lama) dan projectId cocok
+        // Ambil construction cost yang match projectId + workcode + volume (jika tersedia)
         const costs = await tx.constructionCost.findMany({
           where: {
             projectId: { in: projectIds },
-            workcode: before.workcode
+            workcode: before.workcode,
+            ...(unitVol != null ? { volume: unitVol } : {}),
           },
           select: { id: true, qty: true, projectId: true }
         });
@@ -527,6 +533,8 @@ exports.updateUnitPrice = async (req, res) => {
             patch.hargaSatuan = updated.hargaSatuan;
             patch.totalHarga = (cost.qty || 0) * (updated.hargaSatuan || 0);
           }
+          // NEW: propagate volume jika diubah
+          if (payloadKeys.has('volume')) patch.volume = updated.volume;
 
           if (Object.keys(patch).length) {
             await tx.constructionCost.update({
@@ -557,7 +565,7 @@ exports.updateUnitPrice = async (req, res) => {
     });
 
     res.json({
-      message: 'Unit price updated and related construction costs synced.',
+      message: 'Unit price updated and related construction costs synced (by project + volume).',
       data: result.updated,
       affected: {
         updatedCosts: result.updatedCostCount,

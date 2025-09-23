@@ -12,12 +12,13 @@ exports.createConstructionCost = async (req, res) => {
       project = await prisma.project.create({
         data: {
           name: projectName,
-          infrastruktur: constructionData.tipe || 'Unknown', // Replace jenis with infrastruktur
+          infrastruktur: constructionData.tipe || 'Unknown', // Replace jenis dengan infrastruktur
           lokasi: constructionData.lokasi || 'Unknown',
           tahun: constructionData.tahun || new Date().getFullYear(),
           kategori: 'Auto-generated',
           levelAACE: 1,
           harga: 0, // Placeholder value
+          volume: constructionData.volume ?? null, // NEW: simpan volume agar relasi name+volume valid
         },
       });
     }
@@ -142,5 +143,135 @@ exports.getFilteredConstructionCosts = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch filtered construction costs', data: null });
+  }
+};
+
+// NEW: Update ConstructionCost dan sinkronkan UnitPrice pada project yang sama (berdasarkan Project.name + volume + workcode)
+exports.updateConstructionCost = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+
+    const allowed = [
+      'workcode',
+      'uraian','specification','qty','satuan','hargaSatuan','totalHarga',
+      'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur','volume',
+      'satuanVolume','kelompok','kelompokDetail','lokasi','tipe'
+    ];
+    const data = {};
+    for (const k of allowed) {
+      if (req.body[k] !== undefined) data[k] = req.body[k];
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      // Ambil cost sebelum update
+      const before = await tx.constructionCost.findUnique({
+        where: { id },
+        select: { id: true, projectId: true, workcode: true, volume: true }
+      });
+      if (!before) throw new Error('ConstructionCost not found');
+
+      // Update construction cost
+      const updated = await tx.constructionCost.update({
+        where: { id },
+        data
+      });
+
+      // Ambil nama project
+      const project = await tx.project.findUnique({
+        where: { id: before.projectId },
+        select: { id: true, name: true }
+      });
+
+      let syncedUnitPrices = 0;
+
+      if (project?.name) {
+        // Filter UnitPrice dengan proyek (nama) + workcode + volume yang sama
+        const unitPrices = await tx.unitPrice.findMany({
+          where: {
+            proyek: { equals: project.name, mode: 'insensitive' },
+            workcode: before.workcode,
+            ...(before.volume != null ? { volume: before.volume } : {}),
+          },
+          select: { id: true, qty: true }
+        });
+
+        if (unitPrices.length) {
+          const payloadKeys = new Set(Object.keys(data));
+
+          for (const up of unitPrices) {
+            const patch = {};
+            if (payloadKeys.has('workcode')) patch.workcode = updated.workcode;
+            if (payloadKeys.has('uraian')) patch.uraian = updated.uraian;
+            if (payloadKeys.has('specification')) patch.specification = updated.specification;
+            if (payloadKeys.has('satuan')) patch.satuan = updated.satuan;
+            if (payloadKeys.has('hargaSatuan')) {
+              patch.hargaSatuan = updated.hargaSatuan;
+              patch.totalHarga = (up.qty || 0) * (updated.hargaSatuan || 0);
+            }
+            // NEW: propagate volume jika diubah
+            if (payloadKeys.has('volume')) patch.volume = updated.volume;
+
+            if (Object.keys(patch).length) {
+              await tx.unitPrice.update({ where: { id: up.id }, data: patch });
+              syncedUnitPrices++;
+            }
+          }
+        }
+      }
+
+      // Recalculate total harga dan rata-rata AACE project
+      const pCosts = await tx.constructionCost.findMany({ where: { projectId: before.projectId } });
+      const totalHarga = pCosts.reduce((sum, c) => sum + (c.totalHarga || 0), 0);
+      const avgAACE = pCosts.length
+        ? pCosts.reduce((sum, c) => sum + (c.aaceClass || 0), 0) / pCosts.length
+        : 0;
+
+      await tx.project.update({
+        where: { id: before.projectId },
+        data: { harga: Math.round(totalHarga), levelAACE: Math.round(avgAACE) }
+      });
+
+      return { updated, syncedUnitPrices, projectId: before.projectId };
+    });
+
+    res.status(200).json({
+      message: 'Construction cost updated. Related unit prices synced (by project + volume).',
+      data: result.updated,
+      affected: { syncedUnitPrices: result.syncedUnitPrices, projectId: result.projectId }
+    });
+  } catch (error) {
+    res.status(400).json({ message: 'Failed to update construction cost', error: error.message });
+  }
+};
+
+// NEW: Delete ConstructionCost dan rekap ulang Project (UnitPrice tidak dihapus)
+exports.deleteConstructionCost = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+
+    await prisma.$transaction(async (tx) => {
+      const exists = await tx.constructionCost.findUnique({
+        where: { id },
+        select: { id: true, projectId: true }
+      });
+      if (!exists) throw new Error('ConstructionCost not found');
+
+      await tx.constructionCost.delete({ where: { id } });
+
+      const costs = await tx.constructionCost.findMany({ where: { projectId: exists.projectId } });
+      const totalHarga = costs.reduce((sum, c) => sum + (c.totalHarga || 0), 0);
+      const avgAACE = costs.length
+        ? costs.reduce((sum, c) => sum + (c.aaceClass || 0), 0) / costs.length
+        : 0;
+
+      await tx.project.update({
+        where: { id: exists.projectId },
+        data: { harga: Math.round(totalHarga), levelAACE: Math.round(avgAACE) }
+      });
+    });
+
+    res.status(200).json({ message: 'Construction cost deleted and project totals recalculated.' });
+  } catch (error) {
+    res.status(400).json({ message: 'Failed to delete construction cost', error: error.message });
   }
 };
