@@ -12,6 +12,11 @@ exports.createUnitPrice = async (req, res) => {
     for (const k of allowed) {
       if (req.body[k] !== undefined) data[k] = req.body[k];
     }
+    // NEW: force totalHarga = qty * hargaSatuan
+    const qty = Number(data.qty ?? 0);
+    const harga = Number(data.hargaSatuan ?? 0);
+    data.totalHarga = qty * harga;
+
     const unitPrice = await prisma.unitPrice.create({ data });
     res.status(201).json({
       message: 'Unit price created successfully.',
@@ -486,10 +491,15 @@ exports.updateUnitPrice = async (req, res) => {
       const before = await tx.unitPrice.findUnique({ where: { id } });
       if (!before) throw new Error('UnitPrice not found');
 
-      // Update unit price
+      // NEW: recompute own totalHarga with final values
+      const nextQty = data.qty !== undefined ? Number(data.qty) : Number(before.qty || 0);
+      const nextHarga = data.hargaSatuan !== undefined ? Number(data.hargaSatuan) : Number(before.hargaSatuan || 0);
+      const updatePayload = { ...data, totalHarga: nextQty * nextHarga };
+
+      // Update unit price (enforce totalHarga)
       const updated = await tx.unitPrice.update({
         where: { id },
-        data
+        data: updatePayload
       });
 
       // Cari project dengan nama sama + volume sama (jika tersedia) dari nilai sebelum update
@@ -574,5 +584,75 @@ exports.updateUnitPrice = async (req, res) => {
     });
   } catch (error) {
     res.status(400).json({ message: 'Failed to update unit price', error: error.message });
+  }
+};
+
+// NEW: Delete UnitPrice by id + delete linked ConstructionCost (match by project name + volume + workcode) and recalc projects
+exports.deleteUnitPriceById = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+
+    const result = await prisma.$transaction(async (tx) => {
+      const before = await tx.unitPrice.findUnique({ where: { id } });
+      if (!before) throw new Error('UnitPrice not found');
+
+      const projectName = (before.proyek || '').trim();
+      const unitVol = before.volume;
+      let affectedProjectIds = [];
+
+      // Hapus construction cost yang terhubung: proyek (nama) + volume + workcode
+      let deletedCosts = 0;
+      if (projectName) {
+        const projects = await tx.project.findMany({
+          where: {
+            name: { equals: projectName, mode: 'insensitive' },
+            ...(unitVol != null ? { volume: unitVol } : {}),
+          },
+          select: { id: true }
+        });
+        const projectIds = projects.map(p => p.id);
+
+        if (projectIds.length) {
+          const delRes = await tx.constructionCost.deleteMany({
+            where: {
+              projectId: { in: projectIds },
+              workcode: before.workcode,
+              ...(unitVol != null ? { volume: unitVol } : {}),
+            }
+          });
+          deletedCosts = delRes.count;
+          affectedProjectIds = projectIds;
+        }
+      }
+
+      // Hapus unit price
+      await tx.unitPrice.delete({ where: { id } });
+
+      // Recalc tiap project terdampak
+      for (const pid of affectedProjectIds) {
+        const costs = await tx.constructionCost.findMany({ where: { projectId: pid } });
+        const totalHarga = costs.reduce((sum, c) => sum + (c.totalHarga || 0), 0);
+        const avgAACE = costs.length
+          ? costs.reduce((sum, c) => sum + (c.aaceClass || 0), 0) / costs.length
+          : 0;
+
+        await tx.project.update({
+          where: { id: pid },
+          data: { harga: Math.round(totalHarga), levelAACE: Math.round(avgAACE) }
+        });
+      }
+
+      return { deletedCosts, affectedProjectIds };
+    });
+
+    res.status(200).json({
+      message: 'Unit price deleted. Related construction costs (by project + volume + workcode) removed.',
+      affected: {
+        deletedConstructionCosts: result.deletedCosts,
+        affectedProjects: result.affectedProjectIds
+      }
+    });
+  } catch (error) {
+    res.status(400).json({ message: 'Failed to delete unit price', error: error.message });
   }
 };

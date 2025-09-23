@@ -27,6 +27,9 @@ router.get('/best-prices', controller.getBestPricesByWorkcode);
 // NEW: update unit price + sync construction costs in the same project
 router.put('/:id', controller.updateUnitPrice);
 
+// NEW: delete unit price by id + delete linked construction costs (match by project name + volume + workcode)
+router.delete('/:id', controller.deleteUnitPriceById);
+
 // Only admin can create unit price
 // router.post('/', authenticate, authorizeRoles('admin'), controller.createUnitPrice);
 //  authenticate, authorizeRoles('admin'),
