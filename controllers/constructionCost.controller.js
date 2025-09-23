@@ -118,18 +118,20 @@ exports.getUniqueInfrastruktur = async (req, res) => {
  *  - tipe=string
  *  - infrastruktur=string
  *  - volume=number (exact match, e.g. 100 or 100.5)
- * Example: /api/construction-costs/filter?tipe=Pembangkit&infrastruktur=LNG&volume=100
+ * Only returns costs from projects with kategori = 'Auto-generated'
  */
 exports.getFilteredConstructionCosts = async (req, res) => {
   try {
-    const { tipe, infrastruktur, volume } = req.query; // Add volume
+    const { tipe, infrastruktur, volume } = req.query;
 
-    // Build dynamic where clause
+    const parsedVolume =
+      volume !== undefined && !isNaN(parseFloat(volume)) ? parseFloat(volume) : undefined;
+
     const where = {
-      tipe: tipe || undefined,
-      infrastruktur: infrastruktur || undefined,
-      // Only apply volume filter if a valid number is provided
-      volume: volume !== undefined && !isNaN(parseFloat(volume)) ? parseFloat(volume) : undefined,
+      project: { kategori: 'Auto-generated' }, // NEW: only from auto-generated projects (upload excel)
+      ...(tipe ? { tipe } : {}),
+      ...(infrastruktur ? { infrastruktur } : {}),
+      ...(parsedVolume !== undefined ? { volume: parsedVolume } : {}),
     };
 
     const filteredCosts = await prisma.constructionCost.findMany({
