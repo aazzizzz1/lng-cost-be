@@ -78,33 +78,45 @@ exports.bulkCreateConstructionCosts = async (costs, projectId) => {
 
 exports.getUniqueInfrastruktur = async (req, res) => {
   try {
+    // NEW: filter only construction costs from projects with kategori = 'Auto-generated'
     const groupedData = await prisma.constructionCost.findMany({
+      where: { project: { kategori: 'Auto-generated' } }, // FILTER
       select: {
         tipe: true,
         infrastruktur: true,
         volume: true,
+        satuanVolume: true,              // NEW: ambil satuanVolume
       },
     });
 
     const result = groupedData.reduce((acc, item) => {
-      if (!acc[item.tipe]) {
-        acc[item.tipe] = {};
-      }
+      if (!acc[item.tipe]) acc[item.tipe] = {};
+      if (!acc[item.tipe][item.infrastruktur]) acc[item.tipe][item.infrastruktur] = [];
 
-      if (!acc[item.tipe][item.infrastruktur]) {
-        acc[item.tipe][item.infrastruktur] = [];
-      }
+      // Bentuk key unik volume+satuan untuk mencegah duplikasi
+      const key = `${item.volume}__${item.satuanVolume || ''}`;
+      const exists = acc[item.tipe][item.infrastruktur].some(v => v._key === key);
 
-      // Add volume only if it doesn't already exist in the array
-      if (!acc[item.tipe][item.infrastruktur].some((v) => v.volume === item.volume)) {
-        acc[item.tipe][item.infrastruktur].push({ volume: item.volume });
+      if (!exists) {
+        acc[item.tipe][item.infrastruktur].push({
+          volume: item.volume,
+            satuan: item.satuanVolume,                 // NEW: expose satuan terpisah
+            label: `${item.volume} ${item.satuanVolume || ''}`.trim(), // NEW: gabungan untuk display
+            _key: key // internal key (bisa diabaikan di FE)
+        });
       }
-
       return acc;
     }, {});
 
+    // Hapus _key sebelum kirim (opsional)
+    Object.keys(result).forEach(t => {
+      Object.keys(result[t]).forEach(infra => {
+        result[t][infra] = result[t][infra].map(({ _key, ...rest }) => rest);
+      });
+    });
+
     res.status(200).json({
-      message: 'Grouped values retrieved successfully.',
+      message: 'Grouped values retrieved successfully (auto-generated projects only).',
       data: result,
     });
   } catch (error) {
