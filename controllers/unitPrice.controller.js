@@ -410,21 +410,30 @@ exports.getBestPricesByWorkcode = async (req, res) => {
         recommended = Math.min(...prices);
         analysis.method = 'min-of-two';
       } else if (prices.length === 3) {
-        // Median & MAD
+        // Median & MAD outlier analysis with final AVERAGE VALUE (mean of inliers)
         const med = median(prices);
         const deviations = prices.map(x => Math.abs(x - med));
         const madVal = mad(prices, med);
-        // Modified Z-score
+        // Modified Z-score: 0.6745 * (Deviation / MAD)
         const zscores = deviations.map(d => madVal === 0 ? 0 : 0.6745 * (d / madVal));
         const outliers = zscores.map(z => z > 3.5);
-        recommended = med;
+
+        // AVERAGE VALUE = mean of non-outlier prices; fallback to median if all are outliers
+        const inlierPrices = prices.filter((_, idx) => !outliers[idx]);
+        const avgValue = inlierPrices.length
+          ? inlierPrices.reduce((a, b) => a + b, 0) / inlierPrices.length
+          : med;
+
+        recommended = avgValue;
         analysis = {
-          method: 'median-mad',
+          method: 'median-mad-average',
           median: med,
           deviations,
           mad: madVal,
           zscores,
           outliers,
+          inlierPrices,
+          averageValue: avgValue, // final value used
         };
       } else if (prices.length >= 4) {
         // Interquartile Range

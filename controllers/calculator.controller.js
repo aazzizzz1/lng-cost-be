@@ -184,6 +184,16 @@ function interpretRSquared(r2) {
 }
 
 // Regression and capacity factor methods
+/**
+ * Ordinary Least Squares Linear Regression
+ * Data points: (x_i = capacity_i, y_i = cost_i)
+ * Formulas:
+ *   b = ( n Σ(x_i y_i) - (Σ x_i)(Σ y_i) ) / ( n Σ(x_i^2) - (Σ x_i)^2 )
+ *   a = ( Σ y_i - b Σ x_i ) / n  = ȳ - b x̄
+ * Prediction:
+ *   y_hat = a + b x
+ * Returns estimate for given x and a predictFn(x).
+ */
 function linearRegression(data, x) {
   const n = data.length;
   const sumX = data.reduce((acc, d) => acc + d.capacity, 0);
@@ -195,6 +205,21 @@ function linearRegression(data, x) {
   return { estimate: a + b * x, predictFn: (cx) => a + b * cx };
 }
 
+/**
+ * Log-Log Regression (Power Law)
+ * Transform:
+ *   X_i = ln(x_i),  Y_i = ln(y_i)
+ * Fit linear model:
+ *   Y = a + b X  (OLS on transformed data)
+ * Formulas:
+ *   b = ( n Σ(X_i Y_i) - (Σ X_i)(Σ Y_i) ) / ( n Σ(X_i^2) - (Σ X_i)^2 )
+ *   a = ( Σ Y_i - b Σ X_i ) / n
+ * Back-transform to original scale:
+ *   y = exp(a) * x^b
+ * Notes:
+ *   - Data with non-positive x or y are removed earlier (log undefined).
+ *   - R² in caller is computed versus original y using back-transformed predictions.
+ */
 function logLogRegression(data, x) {
   const n = data.length;
   const sumLnX = data.reduce((acc, d) => acc + Math.log(d.capacity), 0);
@@ -206,6 +231,13 @@ function logLogRegression(data, x) {
   return { estimate: Math.exp(a) * x ** b, predictFn: (cx) => Math.exp(a) * cx ** b };
 }
 
+/**
+ * Capacity Factor (Scale-Up) Method
+ * Choose closest reference (x1, y1) to desired x2:
+ *   y2 = y1 * (x2 / x1)^n
+ * where n is an empirical scaling exponent (here constant n = 0.65).
+ * Returns estimate and predictFn (constant for fixed x2 in this implementation).
+ */
 function capacityFactorMethod(data, x) {
   if (data.length < 1) return { estimate: null, predictFn: () => null };
   const n = 0.65;
