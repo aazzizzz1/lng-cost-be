@@ -20,6 +20,8 @@ const setTokenCookies = (res, accessToken, refreshToken) => {
   });
 };
 
+const ALLOWED_ROLES = ['user', 'engineer', 'admin']; // NEW: role whitelist
+
 exports.register = async (req, res) => {
   const { username, email, password } = req.body;
   const hashedPassword = await bcrypt.hash(password, 10);
@@ -191,5 +193,84 @@ exports.validateToken = async (req, res) => {
     }
 
     return res.status(403).json({ error: 'Invalid token' });
+  }
+};
+
+// NEW: Admin-only - get all users (no passwords/refresh tokens)
+exports.getAllUsers = async (req, res) => {
+  try {
+    if (!req.user || req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const users = await prisma.user.findMany({
+      select: { id: true, username: true, email: true, role: true, createdAt: true },
+      orderBy: { id: 'asc' },
+    });
+
+    res.json({ data: users });
+  } catch (err) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// NEW: Admin-only - update a user (username, email, role, password)
+exports.updateUser = async (req, res) => {
+  try {
+    if (!req.user || req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const { id } = req.params;
+    const { username, email, role, password } = req.body;
+
+    const data = {};
+    if (username !== undefined) data.username = username;
+    if (email !== undefined) data.email = email;
+    if (role !== undefined) {
+      if (!ALLOWED_ROLES.includes(role)) {
+        return res.status(400).json({ error: `Invalid role. Allowed: ${ALLOWED_ROLES.join(', ')}` });
+      }
+      data.role = role;
+    }
+    if (password !== undefined) {
+      data.password = await bcrypt.hash(password, 10);
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: Number(id) },
+      data,
+      select: { id: true, username: true, email: true, role: true, createdAt: true },
+    });
+
+    res.json({ message: 'User updated', data: updated });
+  } catch (err) {
+    if (err.code === 'P2025') {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (err.code === 'P2002') {
+      return res.status(400).json({ error: 'Email or username already exists' });
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// NEW: Admin-only - delete a user
+exports.deleteUser = async (req, res) => {
+  try {
+    if (!req.user || req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const { id } = req.params;
+
+    await prisma.user.delete({ where: { id: Number(id) } });
+
+    res.json({ message: 'User deleted' });
+  } catch (err) {
+    if (err.code === 'P2025') {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.status(500).json({ error: 'Internal server error' });
   }
 };

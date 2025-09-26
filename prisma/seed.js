@@ -5,6 +5,7 @@ async function main() {
   const hashedAdmin = await bcrypt.hash("admin123", 10);
   const hashedUser1 = await bcrypt.hash("user123", 10);
   const hashedUser2 = await bcrypt.hash("user456", 10);
+  const hashedEngineer = await bcrypt.hash("engineer123", 10); // NEW
 
   // Admin seed
   await prisma.user.upsert({
@@ -39,6 +40,18 @@ async function main() {
       email: "user2@example.com",
       password: hashedUser2,
       role: "user",
+    },
+  });
+
+  // NEW: Engineer seed
+  await prisma.user.upsert({
+    where: { email: "engineer1@example.com" },
+    update: {},
+    create: {
+      username: "engineer1",
+      email: "engineer1@example.com",
+      password: hashedEngineer,
+      role: "engineer",
     },
   });
 
