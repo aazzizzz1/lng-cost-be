@@ -282,7 +282,7 @@ exports.getUnitPriceChartData = async (req, res) => {
 
     // Urutkan label secara alfabetis
     const labels = Object.keys(countMap).sort((a, b) => a.localeCompare(b));
-    const series = labels.map(label => countMap[label]);
+    const series = labels.map(label => countMap[label]); // FIX: removed stray token
 
     res.json({
       message: 'Chart data retrieved successfully.',
@@ -362,12 +362,33 @@ exports.getBestPricesByWorkcode = async (req, res) => {
       const deviations = arr.map(x => Math.abs(x - med));
       return median(deviations);
     };
+
+    // REPLACED: IQR helper to match Excel QUARTILE.INC (PERCENTILE.INC)
+    // NEW: percentileInc with linear interpolation (inclusive)
+    const percentileInc = (sorted, p) => {
+      if (!sorted.length) return NaN;
+      const n = sorted.length;
+      if (n === 1) return sorted[0];
+      const h = (n - 1) * p;        // 0-based rank
+      const l = Math.floor(h);
+      const u = Math.ceil(h);
+      if (l === u) return sorted[l];
+      return sorted[l] + (h - l) * (sorted[u] - sorted[l]);
+    };
+
+    // Use Excel-compatible Q1/Q3 so LOW/HIGH match spreadsheet results
     const iqr = arr => {
-      const sorted = [...arr].sort((a, b) => a - b);
-      const q1 = median(sorted.slice(0, Math.floor(sorted.length / 2)));
-      const q3 = median(sorted.slice(Math.ceil(sorted.length / 2)));
+      const sorted = [...arr]
+        .filter(v => typeof v === 'number' && !Number.isNaN(v))
+        .sort((a, b) => a - b);
+      const q1 = percentileInc(sorted, 0.25);
+      const q3 = percentileInc(sorted, 0.75);
       return { q1, q3, iqr: q3 - q1 };
     };
+
+    // NEW: constants for MAD modified Z-score method
+    const ZSCORE_THRESHOLD = 3.5;
+    const MAD_Z_COEF = 0.6745;
 
     // 3. Analyze each group
     const recommendations = [];
@@ -401,22 +422,27 @@ exports.getBestPricesByWorkcode = async (req, res) => {
         lokasi: i.lokasi,
         tipe: i.tipe,
         createdAt: i.createdAt,
+        // NEW: default result label for later enrichment
+        result: 'N/A',
       }));
 
       if (prices.length === 1) {
         recommended = prices[0];
         analysis.method = 'single';
+        // NEW: mark the single priced item as OK
+        var idToFlag = new Map(pricedItems.map(i => [i.id, { ok: true }]));
       } else if (prices.length === 2) {
         recommended = Math.min(...prices);
         analysis.method = 'min-of-two';
+        // NEW: both are considered OK (no outlier test for 2 samples)
+        var idToFlag = new Map(pricedItems.map(i => [i.id, { ok: true }]));
       } else if (prices.length === 3) {
         // Median & MAD outlier analysis with final AVERAGE VALUE (mean of inliers)
         const med = median(prices);
         const deviations = prices.map(x => Math.abs(x - med));
         const madVal = mad(prices, med);
-        // Modified Z-score: 0.6745 * (Deviation / MAD)
-        const zscores = deviations.map(d => madVal === 0 ? 0 : 0.6745 * (d / madVal));
-        const outliers = zscores.map(z => z > 3.5);
+        const zscores = deviations.map(d => madVal === 0 ? 0 : MAD_Z_COEF * (d / madVal));
+        const outliers = zscores.map(z => z > ZSCORE_THRESHOLD);
 
         // AVERAGE VALUE = mean of non-outlier prices; fallback to median if all are outliers
         const inlierPrices = prices.filter((_, idx) => !outliers[idx]);
@@ -431,23 +457,46 @@ exports.getBestPricesByWorkcode = async (req, res) => {
           deviations,
           mad: madVal,
           zscores,
+          threshold: ZSCORE_THRESHOLD,
           outliers,
+          resultFlags: outliers.map(o => (o ? 'OUTLIER' : 'OK')),
           inlierPrices,
           averageValue: avgValue, // final value used
         };
+
+        // NEW: attach OK/OUTLIER and z-score per priced item
+        var idToFlag = new Map(pricedItems.map((i, idx) => [i.id, { ok: !outliers[idx], zscore: zscores[idx] }]));
       } else if (prices.length >= 4) {
-        // Interquartile Range
+        // Interquartile Range outlier analysis with LOW/HIGH and AVERAGE VALUE = mean of inliers
         const { q1, q3, iqr: iqrVal } = iqr(prices);
         const low = q1 - 1.5 * iqrVal;
         const high = q3 + 1.5 * iqrVal;
-        const filtered = prices.filter(p => p >= low && p <= high);
+        const inlierMask = prices.map(p => p >= low && p <= high);
+        const filtered = prices.filter((_, idx) => inlierMask[idx]);
         recommended = filtered.length ? filtered.reduce((a, b) => a + b, 0) / filtered.length : null;
         analysis = {
-          method: 'iqr',
+          method: 'iqr-average',
           q1, q3, iqr: iqrVal, low, high,
           filteredPrices: filtered,
-          outliers: prices.map(p => p < low || p > high),
+          outliers: inlierMask.map(ok => !ok),
+          resultFlags: inlierMask.map(ok => (ok ? 'OK' : 'OUTLIER')),
+          averageValue: recommended,
         };
+
+        // NEW: attach OK/OUTLIER per priced item (IQR method)
+        var idToFlag = new Map(pricedItems.map((i, idx) => [i.id, { ok: inlierMask[idx] }]));
+      }
+
+      // NEW: enrich composingPrices rows with result and (for MAD) z-score
+      if (idToFlag) {
+        composingPrices = composingPrices.map(row => {
+          const info = idToFlag.get(row.id);
+          return {
+            ...row,
+            result: info ? (info.ok ? 'OK' : 'OUTLIER') : row.result,
+            ...(info && info.zscore != null ? { zscore: info.zscore } : {})
+          };
+        });
       }
 
       // Pick representative item (full record) closest to recommendedPrice
