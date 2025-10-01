@@ -24,6 +24,7 @@ router.post('/login', limiter(10), authController.login);
 router.post('/refresh-token', authController.refreshToken);
 router.post('/logout', authController.logout);
 router.get('/user/:id', authenticate, authController.getUserById);
+router.get('/me', authenticate, authController.me); // NEW: fetch current user
 router.get(
   '/validate-token',
   authenticate,

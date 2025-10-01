@@ -5,19 +5,18 @@ const prisma = require('../config/db');
 const generateToken = (user, secret, expiresIn) =>
   jwt.sign({ userId: user.id, role: user.role }, secret, { expiresIn });
 
+// cookie option helper to support cross-site usage in production
+const isProd = process.env.NODE_ENV === 'production';
+const cookieOpts = (maxAge) => ({
+  httpOnly: true,
+  secure: isProd,
+  sameSite: isProd ? 'None' : 'Lax',
+  maxAge,
+});
+
 const setTokenCookies = (res, accessToken, refreshToken) => {
-  res.cookie('accessToken', accessToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'Strict',
-    maxAge: 15 * 60 * 1000, // 15 minutes
-  });
-  res.cookie('refreshToken', refreshToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'Strict',
-    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-  });
+  res.cookie('accessToken', accessToken, cookieOpts(15 * 60 * 1000)); // 15 minutes
+  res.cookie('refreshToken', refreshToken, cookieOpts(7 * 24 * 60 * 60 * 1000)); // 7 days
 };
 
 const ALLOWED_ROLES = ['user', 'engineer', 'admin']; // NEW: role whitelist
@@ -60,7 +59,7 @@ exports.login = async (req, res) => {
     message: 'Login successful',
     data: {
       user: { id: user.id, username: user.username, email: user.email, role: user.role },
-      accessToken, // Include accessToken in the response for debugging
+      // accessToken removed from response (HttpOnly cookie only)
     },
   });
 };
@@ -169,23 +168,17 @@ exports.validateToken = async (req, res) => {
           return res.status(403).json({ error: 'Invalid refresh token. Please log in again.' });
         }
 
-        // Generate new accessToken
+        // Generate new accessToken and set cookie only (no token in body)
         const newAccessToken = jwt.sign(
           { userId: user.id, role: user.role },
           process.env.JWT_SECRET,
           { expiresIn: '15m' }
         );
 
-        res.cookie('accessToken', newAccessToken, {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          sameSite: 'Strict',
-          maxAge: 15 * 60 * 1000, // 15 minutes
-        });
+        res.cookie('accessToken', newAccessToken, cookieOpts(15 * 60 * 1000)); // 15 minutes
 
         return res.json({
           message: 'Token refreshed successfully.',
-          data: { accessToken: newAccessToken },
         });
       } catch (refreshErr) {
         return res.status(403).json({ error: 'Invalid or expired refresh token. Please log in again.' });
@@ -193,6 +186,21 @@ exports.validateToken = async (req, res) => {
     }
 
     return res.status(403).json({ error: 'Invalid token' });
+  }
+};
+
+// NEW: Authenticated user info (for frontend fetch)
+exports.me = async (req, res) => {
+  try {
+    const id = req.user.userId;
+    const user = await prisma.user.findUnique({
+      where: { id },
+      select: { id: true, username: true, email: true, role: true, createdAt: true },
+    });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json({ data: user });
+  } catch (err) {
+    res.status(500).json({ error: 'Internal server error' });
   }
 };
 
