@@ -34,7 +34,7 @@ app.use(
   })
 ); // Security headers: HSTS for HTTPS enforcement
 
-const allowedOrigins = ['http://localhost:3000','http://localhost:5000', 'https://lng-cost-fe.netlify.app/', 'https://yourdomain.com']; // ganti sesuai kebutuhan
+const allowedOrigins = ['http://103.196.154.31', 'http://localhost:3000','http://localhost:5000', 'https://lng-cost-fe.netlify.app/', 'https://yourdomain.com']; // ganti sesuai kebutuhan
 
 const corsOptions = {
   origin: (origin, callback) => {
