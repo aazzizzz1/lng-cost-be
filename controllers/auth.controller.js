@@ -7,10 +7,12 @@ const generateToken = (user, secret, expiresIn) =>
 
 // cookie option helper to support cross-site usage in production
 const isProd = process.env.NODE_ENV === 'production';
+const isHttps = process.env.USE_HTTPS === "true";
+
 const cookieOpts = (maxAge) => ({
   httpOnly: true,
-  secure: isProd,
-  sameSite: isProd ? 'None' : 'Lax',
+  secure: isProd && isHttps,
+  sameSite: isProd && isHttps ? 'None' : 'Lax',
   maxAge,
 });
 
