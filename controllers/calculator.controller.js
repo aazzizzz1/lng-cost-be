@@ -186,13 +186,11 @@ function interpretRSquared(r2) {
 // Regression and capacity factor methods
 /**
  * Ordinary Least Squares Linear Regression
- * Data points: (x_i = capacity_i, y_i = cost_i)
- * Formulas:
- *   b = ( n Σ(x_i y_i) - (Σ x_i)(Σ y_i) ) / ( n Σ(x_i^2) - (Σ x_i)^2 )
- *   a = ( Σ y_i - b Σ x_i ) / n  = ȳ - b x̄
+ * Excel-compatible roles:
+ *   a = SLOPE(y, x)
+ *   b = INTERCEPT(y, x)
  * Prediction:
- *   y_hat = a + b x
- * Returns estimate for given x and a predictFn(x).
+ *   y_hat = b + a x
  */
 function linearRegression(data, x) {
   const n = data.length;
@@ -200,25 +198,30 @@ function linearRegression(data, x) {
   const sumY = data.reduce((acc, d) => acc + d.cost, 0);
   const sumXY = data.reduce((acc, d) => acc + d.capacity * d.cost, 0);
   const sumX2 = data.reduce((acc, d) => acc + d.capacity * d.capacity, 0);
-  const b = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
-  const a = (sumY - b * sumX) / n;
-  return { estimate: a + b * x, predictFn: (cx) => a + b * cx };
+
+  // Excel: slope = SLOPE(y, x), intercept = INTERCEPT(y, x)
+  const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+  const intercept = (sumY - slope * sumX) / n;
+
+  // a := slope, b := intercept
+  const a = slope;
+  const b = intercept;
+
+  return {
+    estimate: b + a * x,
+    predictFn: (cx) => b + a * cx
+  };
 }
 
 /**
  * Log-Log Regression (Power Law)
  * Transform:
- *   X_i = ln(x_i),  Y_i = ln(y_i)
- * Fit linear model:
- *   Y = a + b X  (OLS on transformed data)
- * Formulas:
- *   b = ( n Σ(X_i Y_i) - (Σ X_i)(Σ Y_i) ) / ( n Σ(X_i^2) - (Σ X_i)^2 )
- *   a = ( Σ Y_i - b Σ X_i ) / n
- * Back-transform to original scale:
- *   y = exp(a) * x^b
- * Notes:
- *   - Data with non-positive x or y are removed earlier (log undefined).
- *   - R² in caller is computed versus original y using back-transformed predictions.
+ *   X = ln(x), Y = ln(y)
+ * Excel-compatible roles on transformed data:
+ *   a = SLOPE(Y, X)
+ *   b = INTERCEPT(Y, X)
+ * Back-transform:
+ *   y = exp(b) * x^a
  */
 function logLogRegression(data, x) {
   const n = data.length;
@@ -226,9 +229,19 @@ function logLogRegression(data, x) {
   const sumLnY = data.reduce((acc, d) => acc + Math.log(d.cost), 0);
   const sumLnXLnY = data.reduce((acc, d) => acc + Math.log(d.capacity) * Math.log(d.cost), 0);
   const sumLnX2 = data.reduce((acc, d) => acc + Math.log(d.capacity) ** 2, 0);
-  const b = (n * sumLnXLnY - sumLnX * sumLnY) / (n * sumLnX2 - sumLnX ** 2);
-  const a = (sumLnY - b * sumLnX) / n;
-  return { estimate: Math.exp(a) * x ** b, predictFn: (cx) => Math.exp(a) * cx ** b };
+
+  // Excel on ln-space
+  const slope = (n * sumLnXLnY - sumLnX * sumLnY) / (n * sumLnX2 - sumLnX ** 2);
+  const intercept = (sumLnY - slope * sumLnX) / n;
+
+  // a := slope, b := intercept
+  const a = slope;
+  const b = intercept;
+
+  return {
+    estimate: Math.exp(b) * x ** a,
+    predictFn: (cx) => Math.exp(b) * cx ** a
+  };
 }
 
 /**
@@ -294,33 +307,35 @@ exports.estimateCost = async (req, res) => {
     // ---------------------------------------------------------
     const targetYearNum = Number(year);
     const rInflasi = Number(inflation) / 100 || 0;
+
     const dataAfterInflasi = originalData.map(d => {
       const nYear = targetYearNum - d.year;
-      const factor = nYear > 0 ? Math.pow(1 + rInflasi, nYear) : 1;
+      // Support inflate (nYear > 0) and deflate (nYear < 0)
+      const factor = Math.pow(1 + rInflasi, nYear);
       return {
         ...d,
         cost: d.cost * factor,
         _inflasi: {
           fromYear: d.year,
-            toYear: targetYearNum,
-            n: nYear,
-            r: rInflasi,
-            factor
+          toYear: targetYearNum,
+          n: nYear,
+          r: rInflasi,
+          factor
         }
       };
     });
 
     // Ringkasan inflasi
     const stepInflasi = {
-      formula: 'cost × (1 + r)^n (per baris)',
+      formula: 'cost × (1 + r)^n (n bisa negatif)',
       targetYear: targetYearNum,
       r: rInflasi,
-      applied: rInflasi !== 0 && dataAfterInflasi.some(d => d._inflasi.n > 0),
+      applied: rInflasi !== 0 && dataAfterInflasi.some(d => d._inflasi.n !== 0),
       note: rInflasi === 0 ? 'Inflasi = 0 atau tidak diberikan' : undefined
     };
 
     // ---------------------------------------------------------
-    // 2. IKK (CCI) – sesuaikan biaya ke lokasi proyek (2 langkah: origin -> benchmark -> project)
+    // 2. IKK (CCI) – sesuaikan biaya ke lokasi proyek
     // ---------------------------------------------------------
     const cciReference = await prisma.cci.findFirst({
       where: { cci: { gte: 99, lte: 101 } },
@@ -329,7 +344,6 @@ exports.estimateCost = async (req, res) => {
       where: { provinsi: { equals: location, mode: 'insensitive' } },
     });
 
-    // Kumpulkan lokasi origin unik untuk batch query
     const distinctOriginLocations = [
       ...new Set(dataAfterInflasi.map(d => (d.location || '').trim()).filter(Boolean))
     ];
@@ -349,17 +363,20 @@ exports.estimateCost = async (req, res) => {
       const refCCI = cciReference?.cci || null;
       const projCCI = projectCCI?.cci || null;
 
-      // Default (tanpa penyesuaian)
-      let toBenchmarkFactor = 1;      // = (CCI_reference / CCI_origin)
-      let toProjectFactor = 1;        // = (CCI_project / CCI_reference)
-      let totalIKKFactor = 1;         // = (CCI_project / CCI_origin)
+      let toBenchmarkFactor = 1;   // CCI_reference / CCI_origin
+      let toProjectFactor = 1;     // CCI_project / CCI_reference
+      let totalIKKFactor = 1;      // CCI_project / CCI_origin
       let costBenchmark = d.cost;
 
-      if (originCCI && refCCI && projCCI) {
-        toBenchmarkFactor = refCCI / originCCI;
-        costBenchmark = d.cost * toBenchmarkFactor;
-        toProjectFactor = projCCI/100;              
-        totalIKKFactor = toBenchmarkFactor * toProjectFactor; 
+      if (originCCI && projCCI) {
+        if (refCCI) {
+          toBenchmarkFactor = refCCI / originCCI;
+          costBenchmark = d.cost * toBenchmarkFactor;
+          toProjectFactor = projCCI / refCCI;
+          totalIKKFactor = toBenchmarkFactor * toProjectFactor; // == projCCI / originCCI
+        } else {
+          totalIKKFactor = projCCI / originCCI;
+        }
       }
 
       const finalCost = d.cost * totalIKKFactor;
@@ -373,18 +390,18 @@ exports.estimateCost = async (req, res) => {
           originCCI,
           referenceCCI: refCCI,
           projectCCI: projCCI,
-          toBenchmarkFactor,   // CCI_ref / CCI_origin
-          toProjectFactor,     // CCI_project / CCI_reference
-          factor: totalIKKFactor, // CCI_project / CCI_origin
+          toBenchmarkFactor,
+          toProjectFactor,
+          factor: totalIKKFactor,
           costBenchmark,
-          overInflated: totalIKKFactor > 10 // indikator debugging
+          overInflated: totalIKKFactor > 10
         }
       };
     });
 
     const stepIKK = {
       formula: 'cost_project = cost_inflasi × (CCI_project / CCI_origin)',
-      viaBenchmark: 'costBenchmark = cost_inflasi × (CCI_reference / CCI_origin); lalu × CCI_project ',
+      viaBenchmark: 'costBenchmark = cost_inflasi × (CCI_reference / CCI_origin); lalu × (CCI_project / CCI_reference)',
       applied: dataAfterIKK.some(d => d._ikk.factor !== 1),
       projectCCI: projectCCI?.cci || null,
       referenceCCI: cciReference?.cci || null
@@ -406,55 +423,65 @@ exports.estimateCost = async (req, res) => {
     let regressionStep = {};
     let mathFormula = '';
     let regressionData = {};
-    let methodCalculation; // tambahan: detail perhitungan formula
+    let methodCalculation;
 
     if (method === 'Linear Regression') {
       if (data.length < 2)
         return res.status(400).json({ message: 'Data terlalu sedikit untuk regresi linear.' });
+
       result = linearRegression(data, desiredCapacity);
       r2 = calculateRSquared(data, result.predictFn);
       r2Interpretation = interpretRSquared(r2);
+
       const n = data.length;
       const sumX = data.reduce((acc, d) => acc + d.capacity, 0);
       const sumY = data.reduce((acc, d) => acc + d.cost, 0);
       const sumXY = data.reduce((acc, d) => acc + d.capacity * d.cost, 0);
       const sumX2 = data.reduce((acc, d) => acc + d.capacity * d.capacity, 0);
-      const b = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
-      const a = (sumY - b * sumX) / n;
+
+      // Excel roles: a=SLOPE, b=INTERCEPT
+      const a = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+      const b = (sumY - a * sumX) / n;
+
       regressionStep = { n, sumX, sumY, sumXY, sumX2, a, b };
-      mathFormula = 'y = a + b·x';
+      mathFormula = 'y = b + a·x';
       regressionData = { a, b, estimate: result.estimate };
       methodCalculation = {
         type: 'linear',
-        formula: 'y = a + b*x',
+        formula: 'y = b + a*x',
         variables: { a, b, x: desiredCapacity },
         estimateBeforeRounding: result.estimate
       };
     } else if (method === 'Log-log Regression') {
       if (data.length < 2)
         return res.status(400).json({ message: 'Data terlalu sedikit untuk regresi log-log.' });
+
       result = logLogRegression(data, desiredCapacity);
       r2 = calculateRSquared(data, result.predictFn);
       r2Interpretation = interpretRSquared(r2);
+
       const n = data.length;
       const sumLnX = data.reduce((acc, d) => acc + Math.log(d.capacity), 0);
       const sumLnY = data.reduce((acc, d) => acc + Math.log(d.cost), 0);
       const sumLnXLnY = data.reduce((acc, d) => acc + Math.log(d.capacity) * Math.log(d.cost), 0);
       const sumLnX2 = data.reduce((acc, d) => acc + Math.log(d.capacity) ** 2, 0);
-      const b = (n * sumLnXLnY - sumLnX * sumLnY) / (n * sumLnX2 - sumLnX ** 2);
-      const a = (sumLnY - b * sumLnX) / n;
+
+      // Excel roles on ln-space: a=SLOPE, b=INTERCEPT
+      const a = (n * sumLnXLnY - sumLnX * sumLnY) / (n * sumLnX2 - sumLnX ** 2);
+      const b = (sumLnY - a * sumLnX) / n;
+
       regressionStep = { n, sumLnX, sumLnY, sumLnXLnY, sumLnX2, a, b };
-      mathFormula = 'ln(y) = a + b·ln(x) → y = exp(a)·x^b';
+      mathFormula = 'ln(y) = b + a·ln(x) → y = exp(b)·x^a';
       regressionData = { a, b, estimate: result.estimate };
       methodCalculation = {
         type: 'loglog',
-        formula: 'ln(y)=a + b ln(x) -> y = exp(a)*x^b',
+        formula: 'ln(y)=b + a ln(x) -> y = exp(b)*x^a',
         variables: {
           a,
           b,
           x: desiredCapacity,
-          expA: Math.exp(a),
-          xPowB: Math.pow(desiredCapacity, b)
+          expB: Math.exp(b),
+          xPowA: Math.pow(desiredCapacity, a)
         },
         estimateBeforeRounding: result.estimate
       };
