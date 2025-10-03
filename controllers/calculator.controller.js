@@ -337,12 +337,15 @@ exports.estimateCost = async (req, res) => {
     // ---------------------------------------------------------
     // 2. IKK (CCI) – sesuaikan biaya ke lokasi proyek
     // ---------------------------------------------------------
-    const cciReference = await prisma.cci.findFirst({
-      where: { cci: { gte: 99, lte: 101 } },
+    // Default CCI reference and target location to 100 if not found (align with project logic)
+    const cciReferenceRec = await prisma.cci.findFirst({
+      where: { cci: { gte: 100, lte: 100 } },
     });
-    const projectCCI = await prisma.cci.findFirst({
+    const projectCCIRec = await prisma.cci.findFirst({
       where: { provinsi: { equals: location, mode: 'insensitive' } },
     });
+    const refCCIVal = cciReferenceRec?.cci ?? 100;
+    const projectCCIVal = projectCCIRec?.cci ?? 100;
 
     const distinctOriginLocations = [
       ...new Set(dataAfterInflasi.map(d => (d.location || '').trim()).filter(Boolean))
@@ -359,26 +362,15 @@ exports.estimateCost = async (req, res) => {
     }
 
     const dataAfterIKK = dataAfterInflasi.map(d => {
-      const originCCI = originCCIMap[d.location?.toLowerCase()] || null;
-      const refCCI = cciReference?.cci || null;
-      const projCCI = projectCCI?.cci || null;
+      // Default origin CCI to 100 if not found
+      const originCCIVal = originCCIMap[d.location?.toLowerCase()] ?? 100;
 
-      let toBenchmarkFactor = 1;   // CCI_reference / CCI_origin
-      let toProjectFactor = 1;     // CCI_project / CCI_reference
-      let totalIKKFactor = 1;      // CCI_project / CCI_origin
-      let costBenchmark = d.cost;
+      // Factors (benchmark first, then to project). All values are defined (default=100).
+      const toBenchmarkFactor = refCCIVal / originCCIVal;     // CCI_reference / CCI_origin
+      const toProjectFactor = projectCCIVal / refCCIVal;      // CCI_project / CCI_reference
+      const totalIKKFactor = projectCCIVal / originCCIVal;    // == toBenchmarkFactor * toProjectFactor
 
-      if (originCCI && projCCI) {
-        if (refCCI) {
-          toBenchmarkFactor = refCCI / originCCI;
-          costBenchmark = d.cost * toBenchmarkFactor;
-          toProjectFactor = projCCI / refCCI;
-          totalIKKFactor = toBenchmarkFactor * toProjectFactor; // == projCCI / originCCI
-        } else {
-          totalIKKFactor = projCCI / originCCI;
-        }
-      }
-
+      const costBenchmark = d.cost * toBenchmarkFactor;
       const finalCost = d.cost * totalIKKFactor;
 
       return {
@@ -387,9 +379,9 @@ exports.estimateCost = async (req, res) => {
         _ikk: {
           fromLocation: d.location,
           toLocation: location,
-          originCCI,
-          referenceCCI: refCCI,
-          projectCCI: projCCI,
+          originCCI: originCCIVal,
+          referenceCCI: refCCIVal,
+          projectCCI: projectCCIVal,
           toBenchmarkFactor,
           toProjectFactor,
           factor: totalIKKFactor,
@@ -403,8 +395,8 @@ exports.estimateCost = async (req, res) => {
       formula: 'cost_project = cost_inflasi × (CCI_project / CCI_origin)',
       viaBenchmark: 'costBenchmark = cost_inflasi × (CCI_reference / CCI_origin); lalu × (CCI_project / CCI_reference)',
       applied: dataAfterIKK.some(d => d._ikk.factor !== 1),
-      projectCCI: projectCCI?.cci || null,
-      referenceCCI: cciReference?.cci || null
+      projectCCI: projectCCIVal,
+      referenceCCI: refCCIVal
     };
 
     // Data untuk metode (ringan)
