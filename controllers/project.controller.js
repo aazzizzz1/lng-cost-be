@@ -550,3 +550,19 @@ exports.updateProject = async (req, res) => {
     res.status(status).json({ message: 'Failed to update project', error: error.message });
   }
 };
+
+exports.deleteAllProjects = async (req, res) => { // NEW
+  try {
+    const counts = await prisma.$transaction(async (tx) => {
+      const deletedCosts = await tx.constructionCost.deleteMany();
+      const deletedProjects = await tx.project.deleteMany();
+      return { deletedCosts: deletedCosts.count, deletedProjects: deletedProjects.count };
+    });
+    res.status(200).json({
+      message: 'All projects and associated construction costs deleted successfully.',
+      ...counts,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to delete all projects', error: error.message });
+  }
+};

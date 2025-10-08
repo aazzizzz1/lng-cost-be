@@ -12,6 +12,7 @@ router.post('/recommend', controller.recommendConstructionCostsAndCreateProject)
 router.put('/:id', controller.updateProject); // Update project + construction costs
 router.delete('/:id', controller.deleteProject); // Add route for deleting a project
 router.get('/:id/estimation',  controller.calculateProjectEstimation); // Add route for project estimation
+router.delete('/', controller.deleteAllProjects); // NEW: delete all projects
 
 // Only admin can create project
 // router.post('/', authenticate, authorizeRoles('admin'), controller.createProject);

@@ -38,6 +38,7 @@ model Project {
   createdAt  DateTime @default(now()) // Add createdAt field
 
   constructionCosts ConstructionCost[]
+  unitPrices        UnitPrice[]        // NEW: back-relation for UnitPrice.project
 }
 
 model ConstructionCost {
@@ -88,6 +89,8 @@ model UnitPrice {
   lokasi                String
   tipe                  String
   createdAt             DateTime @default(now())
+  project    Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId  Int?
 }
 
 model cci {

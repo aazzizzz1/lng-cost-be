@@ -1,51 +1,18 @@
 const XLSX = require('xlsx');
 const prisma = require('../config/db');
-const parseExcelNumber = require('../utils/parseExcelNumber'); // Tambahkan import
+const parseExcelNumber = require('../utils/parseExcelNumber');
 
-const cleanNumber = (val) => parseExcelNumber(val); // Gunakan util pembulatan
+const cleanNumber = (val) => parseExcelNumber(val);
 
+// REFACTORED: now expects unitPrices with projectId ready
 const syncUnitPriceToConstruction = async (unitPrices) => {
   for (const unitPrice of unitPrices) {
-    const { proyek, volume, tipe, infrastruktur, satuanVolume } = unitPrice;
-
-    let project = await prisma.project.findFirst({
-      where: {
-        name: proyek,
-        volume: volume, // Ensure the project is differentiated by volume
-      },
-    });
-
-    if (!project) {
-      const unitPricesForProject = unitPrices.filter(
-        (price) => price.proyek === proyek && price.volume === volume // Filter by name and volume
-      );
-
-      const totalHarga = unitPricesForProject.reduce((sum, price) => sum + price.totalHarga, 0);
-      const averageLevelAACE =
-        unitPricesForProject.reduce((sum, price) => sum + price.aaceClass, 0) / unitPricesForProject.length;
-
-      project = await prisma.project.create({
-        data: {
-          name: proyek,
-          infrastruktur: tipe, // Replace jenis with infrastruktur
-          lokasi: unitPrice.lokasi,
-          tahun: unitPrice.tahun,
-          kategori: 'Auto-generated',
-          levelAACE: Math.round(averageLevelAACE) || 1, // Calculate average AACE level
-          harga: Math.round(totalHarga) || 0, // Calculate total harga
-          satuan: unitPrice.satuan || '',
-          volume: volume || 1, // Default to 1 if volume is not provided
-        },
-      });
-    }
-
+    if (!unitPrice.projectId) continue; // safety
     await prisma.constructionCost.create({
       data: {
-        workcode: unitPrice.workcode, // NEW
+        workcode: unitPrice.workcode,
         uraian: unitPrice.uraian,
-        specification: (unitPrice.specification && String(unitPrice.specification).trim())
-          ? String(unitPrice.specification).trim()
-          : 'n/a', // default to 'n/a' if empty
+        specification: unitPrice.specification || 'n/a',
         qty: unitPrice.qty,
         satuan: unitPrice.satuan,
         hargaSatuan: unitPrice.hargaSatuan,
@@ -54,17 +21,30 @@ const syncUnitPriceToConstruction = async (unitPrices) => {
         accuracyLow: unitPrice.accuracyLow,
         accuracyHigh: unitPrice.accuracyHigh,
         tahun: unitPrice.tahun,
-        infrastruktur: infrastruktur || tipe, // Ensure infrastruktur is populated
-        volume: volume, // Include volume in construction cost
-        satuanVolume: satuanVolume,
+        infrastruktur: unitPrice.infrastruktur || unitPrice.tipe,
+        volume: unitPrice.volume,
+        satuanVolume: unitPrice.satuanVolume,
         kelompok: unitPrice.kelompok,
         kelompokDetail: unitPrice.kelompokDetail,
         lokasi: unitPrice.lokasi,
-        tipe: tipe,
-        projectId: project.id, // Correctly pass the projectId
+        tipe: unitPrice.tipe,
+        projectId: unitPrice.projectId,
       },
     });
   }
+};
+
+// NEW: helper to sanitize fields (hindari error Unknown argument)
+const sanitizeUnitPriceRow = (row, allowProjectId = true) => {
+  const allowed = new Set([
+    'workcode','uraian','specification','qty','satuan','hargaSatuan','totalHarga',
+    'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur','volume',
+    'satuanVolume','kelompok','kelompokDetail','proyek','lokasi','tipe'
+  ]);
+  if (allowProjectId) allowed.add('projectId');
+  const out = {};
+  for (const k of Object.keys(row)) if (allowed.has(k) && row[k] !== undefined) out[k] = row[k];
+  return out;
 };
 
 exports.uploadExcel = async (req, res) => {
@@ -96,33 +76,27 @@ exports.uploadExcel = async (req, res) => {
 
     const unitPrices = [];
     const skippedRows = [];
-
     data.forEach((row, idx) => {
-      if (!row['item']) {
-        skippedRows.push(idx + 2); // Log the row number (Excel rows start at 1)
-        return; // Skip rows with missing "Item"
-      }
-      // Preserve all decimals for qty
-      const qty = parseExcelNumber(row['qty']); // Do not round or format
+      if (!row['item']) { skippedRows.push(idx + 2); return; }
+      const qty = parseExcelNumber(row['qty']);
       const hargaSatuan = cleanNumber(row['cost']);
       const specRaw = row['specification'];
-      const specification =
-        (typeof specRaw === 'string' && specRaw.trim()) ? specRaw.trim() : 'n/a'; // default 'n/a'
+      const specification = (typeof specRaw === 'string' && specRaw.trim()) ? specRaw.trim() : 'n/a';
       unitPrices.push({
-        workcode: row['work code'] || '', // NEW (optional if column exists)
+        workcode: row['work code'] || '',
         uraian: row['item'] || 'Unknown',
-        specification, // use normalized specification
-        qty, // keep full precision
+        specification,
+        qty,
         satuan: row['satuan'] || '',
-        hargaSatuan: cleanNumber(row['cost']), // Pastikan hargaSatuan dibulatkan
-        totalHarga: cleanNumber(qty * cleanNumber(row['cost'])), // Gunakan pembulatan util
+        hargaSatuan,
+        totalHarga: cleanNumber(qty * hargaSatuan),
         aaceClass: parseInt(row['aace class']) || 0,
-        accuracyLow: parseFloat(String(row['low']).replace(',', '.').replace('%', '')) || 0, // Handle commas as decimal points
-        accuracyHigh: parseFloat(String(row['high']).replace(',', '.').replace('%', '')) || 0, // Handle commas as decimal points
+        accuracyLow: parseFloat(String(row['low']).replace(',', '.').replace('%', '')) || 0,
+        accuracyHigh: parseFloat(String(row['high']).replace(',', '.').replace('%', '')) || 0,
         tahun: parseInt(row['year']) || new Date().getFullYear(),
         infrastruktur: row['infrastructure'] || '',
         volume: cleanNumber(row['volume']),
-        satuanVolume: row['satuan'] || '',
+        satuanVolume: row['satuan volume'] || '',
         kelompok: row['group 1'] || '',
         kelompokDetail: row['group 1.1'] || '',
         proyek: row['project'] || '',
@@ -131,22 +105,71 @@ exports.uploadExcel = async (req, res) => {
       });
     });
 
-    if (unitPrices.length > 0) {
-      await prisma.unitPrice.createMany({
-        data: unitPrices,
-        skipDuplicates: true, // Prevent duplicate entries
-      });
-
-      await syncUnitPriceToConstruction(unitPrices); // Auto-map UnitPrice to ConstructionCost
+    // NEW: resolve/create projects per (proyek, volume)
+    const groupMap = new Map();
+    for (const up of unitPrices) {
+      if (!up.proyek || up.volume == null) continue;
+      const key = `${up.proyek.toLowerCase().trim()}|${up.volume}`;
+      if (!groupMap.has(key)) groupMap.set(key, []);
+      groupMap.get(key).push(up);
     }
 
-    res.status(200).json({
-      message: 'Data uploaded successfully.',
-      count: unitPrices.length,
-      skippedRows,
-    });
+    for (const [key, list] of groupMap.entries()) {
+      const sample = list[0];
+      let project = await prisma.project.findFirst({
+        where: {
+          name: { equals: sample.proyek, mode: 'insensitive' },
+          volume: sample.volume
+        },
+        select: { id: true }
+      });
+      if (!project) {
+        const totalHarga = list.reduce((s, i) => s + (i.totalHarga || 0), 0);
+        const avgAACE = list.length
+          ? list.reduce((s, i) => s + (i.aaceClass || 0), 0) / list.length
+          : 0;
+        project = await prisma.project.create({
+          data: {
+            name: sample.proyek,
+            infrastruktur: sample.tipe || sample.infrastruktur || 'Unknown',
+            lokasi: sample.lokasi || 'Unknown',
+            tahun: sample.tahun,
+            kategori: 'Auto-generated',
+            levelAACE: Math.round(avgAACE),
+            harga: Math.round(totalHarga),
+            volume: sample.volume,
+            inflasi: 0
+          },
+          select: { id: true }
+        });
+      }
+      list.forEach(u => { u.projectId = project.id; });
+    }
+
+    if (unitPrices.length) {
+      // NEW: first attempt with projectId (schema baru)
+      let rows = unitPrices.map(r => sanitizeUnitPriceRow(r, true));
+      try {
+        await prisma.unitPrice.createMany({ data: rows, skipDuplicates: true });
+      } catch (err) {
+        // Fallback jika prisma client lama (belum migrate/generate) -> retry tanpa projectId
+        if (String(err.message).includes('Unknown argument `projectId`')) {
+          console.warn('[upload] projectId not in current Prisma client. Retrying without projectId.');
+          rows = unitPrices.map(r => {
+            const s = sanitizeUnitPriceRow(r, false);
+            return s;
+          });
+          await prisma.unitPrice.createMany({ data: rows, skipDuplicates: true });
+        } else {
+          throw err;
+        }
+      }
+      await syncUnitPriceToConstruction(unitPrices);
+    }
+
+    res.status(200).json({ message: 'Data uploaded successfully.', count: unitPrices.length, skippedRows });
   } catch (error) {
-    console.error('Upload Excel Error:', error); // Error logging
+    console.error('Upload Excel Error:', error);
     res.status(500).json({ error: error.message });
   }
 };

@@ -164,82 +164,59 @@ exports.getFilteredConstructionCosts = async (req, res) => {
 exports.updateConstructionCost = async (req, res) => {
   try {
     const id = parseInt(req.params.id);
-
     const allowed = [
-      'workcode',
-      'uraian','specification','qty','satuan','hargaSatuan','totalHarga',
+      'workcode','uraian','specification','qty','satuan','hargaSatuan','totalHarga',
       'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur','volume',
       'satuanVolume','kelompok','kelompokDetail','lokasi','tipe'
     ];
     const data = {};
-    for (const k of allowed) {
-      if (req.body[k] !== undefined) data[k] = req.body[k];
-    }
+    for (const k of allowed) if (req.body[k] !== undefined) data[k] = req.body[k];
 
     const result = await prisma.$transaction(async (tx) => {
-      // Ambil cost sebelum update
       const before = await tx.constructionCost.findUnique({
         where: { id },
         select: { id: true, projectId: true, workcode: true, volume: true }
       });
       if (!before) throw new Error('ConstructionCost not found');
 
-      // Update construction cost
-      const updated = await tx.constructionCost.update({
-        where: { id },
-        data
-      });
-
-      // Ambil nama project
-      const project = await tx.project.findUnique({
-        where: { id: before.projectId },
-        select: { id: true, name: true }
-      });
+      const updated = await tx.constructionCost.update({ where: { id }, data });
 
       let syncedUnitPrices = 0;
 
-      if (project?.name) {
-        // Filter UnitPrice dengan proyek (nama) + workcode + volume yang sama
-        const unitPrices = await tx.unitPrice.findMany({
-          where: {
-            proyek: { equals: project.name, mode: 'insensitive' },
-            workcode: before.workcode,
-            ...(before.volume != null ? { volume: before.volume } : {}),
-          },
-          select: { id: true, qty: true }
-        });
+      // Prefer projectId join
+      const unitPrices = await tx.unitPrice.findMany({
+        where: {
+          projectId: before.projectId,
+          workcode: before.workcode,
+          ...(before.volume != null ? { volume: before.volume } : {})
+        },
+        select: { id: true, qty: true }
+      });
 
-        if (unitPrices.length) {
-          const payloadKeys = new Set(Object.keys(data));
-
-          for (const up of unitPrices) {
-            const patch = {};
-            if (payloadKeys.has('workcode')) patch.workcode = updated.workcode;
-            if (payloadKeys.has('uraian')) patch.uraian = updated.uraian;
-            if (payloadKeys.has('specification')) patch.specification = updated.specification;
-            if (payloadKeys.has('satuan')) patch.satuan = updated.satuan;
-            if (payloadKeys.has('hargaSatuan')) {
-              patch.hargaSatuan = updated.hargaSatuan;
-              patch.totalHarga = (up.qty || 0) * (updated.hargaSatuan || 0);
-            }
-            // NEW: propagate volume jika diubah
-            if (payloadKeys.has('volume')) patch.volume = updated.volume;
-
-            if (Object.keys(patch).length) {
-              await tx.unitPrice.update({ where: { id: up.id }, data: patch });
-              syncedUnitPrices++;
-            }
+      if (unitPrices.length) {
+        const payloadKeys = new Set(Object.keys(data));
+        for (const up of unitPrices) {
+          const patch = {};
+          if (payloadKeys.has('workcode')) patch.workcode = updated.workcode;
+          if (payloadKeys.has('uraian')) patch.uraian = updated.uraian;
+          if (payloadKeys.has('specification')) patch.specification = updated.specification;
+          if (payloadKeys.has('satuan')) patch.satuan = updated.satuan;
+          if (payloadKeys.has('hargaSatuan')) {
+            patch.hargaSatuan = updated.hargaSatuan;
+            patch.totalHarga = (up.qty || 0) * (updated.hargaSatuan || 0);
+          }
+          if (payloadKeys.has('volume')) patch.volume = updated.volume;
+          if (Object.keys(patch).length) {
+            await tx.unitPrice.update({ where: { id: up.id }, data: patch });
+            syncedUnitPrices++;
           }
         }
       }
 
-      // Recalculate total harga dan rata-rata AACE project
+      // Recalc project
       const pCosts = await tx.constructionCost.findMany({ where: { projectId: before.projectId } });
-      const totalHarga = pCosts.reduce((sum, c) => sum + (c.totalHarga || 0), 0);
-      const avgAACE = pCosts.length
-        ? pCosts.reduce((sum, c) => sum + (c.aaceClass || 0), 0) / pCosts.length
-        : 0;
-
+      const totalHarga = pCosts.reduce((s, c) => s + (c.totalHarga || 0), 0);
+      const avgAACE = pCosts.length ? pCosts.reduce((s, c) => s + (c.aaceClass || 0), 0) / pCosts.length : 0;
       await tx.project.update({
         where: { id: before.projectId },
         data: { harga: Math.round(totalHarga), levelAACE: Math.round(avgAACE) }
@@ -249,7 +226,7 @@ exports.updateConstructionCost = async (req, res) => {
     });
 
     res.status(200).json({
-      message: 'Construction cost updated. Related unit prices synced (by project + volume).',
+      message: 'Construction cost updated & related unit prices synced (projectId).',
       data: result.updated,
       affected: { syncedUnitPrices: result.syncedUnitPrices, projectId: result.projectId }
     });
@@ -258,20 +235,45 @@ exports.updateConstructionCost = async (req, res) => {
   }
 };
 
-// NEW: Delete ConstructionCost dan rekap ulang Project (UnitPrice tidak dihapus)
+// NEW: Delete ConstructionCost dan rekap ulang Project (hapus UnitPrice terkait jika kombinasi unik hilang)
 exports.deleteConstructionCost = async (req, res) => {
   try {
     const id = parseInt(req.params.id);
 
+    let deletedUnitPrices = 0;
+
     await prisma.$transaction(async (tx) => {
       const exists = await tx.constructionCost.findUnique({
         where: { id },
-        select: { id: true, projectId: true }
+        select: { id: true, projectId: true, workcode: true, volume: true } // UPDATED: include workcode & volume
       });
       if (!exists) throw new Error('ConstructionCost not found');
 
+      // Hapus construction cost
       await tx.constructionCost.delete({ where: { id } });
 
+      // Cek apakah masih ada construction cost lain dengan kombinasi (projectId + workcode + volume)
+      const stillExists = await tx.constructionCost.count({
+        where: {
+          projectId: exists.projectId,
+          workcode: exists.workcode,
+          volume: exists.volume
+        }
+      });
+
+      // Jika tidak ada lagi, hapus UnitPrice terkait kombinasi ini
+      if (stillExists === 0) {
+        const delUP = await tx.unitPrice.deleteMany({
+          where: {
+            projectId: exists.projectId,
+            workcode: exists.workcode,
+            volume: exists.volume
+          }
+        });
+        deletedUnitPrices = delUP.count;
+      }
+
+      // Recalculate project aggregate
       const costs = await tx.constructionCost.findMany({ where: { projectId: exists.projectId } });
       const totalHarga = costs.reduce((sum, c) => sum + (c.totalHarga || 0), 0);
       const avgAACE = costs.length
@@ -284,8 +286,24 @@ exports.deleteConstructionCost = async (req, res) => {
       });
     });
 
-    res.status(200).json({ message: 'Construction cost deleted and project totals recalculated.' });
+    res.status(200).json({
+      message: 'Construction cost deleted and project totals recalculated.',
+      affected: { deletedUnitPrices }
+    });
   } catch (error) {
     res.status(400).json({ message: 'Failed to delete construction cost', error: error.message });
+  }
+};
+
+// NEW: bulk delete all construction costs + reset all project totals
+exports.deleteAllConstructionCosts = async (req, res) => {
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.constructionCost.deleteMany();
+      await tx.project.updateMany({ data: { harga: 0, levelAACE: 0 } });
+    });
+    res.status(200).json({ message: 'All construction costs deleted. All projects reset.' });
+  } catch (error) {
+    res.status(400).json({ message: 'Failed to delete all construction costs', error: error.message });
   }
 };

@@ -3,26 +3,32 @@ const prisma = require('../config/db');
 exports.createUnitPrice = async (req, res) => {
   try {
     const allowed = [
-      'workcode', // NEW
-      'uraian','specification','qty','satuan','hargaSatuan','totalHarga',
+      'workcode','uraian','specification','qty','satuan','hargaSatuan','totalHarga',
       'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur',
-      'volume','satuanVolume','kelompok','kelompokDetail','proyek','lokasi','tipe'
+      'volume','satuanVolume','kelompok','kelompokDetail','proyek','lokasi','tipe','projectId' // NEW
     ];
     const data = {};
-    for (const k of allowed) {
-      if (req.body[k] !== undefined) data[k] = req.body[k];
-    }
+    for (const k of allowed) if (req.body[k] !== undefined) data[k] = req.body[k];
     // NEW: force totalHarga = qty * hargaSatuan
     const qty = Number(data.qty ?? 0);
     const harga = Number(data.hargaSatuan ?? 0);
     data.totalHarga = qty * harga;
 
+    // NEW: auto-resolve projectId if not provided but proyek + volume ada
+    if (!data.projectId && data.proyek && data.volume != null) {
+      const project = await prisma.project.findFirst({
+        where: {
+          name: { equals: data.proyek, mode: 'insensitive' },
+          volume: data.volume
+        },
+        select: { id: true }
+      });
+      if (project) data.projectId = project.id;
+    }
+
     const unitPrice = await prisma.unitPrice.create({ data });
-    res.status(201).json({
-      message: 'Unit price created successfully.',
-      data: unitPrice,
-    });
-  } catch (error) {
+    res.status(201).json({ message: 'Unit price created successfully.', data: unitPrice });
+  } catch {
     res.status(400).json({ message: 'Failed to create unit price', data: null });
   }
 };
@@ -533,95 +539,89 @@ exports.getBestPricesByWorkcode = async (req, res) => {
 exports.updateUnitPrice = async (req, res) => {
   try {
     const id = parseInt(req.params.id);
-
     const allowed = [
-      'workcode',
-      'uraian','specification','qty','satuan','hargaSatuan','totalHarga',
+      'workcode','uraian','specification','qty','satuan','hargaSatuan','totalHarga',
       'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur',
-      'volume','satuanVolume','kelompok','kelompokDetail','proyek','lokasi','tipe'
+      'volume','satuanVolume','kelompok','kelompokDetail','proyek','lokasi','tipe','projectId' // NEW
     ];
     const data = {};
-    for (const k of allowed) {
-      if (req.body[k] !== undefined) data[k] = req.body[k];
-    }
+    for (const k of allowed) if (req.body[k] !== undefined) data[k] = req.body[k];
 
     const result = await prisma.$transaction(async (tx) => {
       const before = await tx.unitPrice.findUnique({ where: { id } });
       if (!before) throw new Error('UnitPrice not found');
 
-      // NEW: recompute own totalHarga with final values
+      // Recompute totalHarga
       const nextQty = data.qty !== undefined ? Number(data.qty) : Number(before.qty || 0);
       const nextHarga = data.hargaSatuan !== undefined ? Number(data.hargaSatuan) : Number(before.hargaSatuan || 0);
       const updatePayload = { ...data, totalHarga: nextQty * nextHarga };
 
-      // Update unit price (enforce totalHarga)
-      const updated = await tx.unitPrice.update({
-        where: { id },
-        data: updatePayload
-      });
+      // Resolve projectId if still missing and proyek+volume tersedia
+      if (!updatePayload.projectId && (before.projectId == null)) {
+        const nameRef = data.proyek || before.proyek;
+        const volRef = data.volume != null ? data.volume : before.volume;
+        if (nameRef && volRef != null) {
+          const p = await tx.project.findFirst({
+            where: { name: { equals: nameRef, mode: 'insensitive' }, volume: volRef },
+            select: { id: true }
+          });
+            if (p) updatePayload.projectId = p.id;
+        }
+      }
 
-      // Cari project dengan nama sama + volume sama (jika tersedia) dari nilai sebelum update
-      const projectName = (before.proyek || '').trim();
-      const unitVol = before.volume;
+      const updated = await tx.unitPrice.update({ where: { id }, data: updatePayload });
+
+      // Determine affected projectIds
       let projectIds = [];
-      if (projectName) {
-        const whereProject = {
-          name: { equals: projectName, mode: 'insensitive' },
-          ...(unitVol != null ? { volume: unitVol } : {}),
-        };
+      if (updated.projectId) {
+        projectIds = [updated.projectId];
+      } else {
+        // fallback legacy: name + volume
         const projects = await tx.project.findMany({
-          where: whereProject,
+          where: {
+            name: { equals: (before.proyek || '').trim(), mode: 'insensitive' },
+            ...(before.volume != null ? { volume: before.volume } : {})
+          },
           select: { id: true }
         });
         projectIds = projects.map(p => p.id);
       }
 
       let updatedCostCount = 0;
-
       if (projectIds.length) {
-        // Ambil construction cost yang match projectId + workcode + volume (jika tersedia)
         const costs = await tx.constructionCost.findMany({
           where: {
             projectId: { in: projectIds },
             workcode: before.workcode,
-            ...(unitVol != null ? { volume: unitVol } : {}),
+            ...(before.volume != null ? { volume: before.volume } : {})
           },
           select: { id: true, qty: true, projectId: true }
         });
 
         const payloadKeys = new Set(Object.keys(data));
-
         for (const cost of costs) {
           const patch = {};
-          if (payloadKeys.has('workcode')) patch.workcode = updated.workcode;
-          if (payloadKeys.has('uraian')) patch.uraian = updated.uraian;
-          if (payloadKeys.has('specification')) patch.specification = updated.specification;
-          if (payloadKeys.has('satuan')) patch.satuan = updated.satuan;
-          if (payloadKeys.has('hargaSatuan')) {
-            patch.hargaSatuan = updated.hargaSatuan;
-            patch.totalHarga = (cost.qty || 0) * (updated.hargaSatuan || 0);
-          }
-          // NEW: propagate volume jika diubah
-          if (payloadKeys.has('volume')) patch.volume = updated.volume;
+            if (payloadKeys.has('workcode')) patch.workcode = updated.workcode;
+            if (payloadKeys.has('uraian')) patch.uraian = updated.uraian;
+            if (payloadKeys.has('specification')) patch.specification = updated.specification;
+            if (payloadKeys.has('satuan')) patch.satuan = updated.satuan;
+            if (payloadKeys.has('hargaSatuan')) {
+              patch.hargaSatuan = updated.hargaSatuan;
+              patch.totalHarga = (cost.qty || 0) * (updated.hargaSatuan || 0);
+            }
+            if (payloadKeys.has('volume')) patch.volume = updated.volume;
 
           if (Object.keys(patch).length) {
-            await tx.constructionCost.update({
-              where: { id: cost.id },
-              data: patch
-            });
+            await tx.constructionCost.update({ where: { id: cost.id }, data: patch });
             updatedCostCount++;
           }
         }
 
-        // Recalculate total harga dan rata-rata AACE untuk setiap project terdampak
-        const affectedProjectIds = Array.from(new Set(costs.map(c => c.projectId)));
+        const affectedProjectIds = [...new Set(costs.map(c => c.projectId))];
         for (const pid of affectedProjectIds) {
           const pCosts = await tx.constructionCost.findMany({ where: { projectId: pid } });
-          const totalHarga = pCosts.reduce((sum, c) => sum + (c.totalHarga || 0), 0);
-          const avgAACE = pCosts.length
-            ? pCosts.reduce((sum, c) => sum + (c.aaceClass || 0), 0) / pCosts.length
-            : 0;
-
+          const totalHarga = pCosts.reduce((s, c) => s + (c.totalHarga || 0), 0);
+          const avgAACE = pCosts.length ? pCosts.reduce((s, c) => s + (c.aaceClass || 0), 0) / pCosts.length : 0;
           await tx.project.update({
             where: { id: pid },
             data: { harga: Math.round(totalHarga), levelAACE: Math.round(avgAACE) }
@@ -633,12 +633,9 @@ exports.updateUnitPrice = async (req, res) => {
     });
 
     res.json({
-      message: 'Unit price updated and related construction costs synced (by project + volume).',
+      message: 'Unit price updated and related construction costs synced (projectId preferred).',
       data: result.updated,
-      affected: {
-        updatedCosts: result.updatedCostCount,
-        affectedProjects: result.projectIds
-      }
+      affected: { updatedCosts: result.updatedCostCount, affectedProjects: result.projectIds }
     });
   } catch (error) {
     res.status(400).json({ message: 'Failed to update unit price', error: error.message });

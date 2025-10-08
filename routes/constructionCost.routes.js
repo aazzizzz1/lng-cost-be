@@ -19,4 +19,7 @@ router.put('/:id', controller.updateConstructionCost);
 // NEW: delete construction cost + recalc project totals
 router.delete('/:id', controller.deleteConstructionCost);
 
+// NEW bulk delete
+router.delete('/', controller.deleteAllConstructionCosts);
+
 module.exports = router;
