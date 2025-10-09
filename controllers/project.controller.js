@@ -154,20 +154,27 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
 
     // Kumpulkan per volume, siapkan map per workcode di setiap volume
     const norm = (s) => (s || '').trim().toLowerCase();
-    const byVolume = new Map(); // vol -> { vol, items, map: Map(code->item), codes:Set }
+    const byVolume = new Map(); // vol -> { vol, items, map: Map(code->item), codes:Set, mapByCodeProject: Map(code|projectId -> item) }
     for (const up of unitPrices) {
       const numVol = parseVol(up.volume);
       if (isNaN(numVol)) continue;
       up._numVolume = numVol;
       if (!byVolume.has(numVol)) {
-        byVolume.set(numVol, { vol: numVol, items: [], map: new Map(), codes: new Set() });
+        byVolume.set(numVol, { vol: numVol, items: [], map: new Map(), codes: new Set(), mapByCodeProject: new Map() });
       }
       const bucket = byVolume.get(numVol);
       bucket.items.push(up);
+
       const code = norm(up.workcode);
       if (code) {
+        // code-only map (legacy, used as fallback)
         if (!bucket.map.has(code)) bucket.map.set(code, up);
         bucket.codes.add(code);
+        // NEW: map by workcode + projectId to keep items distinct per project
+        const projKey = `${code}|${up.projectId ?? 'no_project'}`;
+        if (!bucket.mapByCodeProject.has(projKey)) {
+          bucket.mapByCodeProject.set(projKey, up);
+        }
       }
     }
     const entries = Array.from(byVolume.values()).sort((a, b) => a.vol - b.vol);
@@ -207,32 +214,26 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
       }
     }
 
-    // Ambil semua entry dengan volume sama (jika ada duplikat volume)
-    let candidateEntries = entries.filter(e => e.vol === entries[closestIdx].vol);
-    let refEntry;
-    if (candidateEntries.length > 1 && proyek) {
-      // Jika ada parameter proyek, pilih yang sesuai
-      refEntry = candidateEntries.find(e =>
-        e.items.some(item => (item.proyek || '').toLowerCase() === proyek.toLowerCase())
-      );
-      if (!refEntry) refEntry = candidateEntries[0]; // fallback jika tidak ketemu
-    } else {
-      refEntry = candidateEntries[0];
-    }
+    // Ambil entry volume referensi
+    let refEntry = entries[closestIdx];
 
-    // FILTER: Jika proyek diberikan dan refEntry ditemukan, filter items, map, codes agar hanya proyek tsb
+    // FILTER: Jika proyek diberikan, filter items agar hanya proyek tsb,
+    // dan rebuild map + mapByCodeProject (DUPLICATE WORKCODE TETAP DIPERTAHANKAN)
     if (proyek && refEntry) {
       const normProyek = proyek.trim().toLowerCase();
-      // Filter items
       refEntry.items = refEntry.items.filter(item => (item.proyek || '').trim().toLowerCase() === normProyek);
-      // Rebuild map dan codes
+      // Rebuild maps for this filtered list
       refEntry.map = new Map();
       refEntry.codes = new Set();
+      refEntry.mapByCodeProject = new Map();
       for (const item of refEntry.items) {
         const code = norm(item.workcode);
-        if (code) {
-          if (!refEntry.map.has(code)) refEntry.map.set(code, item);
-          refEntry.codes.add(code);
+        if (!code) continue;
+        if (!refEntry.map.has(code)) refEntry.map.set(code, item);
+        refEntry.codes.add(code);
+        const projKey = `${code}|${item.projectId ?? 'no_project'}`;
+        if (!refEntry.mapByCodeProject.has(projKey)) {
+          refEntry.mapByCodeProject.set(projKey, item);
         }
       }
     }
@@ -275,8 +276,10 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
     }
 
     // Peta untuk interpolasi/extrapolasi qty per item
-    const lowerMap = lowerEntry ? lowerEntry.map : new Map();
-    const upperMap = upperEntry ? upperEntry.map : new Map();
+    const lowerMapCodeOnly = lowerEntry ? lowerEntry.map : new Map();
+    const upperMapCodeOnly = upperEntry ? upperEntry.map : new Map();
+    const lowerMapByCodeProject = lowerEntry ? (lowerEntry.mapByCodeProject || new Map()) : new Map();
+    const upperMapByCodeProject = upperEntry ? (upperEntry.mapByCodeProject || new Map()) : new Map();
     const X1 = lowerEntry ? lowerEntry.vol : refEntry.vol;
     const X2 = upperEntry ? upperEntry.vol : refEntry.vol;
 
@@ -304,11 +307,16 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
 
     const r = Number(inflasi || 0) / 100;
 
-    // Hanya gunakan item dari volume template (refEntry)
+    // NEW: Iterate over refEntry.items to preserve duplicate workcodes in the template
     const recommendedCosts = [];
-    for (const code of refEntry.codes) {
-      const baseItem = refEntry.map.get(code);
-      if (!baseItem) continue;
+    for (const baseItem of refEntry.items) {
+      const code = norm(baseItem.workcode);
+      if (!code) continue;
+
+      // Prefer same-project match for lower/upper entries; fallback to code-only
+      const projKey = `${code}|${baseItem.projectId ?? 'no_project'}`;
+      const lowerMatch = lowerMapByCodeProject.get(projKey) || lowerMapCodeOnly.get(code);
+      const upperMatch = upperMapByCodeProject.get(projKey) || upperMapCodeOnly.get(code);
 
       let qty;
       let rumusQty;
@@ -324,12 +332,10 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
         qty = baseItem.qty || 0;
         rumusQty = `qty = ${qty} (exact volume match)`;
       } else if (
-        lowerEntry && upperEntry &&
-        lowerMap.has(code) && upperMap.has(code) &&
-        X2 !== X1
+        lowerMatch && upperMatch && X2 !== X1
       ) {
-        const Y1 = (lowerMap.get(code).qty || 0);
-        const Y2 = (upperMap.get(code).qty || 0);
+        const Y1 = (lowerMatch.qty || 0);
+        const Y2 = (upperMatch.qty || 0);
         const label =
           mode === 'interpolation'
             ? 'interpolation'
@@ -352,7 +358,7 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
         qty = originalQty;
       }
 
-      // Inflasi + normalisasi CCI (dua tahap) tetap sama
+      // Inflasi + normalisasi CCI (dua tahap)
       const n = Number(tahun) - Number(baseItem.tahun || tahun);
       const hargaInflasi = (baseItem.hargaSatuan || 0) * Math.pow(1 + r, n);
       const cciOriginalValue = await getCCIValue(baseItem.lokasi);
