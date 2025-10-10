@@ -85,7 +85,8 @@ exports.getUniqueInfrastruktur = async (req, res) => {
         tipe: true,
         infrastruktur: true,
         volume: true,
-        satuanVolume: true,              // NEW: ambil satuanVolume
+        satuanVolume: true,
+        projectId: true, // ensure we select projectId
       },
     });
 
@@ -93,22 +94,23 @@ exports.getUniqueInfrastruktur = async (req, res) => {
       if (!acc[item.tipe]) acc[item.tipe] = {};
       if (!acc[item.tipe][item.infrastruktur]) acc[item.tipe][item.infrastruktur] = [];
 
-      // Bentuk key unik volume+satuan untuk mencegah duplikasi
-      const key = `${item.volume}__${item.satuanVolume || ''}`;
+      // unique key includes projectId + volume + satuanVolume
+      const key = `${item.projectId}__${item.volume}__${item.satuanVolume || ''}`;
       const exists = acc[item.tipe][item.infrastruktur].some(v => v._key === key);
 
       if (!exists) {
         acc[item.tipe][item.infrastruktur].push({
+          projectId: item.projectId, // NEW: include projectId in output
           volume: item.volume,
-            satuan: item.satuanVolume,                 // NEW: expose satuan terpisah
-            label: `${item.volume} ${item.satuanVolume || ''}`.trim(), // NEW: gabungan untuk display
-            _key: key // internal key (bisa diabaikan di FE)
+          satuan: item.satuanVolume,
+          label: `${item.volume} ${item.satuanVolume || ''}`.trim(),
+          _key: key // internal key (ignored in FE)
         });
       }
       return acc;
     }, {});
 
-    // Hapus _key sebelum kirim (opsional)
+    // Remove _key before sending (keep projectId for FE filtering)
     Object.keys(result).forEach(t => {
       Object.keys(result[t]).forEach(infra => {
         result[t][infra] = result[t][infra].map(({ _key, ...rest }) => rest);
@@ -116,7 +118,7 @@ exports.getUniqueInfrastruktur = async (req, res) => {
     });
 
     res.status(200).json({
-      message: 'Grouped values retrieved successfully (auto-generated projects only).',
+      message: 'Grouped values retrieved successfully (auto-generated projects only, unique by project).',
       data: result,
     });
   } catch (error) {
@@ -130,20 +132,24 @@ exports.getUniqueInfrastruktur = async (req, res) => {
  *  - tipe=string
  *  - infrastruktur=string
  *  - volume=number (exact match, e.g. 100 or 100.5)
+ *  - projectId=number (exact match)  // NEW
  * Only returns costs from projects with kategori = 'Auto-generated'
  */
 exports.getFilteredConstructionCosts = async (req, res) => {
   try {
-    const { tipe, infrastruktur, volume } = req.query;
+    const { tipe, infrastruktur, volume, projectId } = req.query;
 
     const parsedVolume =
       volume !== undefined && !isNaN(parseFloat(volume)) ? parseFloat(volume) : undefined;
+    const parsedProjectId =
+      projectId !== undefined && !isNaN(parseInt(projectId)) ? parseInt(projectId) : undefined;
 
     const where = {
-      project: { kategori: 'Auto-generated' }, // NEW: only from auto-generated projects (upload excel)
+      project: { kategori: 'Auto-generated' }, // only from auto-generated projects (upload excel)
       ...(tipe ? { tipe } : {}),
       ...(infrastruktur ? { infrastruktur } : {}),
       ...(parsedVolume !== undefined ? { volume: parsedVolume } : {}),
+      ...(parsedProjectId !== undefined ? { projectId: parsedProjectId } : {}), // NEW
     };
 
     const filteredCosts = await prisma.constructionCost.findMany({
