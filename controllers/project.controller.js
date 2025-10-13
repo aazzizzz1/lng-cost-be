@@ -1,29 +1,73 @@
 const prisma = require('../config/db');
+const jwt = require('jsonwebtoken'); // NEW
+
+// NEW: helper to get requester from cookie or Authorization header
+const getRequester = (req) => {
+  const bearer = req.headers?.authorization;
+  const token =
+    req.cookies?.accessToken ||
+    (bearer && bearer.startsWith('Bearer ') ? bearer.split(' ')[1] : null);
+  if (!token) return null;
+  try {
+    return jwt.verify(token, process.env.JWT_SECRET); // { userId, role }
+  } catch {
+    return null;
+  }
+};
 
 exports.createProject = async (req, res) => {
   try {
-    const { constructionCosts, lokasi, infrastruktur, kategori, tahun, name, volume, inflasi } = req.body;
+    // NEW: must be authenticated and attach owner
+    const requester = getRequester(req);
+    if (!requester) return res.status(401).json({ message: 'Unauthorized' });
+    const requesterId = requester.userId;
+    const requesterRole = requester.role;
+
+    const { constructionCosts, lokasi, infrastruktur, kategori, tahun, name, volume, inflasi, approval } = req.body;
 
     // Validate required fields
     if (!name || !infrastruktur || !lokasi || !kategori || !tahun) {
       return res.status(400).json({ message: 'Missing required fields.' });
     }
+    // NEW: validate workcode for each construction cost
+    if (!Array.isArray(constructionCosts) || !constructionCosts.length) {
+      return res.status(400).json({ message: 'Construction costs are required to create a project.' });
+    }
+    const missingWorkcode = constructionCosts.findIndex((c) => !c?.workcode);
+    if (missingWorkcode !== -1) {
+      return res.status(400).json({ message: `Construction cost at index ${missingWorkcode} is missing "workcode"` });
+    }
 
-    // Create the project with placeholder values for levelAACE and harga
-    const project = await prisma.project.create({
-      data: {
-        name,
-        infrastruktur, // Replace jenis with infrastruktur
-        lokasi,
-        kategori,
-        tahun,
-        volume,
-        inflasi: inflasi ?? 0, // NEW: store inflasi
-        levelAACE: 0, // Placeholder value
-        harga: 0, // Placeholder value
-        createdAt: new Date(), // Add current date and time
-      },
-    });
+    // Only admin is allowed to set approval; others default to false
+    const approvedValue = requesterRole === 'admin' && typeof approval === 'boolean' ? approval : false;
+
+    // Create the project with owner and approval (fallback if approval column not migrated yet)
+    const baseData = {
+      name,
+      infrastruktur,
+      lokasi,
+      kategori,
+      tahun,
+      volume,
+      inflasi: inflasi ?? 0,
+      levelAACE: 0,
+      harga: 0,
+      // createdAt is defaulted by DB
+      userId: requesterId,
+    };
+    let project;
+    try {
+      project = await prisma.project.create({
+        data: { ...baseData, approval: approvedValue }, // try with approval
+      });
+    } catch (e) {
+      // Fallback if approval column not in current Prisma Client/migration yet
+      if (String(e?.message || '').includes('Unknown argument `approval`')) {
+        project = await prisma.project.create({ data: baseData });
+      } else {
+        throw e;
+      }
+    }
 
     // Bulk create construction costs associated with the project
     if (constructionCosts && constructionCosts.length > 0) {
@@ -35,9 +79,9 @@ exports.createProject = async (req, res) => {
       });
 
       // Calculate total harga and average levelAACE
-      const totalHarga = constructionCosts.reduce((sum, cost) => sum + cost.totalHarga, 0);
+      const totalHarga = constructionCosts.reduce((sum, cost) => sum + (cost.totalHarga || 0), 0);
       const averageLevelAACE =
-        constructionCosts.reduce((sum, cost) => sum + cost.aaceClass, 0) / constructionCosts.length;
+        constructionCosts.reduce((sum, cost) => sum + (cost.aaceClass || 0), 0) / constructionCosts.length;
 
       // Update the project with calculated values
       await prisma.project.update({
@@ -65,7 +109,12 @@ exports.createProject = async (req, res) => {
 
 exports.getAllProjects = async (req, res) => {
   try {
-    const projects = await prisma.project.findMany();
+    const requester = getRequester(req);
+    if (!requester) return res.status(401).json({ message: 'Unauthorized' });
+    const isAdmin = requester.role === 'admin';
+    const where = isAdmin ? {} : { userId: requester.userId };
+
+    const projects = await prisma.project.findMany({ where });
     res.json({
       message: 'Objects retrieved successfully.',
       data: projects,
@@ -77,9 +126,13 @@ exports.getAllProjects = async (req, res) => {
 
 exports.getManualProjects = async (req, res) => {
   try {
-    const projects = await prisma.project.findMany({
-      where: { NOT: { kategori: 'Auto-generated' } },
-    });
+    const requester = getRequester(req);
+    if (!requester) return res.status(401).json({ message: 'Unauthorized' });
+    const isAdmin = requester.role === 'admin';
+    const baseWhere = { NOT: { kategori: 'Auto-generated' } };
+    const where = isAdmin ? baseWhere : { ...baseWhere, userId: requester.userId };
+
+    const projects = await prisma.project.findMany({ where });
     res.json({
       message: 'Manual projects retrieved successfully.',
       data: projects,
@@ -92,13 +145,21 @@ exports.getManualProjects = async (req, res) => {
 exports.getProjectById = async (req, res) => {
   const { id } = req.params;
   try {
+    const requester = getRequester(req);
+    if (!requester) return res.status(401).json({ message: 'Unauthorized' });
+
     const project = await prisma.project.findUnique({
-      where: { id: parseInt(id) }, // Prevent SQL injection by using parameterized queries
+      where: { id: parseInt(id) },
       include: { constructionCosts: true },
     });
 
     if (!project) {
       return res.status(404).json({ message: 'Project not found', data: null });
+    }
+
+    const isAdmin = requester.role === 'admin';
+    if (!isAdmin && project.userId !== requester.userId) {
+      return res.status(403).json({ message: 'Forbidden' });
     }
 
     // Calculate total construction cost
@@ -408,7 +469,17 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
 
 exports.deleteProject = async (req, res) => {
   try {
+    const requester = getRequester(req);
+    if (!requester) return res.status(401).json({ message: 'Unauthorized' });
+
     const { id } = req.params;
+    const project = await prisma.project.findUnique({ where: { id: parseInt(id) }, select: { userId: true } });
+    if (!project) return res.status(404).json({ message: 'Project not found' });
+
+    const isAdmin = requester.role === 'admin';
+    if (!isAdmin && project.userId !== requester.userId) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
 
     // Hapus semua constructionCost yang terkait dengan project
     await prisma.constructionCost.deleteMany({
@@ -430,16 +501,21 @@ exports.deleteProject = async (req, res) => {
 
 exports.calculateProjectEstimation = async (req, res) => {
   try {
-    const { id } = req.params;
+    const requester = getRequester(req);
+    if (!requester) return res.status(401).json({ message: 'Unauthorized' });
 
-    // Fetch the project and its associated construction costs
+    const { id } = req.params;
     const project = await prisma.project.findUnique({
       where: { id: parseInt(id) },
       include: { constructionCosts: true },
     });
-
     if (!project) {
       return res.status(404).json({ message: 'Project not found' });
+    }
+
+    const isAdmin = requester.role === 'admin';
+    if (!isAdmin && project.userId !== requester.userId) {
+      return res.status(403).json({ message: 'Forbidden' });
     }
 
     // Calculate total construction cost
@@ -470,17 +546,22 @@ exports.calculateProjectEstimation = async (req, res) => {
 
 exports.updateProject = async (req, res) => {
   try {
+    const requester = getRequester(req);
+    if (!requester) return res.status(401).json({ message: 'Unauthorized' });
+
     const id = parseInt(req.params.id);
+    const isAdmin = requester.role === 'admin';
+
+    // NEW: permission check before transaction
+    const existing = await prisma.project.findUnique({ where: { id }, select: { userId: true } });
+    if (!existing) return res.status(404).json({ message: 'Project not found' });
+    if (!isAdmin && existing.userId !== requester.userId) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
     const {
-      name,
-      infrastruktur,
-      lokasi,
-      kategori,
-      tahun,
-      volume,
-      inflasi, // NEW
-      constructionCosts, // array item: jika ada id -> update, jika tidak -> create
-      deleteConstructionCostIds, // array id yang akan dihapus
+      name, infrastruktur, lokasi, kategori, tahun, volume, inflasi,
+      approval, constructionCosts, deleteConstructionCostIds,
     } = req.body;
 
     const projectData = {};
@@ -490,13 +571,13 @@ exports.updateProject = async (req, res) => {
     if (kategori !== undefined) projectData.kategori = kategori;
     if (tahun !== undefined) projectData.tahun = tahun;
     if (volume !== undefined) projectData.volume = volume;
-    if (inflasi !== undefined) projectData.inflasi = inflasi; // NEW
+    if (inflasi !== undefined) projectData.inflasi = inflasi;
+    if (approval !== undefined && isAdmin) projectData.approval = !!approval;
 
     const allowedCostFields = [
-      'workcode', // NEW
-      'uraian','specification','qty','satuan','hargaSatuan','totalHarga',
+      'workcode','uraian','specification','qty','satuan','hargaSatuan','totalHarga',
       'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur','volume',
-      'satuanVolume','kelompok','kelompokDetail','lokasi','tipe' // REMOVED kapasitasRegasifikasi, satuanKapasitas
+      'satuanVolume','kelompok','kelompokDetail','lokasi','tipe'
     ];
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -504,7 +585,17 @@ exports.updateProject = async (req, res) => {
       if (!exists) throw new Error('Project not found');
 
       if (Object.keys(projectData).length) {
-        await tx.project.update({ where: { id }, data: projectData });
+        try {
+          await tx.project.update({ where: { id }, data: projectData });
+        } catch (e) {
+          // Fallback if approval not available in current schema/migration
+          if (String(e?.message || '').includes('Unknown argument `approval`')) {
+            const { approval: _drop, ...withoutApproval } = projectData;
+            await tx.project.update({ where: { id }, data: withoutApproval });
+          } else {
+            throw e;
+          }
+        }
       }
 
       if (Array.isArray(deleteConstructionCostIds) && deleteConstructionCostIds.length) {
@@ -514,6 +605,10 @@ exports.updateProject = async (req, res) => {
       }
 
       if (Array.isArray(constructionCosts) && constructionCosts.length) {
+        // NEW: ensure each cost has workcode
+        const idx = constructionCosts.findIndex((c) => !c?.workcode);
+        if (idx !== -1) throw new Error(`Construction cost at index ${idx} is missing "workcode"`);
+
         for (const cost of constructionCosts) {
           const { id: costId, ...rest } = cost || {};
           const data = {};
@@ -559,6 +654,9 @@ exports.updateProject = async (req, res) => {
 
 exports.deleteAllProjects = async (req, res) => { // NEW
   try {
+    const requester = getRequester(req);
+    if (!requester || requester.role !== 'admin') return res.status(403).json({ message: 'Forbidden' });
+
     const counts = await prisma.$transaction(async (tx) => {
       const deletedCosts = await tx.constructionCost.deleteMany();
       const deletedProjects = await tx.project.deleteMany();

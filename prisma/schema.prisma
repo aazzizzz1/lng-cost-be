@@ -21,12 +21,14 @@ model User {
   role     String  @default("user")
   refreshToken String?
   createdAt DateTime @default(now())
+  // NEW: each user can own many projects
+  projects Project[]
 }
 
 model Project {
   id         Int      @id @default(autoincrement())
   name       String
-  infrastruktur String? // Use this field instead of jenis
+  infrastruktur String?
   kategori   String
   lokasi     String
   tahun      Int
@@ -36,6 +38,12 @@ model Project {
   volume     Float?    // New field for project volume
   inflasi    Float?   @default(0) // Optional project inflation
   createdAt  DateTime @default(now()) // Add createdAt field
+  // NEW: approval flag
+  approval   Boolean  @default(false) // NEW: default approval is false
+  // TEMP: make ownership nullable to allow migrating existing rows.
+  // After backfilling userId for all rows, change back to required (User, Int).
+  user       User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId     Int?
 
   constructionCosts ConstructionCost[]
   unitPrices        UnitPrice[]        // NEW: back-relation for UnitPrice.project

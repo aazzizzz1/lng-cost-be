@@ -1,21 +1,19 @@
 const express = require('express');
 const router = express.Router();
 const controller = require('../controllers/project.controller');
-const { authenticate } = require('../middlewares/auth.middleware'); // Authentication middleware
 
-// Only authenticated users can see projects
-router.get('/', controller.getAllProjects); // Ensures only authenticated users can access
-router.get('/manual', controller.getManualProjects); // NEW: get projects not auto-generated
-router.get('/:id',  controller.getProjectById); // Prevents unauthorized access to project details
-router.post('/', controller.createProject); // Ensures only authenticated users can create projects
-router.post('/recommend', controller.recommendConstructionCostsAndCreateProject); // Endpoint for recommending costs and creating project
-router.put('/:id', controller.updateProject); // Update project + construction costs
-router.delete('/:id', controller.deleteProject); // Add route for deleting a project
-router.get('/:id/estimation',  controller.calculateProjectEstimation); // Add route for project estimation
-router.delete('/', controller.deleteAllProjects); // NEW: delete all projects
-
-// Only admin can create project
-// router.post('/', authenticate, authorizeRoles('admin'), controller.createProject);
+// Routes without authorization middleware (checks handled in controllers)
+router.get('/', controller.getAllProjects);
+router.get('/manual', controller.getManualProjects);
+// More specific route comes before "/:id"
+router.get('/:id/estimation', controller.calculateProjectEstimation);
+router.get('/:id', controller.getProjectById);
+router.post('/', controller.createProject);
+router.post('/recommend', controller.recommendConstructionCostsAndCreateProject);
+router.put('/:id', controller.updateProject);
+router.delete('/:id', controller.deleteProject);
+// Admin-only enforced inside controller
+router.delete('/', controller.deleteAllProjects);
 
 module.exports = router;
 
