@@ -23,7 +23,7 @@ exports.createProject = async (req, res) => {
     const requesterId = requester.userId;
     const requesterRole = requester.role;
 
-    const { constructionCosts, lokasi, infrastruktur, kategori, tahun, name, volume, inflasi, approval } = req.body;
+    const { constructionCosts, lokasi, infrastruktur, kategori, tahun, name, volume, inflasi, approval, satuan } = req.body;
 
     // Validate required fields
     if (!name || !infrastruktur || !lokasi || !kategori || !tahun) {
@@ -55,6 +55,9 @@ exports.createProject = async (req, res) => {
       // createdAt is defaulted by DB
       userId: requesterId,
     };
+    // NEW: persist project-level "satuan" if provided
+    if (satuan !== undefined) baseData.satuan = satuan;
+
     let project;
     try {
       project = await prisma.project.create({
@@ -561,7 +564,7 @@ exports.updateProject = async (req, res) => {
 
     const {
       name, infrastruktur, lokasi, kategori, tahun, volume, inflasi,
-      approval, constructionCosts, deleteConstructionCostIds,
+      approval, constructionCosts, deleteConstructionCostIds, satuan, // NEW: read "satuan"
     } = req.body;
 
     const projectData = {};
@@ -572,6 +575,7 @@ exports.updateProject = async (req, res) => {
     if (tahun !== undefined) projectData.tahun = tahun;
     if (volume !== undefined) projectData.volume = volume;
     if (inflasi !== undefined) projectData.inflasi = inflasi;
+    if (satuan !== undefined) projectData.satuan = satuan; // NEW: update "satuan" when provided
     if (approval !== undefined && isAdmin) projectData.approval = !!approval;
 
     const allowedCostFields = [
