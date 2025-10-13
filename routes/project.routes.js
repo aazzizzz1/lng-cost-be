@@ -5,6 +5,8 @@ const controller = require('../controllers/project.controller');
 // Routes without authorization middleware (checks handled in controllers)
 router.get('/', controller.getAllProjects);
 router.get('/manual', controller.getManualProjects);
+// NEW: approved projects library (public)
+router.get('/library', controller.getApprovedProjects);
 // More specific route comes before "/:id"
 router.get('/:id/estimation', controller.calculateProjectEstimation);
 router.get('/:id', controller.getProjectById);

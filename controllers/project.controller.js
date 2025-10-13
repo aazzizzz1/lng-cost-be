@@ -670,3 +670,22 @@ exports.deleteAllProjects = async (req, res) => { // NEW
     res.status(500).json({ message: 'Failed to delete all projects', error: error.message });
   }
 };
+
+exports.getApprovedProjects = async (req, res) => {
+  try {
+    const { infrastruktur, lokasi, tahun } = req.query || {};
+    const where = { approval: true };
+    if (infrastruktur) where.infrastruktur = { equals: infrastruktur, mode: 'insensitive' };
+    if (lokasi) where.lokasi = { equals: lokasi, mode: 'insensitive' };
+    if (tahun) where.tahun = Number(tahun);
+
+    const projects = await prisma.project.findMany({
+      where,
+      orderBy: { id: 'desc' },
+    });
+
+    res.json({ message: 'Approved projects retrieved successfully.', data: projects });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch approved projects', error: error.message });
+  }
+};
