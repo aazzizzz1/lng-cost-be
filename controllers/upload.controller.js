@@ -116,13 +116,19 @@ exports.uploadExcel = async (req, res) => {
 
     for (const [key, list] of groupMap.entries()) {
       const sample = list[0];
+      const chosenSatuan = (sample.satuanVolume && String(sample.satuanVolume).trim())
+        ? String(sample.satuanVolume).trim()
+        : '';
+
       let project = await prisma.project.findFirst({
         where: {
           name: { equals: sample.proyek, mode: 'insensitive' },
           volume: sample.volume
         },
-        select: { id: true }
+        // include satuan so we can backfill if missing
+        select: { id: true, satuan: true }
       });
+
       if (!project) {
         const totalHarga = list.reduce((s, i) => s + (i.totalHarga || 0), 0);
         const avgAACE = list.length
@@ -131,18 +137,27 @@ exports.uploadExcel = async (req, res) => {
         project = await prisma.project.create({
           data: {
             name: sample.proyek,
-            infrastruktur: sample.tipe || sample.infrastruktur || 'Unknown',
+            infrastruktur: sample.infrastruktur || 'Unknown',
             lokasi: sample.lokasi || 'Unknown',
             tahun: sample.tahun,
             kategori: 'Auto-generated',
             levelAACE: Math.round(avgAACE),
             harga: Math.round(totalHarga),
+            // ensure not null: use sample satuan volume, fallback to empty string
+            satuan: chosenSatuan,
             volume: sample.volume,
             inflasi: 0
           },
-          select: { id: true }
+          select: { id: true, satuan: true }
+        });
+      } else if ((!project.satuan || project.satuan === null || project.satuan === '') && chosenSatuan) {
+        // Backfill satuan for existing project if missing
+        await prisma.project.update({
+          where: { id: project.id },
+          data: { satuan: chosenSatuan }
         });
       }
+
       list.forEach(u => { u.projectId = project.id; });
     }
 
@@ -154,7 +169,7 @@ exports.uploadExcel = async (req, res) => {
       } catch (err) {
         // Fallback jika prisma client lama (belum migrate/generate) -> retry tanpa projectId
         if (String(err.message).includes('Unknown argument `projectId`')) {
-          console.warn('[upload] projectId not in current Prisma client. Retrying without projectId.');
+          console.warn('[upload] projectId not in current Prisma client. Retrying tanpa projectId.');
           rows = unitPrices.map(r => {
             const s = sanitizeUnitPriceRow(r, false);
             return s;
