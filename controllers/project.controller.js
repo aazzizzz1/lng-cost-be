@@ -15,6 +15,65 @@ const getRequester = (req) => {
   }
 };
 
+// NEW: helper to mirror ConstructionCost -> UnitPrice row
+const mirrorCostToUnitPrice = (cost, projectName, projectId) => ({
+  workcode: cost.workcode,
+  uraian: cost.uraian,
+  specification: cost.specification ?? null,
+  qty: cost.qty,
+  satuan: cost.satuan,
+  hargaSatuan: cost.hargaSatuan,
+  totalHarga: cost.qty * cost.hargaSatuan,
+  aaceClass: cost.aaceClass ?? 0,
+  accuracyLow: cost.accuracyLow ?? 0,
+  accuracyHigh: cost.accuracyHigh ?? 0,
+  tahun: cost.tahun,
+  infrastruktur: cost.infrastruktur,
+  volume: cost.volume,
+  satuanVolume: cost.satuanVolume ?? '',
+  kelompok: cost.kelompok ?? '',
+  kelompokDetail: cost.kelompokDetail ?? '',
+  proyek: projectName,
+  lokasi: cost.lokasi,
+  tipe: cost.tipe,
+  projectId
+});
+
+// NEW: propagate project-level changes to related rows (only for Auto-generated)
+const propagateProjectFields = async (tx, projectId, changed, effectiveKategori, newName) => {
+  if (effectiveKategori !== 'Auto-generated') return;
+
+  const patchCost = {};
+  const patchUP = {};
+  if ('infrastruktur' in changed) {
+    patchCost.infrastruktur = changed.infrastruktur;
+    patchUP.infrastruktur = changed.infrastruktur;
+  }
+  if ('lokasi' in changed) {
+    patchCost.lokasi = changed.lokasi;
+    patchUP.lokasi = changed.lokasi;
+  }
+  if ('tahun' in changed) {
+    patchCost.tahun = changed.tahun;
+    patchUP.tahun = changed.tahun;
+  }
+  if ('volume' in changed && changed.volume !== undefined) {
+    patchCost.volume = changed.volume;
+    patchUP.volume = changed.volume;
+  }
+  // project.name -> UnitPrice.proyek
+  if ('name' in changed && newName) {
+    patchUP.proyek = newName;
+  }
+
+  if (Object.keys(patchCost).length) {
+    await tx.constructionCost.updateMany({ where: { projectId }, data: patchCost });
+  }
+  if (Object.keys(patchUP).length) {
+    await tx.unitPrice.updateMany({ where: { projectId }, data: patchUP });
+  }
+};
+
 exports.createProject = async (req, res) => {
   try {
     // NEW: must be authenticated and attach owner
@@ -80,6 +139,14 @@ exports.createProject = async (req, res) => {
           projectId: project.id, // Ensure projectId is included
         })),
       });
+
+      // NEW: Mirror to UnitPrice when project is auto-generated
+      if (kategori === 'Auto-generated') {
+        const mirrored = constructionCosts.map(c => mirrorCostToUnitPrice(c, name, project.id));
+        if (mirrored.length) {
+          await prisma.unitPrice.createMany({ data: mirrored });
+        }
+      }
 
       // Calculate total harga and average levelAACE
       const totalHarga = constructionCosts.reduce((sum, cost) => sum + (cost.totalHarga || 0), 0);
@@ -484,18 +551,16 @@ exports.deleteProject = async (req, res) => {
       return res.status(403).json({ message: 'Forbidden' });
     }
 
-    // Hapus semua constructionCost yang terkait dengan project
-    await prisma.constructionCost.deleteMany({
-      where: { projectId: parseInt(id) },
-    });
-
-    // Hapus project berdasarkan ID
-    await prisma.project.delete({
-      where: { id: parseInt(id) },
+    // NEW: Cascade delete UnitPrice and ConstructionCost for this projectId
+    await prisma.$transaction(async (tx) => {
+      const pid = parseInt(id);
+      await tx.unitPrice.deleteMany({ where: { projectId: pid } });
+      await tx.constructionCost.deleteMany({ where: { projectId: pid } });
+      await tx.project.delete({ where: { id: pid } });
     });
 
     res.status(200).json({
-      message: 'Project and associated construction costs deleted successfully.',
+      message: 'Project and associated construction costs and unit prices deleted successfully.',
     });
   } catch (error) {
     res.status(400).json({ message: 'Failed to delete project', error: error.message });
@@ -567,17 +632,6 @@ exports.updateProject = async (req, res) => {
       approval, constructionCosts, deleteConstructionCostIds, satuan, // NEW: read "satuan"
     } = req.body;
 
-    const projectData = {};
-    if (name !== undefined) projectData.name = name;
-    if (infrastruktur !== undefined) projectData.infrastruktur = infrastruktur;
-    if (lokasi !== undefined) projectData.lokasi = lokasi;
-    if (kategori !== undefined) projectData.kategori = kategori;
-    if (tahun !== undefined) projectData.tahun = tahun;
-    if (volume !== undefined) projectData.volume = volume;
-    if (inflasi !== undefined) projectData.inflasi = inflasi;
-    if (satuan !== undefined) projectData.satuan = satuan; // NEW: update "satuan" when provided
-    if (approval !== undefined && isAdmin) projectData.approval = !!approval;
-
     const allowedCostFields = [
       'workcode','uraian','specification','qty','satuan','hargaSatuan','totalHarga',
       'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur','volume',
@@ -588,30 +642,88 @@ exports.updateProject = async (req, res) => {
       const exists = await tx.project.findUnique({ where: { id } });
       if (!exists) throw new Error('Project not found');
 
+      // Determine changed project-level fields
+      const projectData = {};
+      if (name !== undefined) projectData.name = name;
+      if (infrastruktur !== undefined) projectData.infrastruktur = infrastruktur;
+      if (lokasi !== undefined) projectData.lokasi = lokasi;
+      if (kategori !== undefined) projectData.kategori = kategori;
+      if (tahun !== undefined) projectData.tahun = tahun;
+      if (volume !== undefined) projectData.volume = volume;
+      if (inflasi !== undefined) projectData.inflasi = inflasi;
+      if (satuan !== undefined) projectData.satuan = satuan;
+      if (approval !== undefined && isAdmin) projectData.approval = !!approval;
+
+      const beforeKategori = exists.kategori;
+      const afterKategori = projectData.kategori !== undefined ? projectData.kategori : beforeKategori;
+      let savedProject = exists;
+
+      // Apply project update (with approval fallback)
       if (Object.keys(projectData).length) {
         try {
-          await tx.project.update({ where: { id }, data: projectData });
+          savedProject = await tx.project.update({ where: { id }, data: projectData });
         } catch (e) {
-          // Fallback if approval not available in current schema/migration
           if (String(e?.message || '').includes('Unknown argument `approval`')) {
             const { approval: _drop, ...withoutApproval } = projectData;
-            await tx.project.update({ where: { id }, data: withoutApproval });
+            savedProject = await tx.project.update({ where: { id }, data: withoutApproval });
           } else {
             throw e;
           }
         }
       }
 
+      // Propagate project-level fields to related rows if Auto-generated
+      if (Object.keys(projectData).length) {
+        await propagateProjectFields(
+          tx,
+          id,
+          projectData,
+          afterKategori,
+          projectData.name ?? exists.name
+        );
+      }
+
+      // Handle deletions: also delete mirrored UnitPrice rows
       if (Array.isArray(deleteConstructionCostIds) && deleteConstructionCostIds.length) {
+        // Fetch to-be-deleted info for matching unit prices
+        const toDelete = await tx.constructionCost.findMany({
+          where: { id: { in: deleteConstructionCostIds }, projectId: id },
+          select: { id: true, workcode: true, volume: true }
+        });
+
         await tx.constructionCost.deleteMany({
           where: { id: { in: deleteConstructionCostIds }, projectId: id },
         });
+
+        // Only mirror deletions if project is Auto-generated
+        if (afterKategori === 'Auto-generated' && toDelete.length) {
+          for (const c of toDelete) {
+            await tx.unitPrice.deleteMany({
+              where: {
+                projectId: id,
+                workcode: c.workcode,
+                volume: c.volume
+              }
+            });
+          }
+        }
       }
 
+      // Handle upserts/updates for construction costs (+ mirror to UnitPrice)
       if (Array.isArray(constructionCosts) && constructionCosts.length) {
-        // NEW: ensure each cost has workcode
+        // ensure each cost has workcode
         const idx = constructionCosts.findIndex((c) => !c?.workcode);
         if (idx !== -1) throw new Error(`Construction cost at index ${idx} is missing "workcode"`);
+
+        // Preload "before" for existing costIds to be updated (for matching keys)
+        const idsToUpdate = constructionCosts.map(c => c?.id).filter(Boolean);
+        const beforeCosts = idsToUpdate.length
+          ? await tx.constructionCost.findMany({
+              where: { id: { in: idsToUpdate }, projectId: id },
+              select: { id: true, workcode: true, volume: true }
+            })
+          : [];
+        const beforeMap = new Map(beforeCosts.map(c => [c.id, c]));
 
         for (const cost of constructionCosts) {
           const { id: costId, ...rest } = cost || {};
@@ -621,19 +733,71 @@ exports.updateProject = async (req, res) => {
           }
 
           if (costId) {
+            const before = beforeMap.get(costId);
             const { count } = await tx.constructionCost.updateMany({
               where: { id: costId, projectId: id },
               data,
             });
-            if (count === 0) {
-              throw new Error(`ConstructionCost ${costId} not found in this project`);
+            if (count === 0) throw new Error(`ConstructionCost ${costId} not found in this project`);
+
+            // Mirror updates into UnitPrice for Auto-generated projects
+            if (afterKategori === 'Auto-generated' && before) {
+              const whereUP = {
+                projectId: id,
+                workcode: before.workcode,
+                ...(before.volume != null ? { volume: before.volume } : {}),
+              };
+
+              // Build patch for unit price
+              const payloadKeys = new Set(Object.keys(data));
+              const patchUP = {};
+              if (payloadKeys.has('workcode')) patchUP.workcode = data.workcode;
+              if (payloadKeys.has('uraian')) patchUP.uraian = data.uraian;
+              if (payloadKeys.has('specification')) patchUP.specification = data.specification;
+              if (payloadKeys.has('satuan')) patchUP.satuan = data.satuan;
+              if (payloadKeys.has('volume')) patchUP.volume = data.volume;
+              if (payloadKeys.has('infrastruktur')) patchUP.infrastruktur = data.infrastruktur;
+              if (payloadKeys.has('lokasi')) patchUP.lokasi = data.lokasi;
+              if (payloadKeys.has('tahun')) patchUP.tahun = data.tahun;
+              if (payloadKeys.has('tipe')) patchUP.tipe = data.tipe;
+              if (payloadKeys.has('kelompok')) patchUP.kelompok = data.kelompok;
+              if (payloadKeys.has('kelompokDetail')) patchUP.kelompokDetail = data.kelompokDetail;
+              if (payloadKeys.has('satuanVolume')) patchUP.satuanVolume = data.satuanVolume;
+
+              if (payloadKeys.has('hargaSatuan')) {
+                // Need per-row qty to recompute totalHarga
+                const ups = await tx.unitPrice.findMany({
+                  where: whereUP,
+                  select: { id: true, qty: true }
+                });
+                for (const up of ups) {
+                  await tx.unitPrice.update({
+                    where: { id: up.id },
+                    data: {
+                      ...patchUP,
+                      hargaSatuan: data.hargaSatuan,
+                      totalHarga: (up.qty || 0) * (data.hargaSatuan || 0)
+                    }
+                  });
+                }
+              } else if (Object.keys(patchUP).length) {
+                await tx.unitPrice.updateMany({ where: whereUP, data: patchUP });
+              }
             }
           } else {
-            await tx.constructionCost.create({ data: { ...data, projectId: id } });
+            // Create new construction cost
+            const newCost = await tx.constructionCost.create({ data: { ...data, projectId: id } });
+
+            // Mirror to UnitPrice for Auto-generated projects
+            if (afterKategori === 'Auto-generated') {
+              const mirrored = mirrorCostToUnitPrice(newCost, savedProject.name, id);
+              await tx.unitPrice.create({ data: mirrored });
+            }
           }
         }
       }
 
+      // Recalculate project aggregates
       const costs = await tx.constructionCost.findMany({ where: { projectId: id } });
       const totalHarga = costs.reduce((sum, c) => sum + (c.totalHarga || 0), 0);
       const avgAACE = costs.length
@@ -662,12 +826,18 @@ exports.deleteAllProjects = async (req, res) => { // NEW
     if (!requester || requester.role !== 'admin') return res.status(403).json({ message: 'Forbidden' });
 
     const counts = await prisma.$transaction(async (tx) => {
+      // NEW: delete unit prices as well
+      const deletedUP = await tx.unitPrice.deleteMany();
       const deletedCosts = await tx.constructionCost.deleteMany();
       const deletedProjects = await tx.project.deleteMany();
-      return { deletedCosts: deletedCosts.count, deletedProjects: deletedProjects.count };
+      return {
+        deletedUnitPrices: deletedUP.count,
+        deletedCosts: deletedCosts.count,
+        deletedProjects: deletedProjects.count
+      };
     });
     res.status(200).json({
-      message: 'All projects and associated construction costs deleted successfully.',
+      message: 'All projects and associated construction costs and unit prices deleted successfully.',
       ...counts,
     });
   } catch (error) {
