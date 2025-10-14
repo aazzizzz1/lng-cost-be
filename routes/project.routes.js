@@ -13,6 +13,7 @@ router.get('/:id', controller.getProjectById);
 router.post('/', controller.createProject);
 router.post('/recommend', controller.recommendConstructionCostsAndCreateProject);
 router.put('/:id', controller.updateProject);
+router.patch('/:id/approval', controller.updateApproval);
 router.delete('/:id', controller.deleteProject);
 // Admin-only enforced inside controller
 router.delete('/', controller.deleteAllProjects);

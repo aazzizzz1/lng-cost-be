@@ -820,6 +820,36 @@ exports.updateProject = async (req, res) => {
   }
 };
 
+exports.updateApproval = async (req, res) => {
+  try {
+    const requester = getRequester(req);
+    if (!requester || requester.role !== 'admin') {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const id = parseInt(req.params.id);
+    const { approval } = req.body || {};
+
+    const existing = await prisma.project.findUnique({
+      where: { id },
+      select: { id: true, approval: true },
+    });
+    if (!existing) return res.status(404).json({ message: 'Project not found' });
+
+    const newApproval = typeof approval === 'boolean' ? approval : !existing.approval;
+
+    const updated = await prisma.project.update({
+      where: { id },
+      data: { approval: newApproval },
+      select: { id: true, name: true, approval: true },
+    });
+
+    res.json({ message: 'Project approval updated', data: updated });
+  } catch (error) {
+    res.status(400).json({ message: 'Failed to update approval', error: error.message });
+  }
+};
+
 exports.deleteAllProjects = async (req, res) => { // NEW
   try {
     const requester = getRequester(req);
