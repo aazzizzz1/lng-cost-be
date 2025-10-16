@@ -5,6 +5,8 @@ const controller = require('../controllers/project.controller');
 // Routes without authorization middleware (checks handled in controllers)
 router.get('/', controller.getAllProjects);
 router.get('/manual', controller.getManualProjects);
+// NEW: auto-generated projects
+router.get('/auto', controller.getAutoProjects);
 // NEW: approved projects library (public)
 router.get('/library', controller.getApprovedProjects);
 // More specific route comes before "/:id"
@@ -19,18 +21,3 @@ router.delete('/:id', controller.deleteProject);
 router.delete('/', controller.deleteAllProjects);
 
 module.exports = router;
-
-
-// const express = require('express');
-// const router = express.Router();
-// const { authenticate, authorizeRoles } = require('../middlewares/auth.middleware');
-// const projectController = require('../controllers/project.controller');
-
-// // Hanya user yang login
-// router.get('/project/:id', authenticate, projectController.getById);
-
-// // Hanya admin atau superadmin
-// router.post('/project', authenticate, authorizeRoles('admin', 'superadmin'), projectController.create);
-
-// // Hanya superadmin
-// router.delete('/project/:id', authenticate, authorizeRoles('superadmin'), projectController.delete);

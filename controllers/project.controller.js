@@ -212,6 +212,24 @@ exports.getManualProjects = async (req, res) => {
   }
 };
 
+exports.getAutoProjects = async (req, res) => {
+  try {
+    const requester = getRequester(req);
+    if (!requester) return res.status(401).json({ message: 'Unauthorized' });
+    const isAdmin = requester.role === 'admin';
+    const baseWhere = { kategori: 'Auto-generated' };
+    const where = isAdmin ? baseWhere : { ...baseWhere, userId: requester.userId };
+
+    const projects = await prisma.project.findMany({ where });
+    res.json({
+      message: 'Auto-generated projects retrieved successfully.',
+      data: projects,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch auto-generated projects', data: null });
+  }
+};
+
 exports.getProjectById = async (req, res) => {
   const { id } = req.params;
   try {
