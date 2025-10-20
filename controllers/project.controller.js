@@ -177,17 +177,64 @@ exports.createProject = async (req, res) => {
   }
 };
 
+// NEW: parse pagination + filters helper
+const parsePaginationAndFilters = (query) => {
+  const page = Math.max(1, parseInt(query.page, 10) || 1);
+  const limit = Math.max(1, Math.min(100, parseInt(query.limit, 10) || 10)); // cap at 100
+  const sort = query.sort || 'createdAt';
+  const order = (query.order || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
+
+  const filters = {};
+  if (query.infrastruktur) {
+    filters.infrastruktur = { equals: String(query.infrastruktur), mode: 'insensitive' };
+  }
+  if (query.volume !== undefined) {
+    const v = parseFloat(query.volume);
+    if (!Number.isNaN(v)) filters.volume = v;
+  }
+  return { page, limit, sort, order, filters };
+};
+
 exports.getAllProjects = async (req, res) => {
   try {
     const requester = getRequester(req);
     if (!requester) return res.status(401).json({ message: 'Unauthorized' });
     const isAdmin = requester.role === 'admin';
-    const where = isAdmin ? {} : { userId: requester.userId };
 
-    const projects = await prisma.project.findMany({ where });
+    // NEW: pagination + filters
+    const { page, limit, sort, order, filters } = parsePaginationAndFilters(req.query);
+
+    const where = {
+      ...(isAdmin ? {} : { userId: requester.userId }),
+      ...filters,
+    };
+
+    const total = await prisma.project.count({ where });
+    const totalPages = Math.ceil(total / limit);
+    if (totalPages > 0 && page > totalPages) {
+      return res.status(400).json({
+        message: 'Page exceeds total data available.',
+        totalData: total,
+        totalPages,
+      });
+    }
+
+    const projects = await prisma.project.findMany({
+      where,
+      orderBy: { [sort]: order },
+      skip: (page - 1) * limit,
+      take: limit,
+    });
+
     res.json({
       message: 'Objects retrieved successfully.',
       data: projects,
+      pagination: {
+        totalData: total,
+        totalPages,
+        currentPage: page,
+        limit,
+      },
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch projects', data: null });
@@ -199,13 +246,42 @@ exports.getManualProjects = async (req, res) => {
     const requester = getRequester(req);
     if (!requester) return res.status(401).json({ message: 'Unauthorized' });
     const isAdmin = requester.role === 'admin';
-    const baseWhere = { NOT: { kategori: 'Auto-generated' } };
-    const where = isAdmin ? baseWhere : { ...baseWhere, userId: requester.userId };
 
-    const projects = await prisma.project.findMany({ where });
+    // NEW: pagination + filters
+    const { page, limit, sort, order, filters } = parsePaginationAndFilters(req.query);
+
+    const baseWhere = { NOT: { kategori: 'Auto-generated' } };
+    const where = {
+      ...(isAdmin ? baseWhere : { ...baseWhere, userId: requester.userId }),
+      ...filters,
+    };
+
+    const total = await prisma.project.count({ where });
+    const totalPages = Math.ceil(total / limit);
+    if (totalPages > 0 && page > totalPages) {
+      return res.status(400).json({
+        message: 'Page exceeds total data available.',
+        totalData: total,
+        totalPages,
+      });
+    }
+
+    const projects = await prisma.project.findMany({
+      where,
+      orderBy: { [sort]: order },
+      skip: (page - 1) * limit,
+      take: limit,
+    });
+
     res.json({
       message: 'Manual projects retrieved successfully.',
       data: projects,
+      pagination: {
+        totalData: total,
+        totalPages,
+        currentPage: page,
+        limit,
+      },
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch manual projects', data: null });
@@ -217,16 +293,88 @@ exports.getAutoProjects = async (req, res) => {
     const requester = getRequester(req);
     if (!requester) return res.status(401).json({ message: 'Unauthorized' });
     const isAdmin = requester.role === 'admin';
-    const baseWhere = { kategori: 'Auto-generated' };
-    const where = isAdmin ? baseWhere : { ...baseWhere, userId: requester.userId };
 
-    const projects = await prisma.project.findMany({ where });
+    // NEW: pagination + filters
+    const { page, limit, sort, order, filters } = parsePaginationAndFilters(req.query);
+
+    const baseWhere = { kategori: 'Auto-generated' };
+    const where = {
+      ...(isAdmin ? baseWhere : { ...baseWhere, userId: requester.userId }),
+      ...filters,
+    };
+
+    const total = await prisma.project.count({ where });
+    const totalPages = Math.ceil(total / limit);
+    if (totalPages > 0 && page > totalPages) {
+      return res.status(400).json({
+        message: 'Page exceeds total data available.',
+        totalData: total,
+        totalPages,
+      });
+    }
+
+    const projects = await prisma.project.findMany({
+      where,
+      orderBy: { [sort]: order },
+      skip: (page - 1) * limit,
+      take: limit,
+    });
+
     res.json({
       message: 'Auto-generated projects retrieved successfully.',
       data: projects,
+      pagination: {
+        totalData: total,
+        totalPages,
+        currentPage: page,
+        limit,
+      },
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch auto-generated projects', data: null });
+  }
+};
+
+// NEW: return distinct infrastruktur and volume (respecting user visibility)
+exports.getProjectFilterOptions = async (req, res) => {
+  try {
+    const requester = getRequester(req);
+    if (!requester) return res.status(401).json({ message: 'Unauthorized' });
+    const isAdmin = requester.role === 'admin';
+    const { infrastruktur } = req.query || {};
+
+    const baseWhere = isAdmin ? {} : { userId: requester.userId };
+
+    // Distinct infrastruktur
+    const infraRows = await prisma.project.findMany({
+      where: baseWhere,
+      select: { infrastruktur: true },
+      distinct: ['infrastruktur'],
+      orderBy: { infrastruktur: 'asc' },
+    });
+
+    // Distinct volumes (optionally scoped by infrastruktur)
+    const volWhere = {
+      ...baseWhere,
+      ...(infrastruktur ? { infrastruktur: { equals: infrastruktur, mode: 'insensitive' } } : {}),
+      volume: { not: null },
+    };
+    const volRows = await prisma.project.findMany({
+      where: volWhere,
+      select: { volume: true },
+      distinct: ['volume'],
+      orderBy: { volume: 'asc' },
+    });
+
+    res.json({
+      message: 'Filter options retrieved.',
+      data: {
+        infrastruktur: infraRows.map(r => r.infrastruktur).filter(Boolean),
+        volume: volRows.map(r => r.volume).filter(v => v !== null),
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch filter options' });
   }
 };
 

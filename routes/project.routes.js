@@ -9,6 +9,8 @@ router.get('/manual', controller.getManualProjects);
 router.get('/auto', controller.getAutoProjects);
 // NEW: approved projects library (public)
 router.get('/library', controller.getApprovedProjects);
+// NEW: filters for dropdowns
+router.get('/filters', controller.getProjectFilterOptions);
 // More specific route comes before "/:id"
 router.get('/:id/estimation', controller.calculateProjectEstimation);
 router.get('/:id', controller.getProjectById);
