@@ -4,10 +4,14 @@ const router = express.Router();
 const authController = require('../controllers/auth.controller');
 const { authenticate } = require('../middlewares/auth.middleware');
 
+// NEW: limiter factory that ignores preflight
 const limiter = (max) =>
   rateLimit({
     windowMs: 30 * 60 * 1000, // 30 minutes
     max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: (req) => req.method === 'OPTIONS', // don't rate-limit preflight
     message: { error: 'Too many requests, please try again later' },
   });
 

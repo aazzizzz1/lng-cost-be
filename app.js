@@ -15,26 +15,15 @@ const cciRoutes = require('./routes/cci.routes'); // Import CCI routes
 const calculatorRoutes = require('./routes/calculator.routes'); // Import Calculator routes
 
 const app = express();
+// NEW: trust proxy so secure cookies (SameSite=None; Secure) work behind reverse proxies
+app.set('trust proxy', 1);
+
 app.use(express.json({ limit: '50mb' })); // Increase payload size limit to 50MB
 app.use(helmet());
 app.use(morgan('dev'));
 
-const limiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  max: 100,
-}); 
-app.use(limiter); // DDoS protection: rate limiting
-
-app.use(
-  helmet.hsts({
-    maxAge: 60 * 60 * 24 * 365, // 1 tahun
-    includeSubDomains: true,
-    preload: true, // opsional: untuk preload list browser
-  })
-); // Security headers: HSTS for HTTPS enforcement
-
+// NEW: CORS should run before any rate-limiters and must allow credentials
 const allowedOrigins = ['http://103.196.154.31', 'http://localhost:3000', 'http://localhost:5000', 'https://lng-cost-fe.netlify.app', 'https://yourdomain.com']; // cleaned: no trailing slash
-
 const corsOptions = {
   origin: (origin, callback) => {
     if (!origin || allowedOrigins.includes(origin)) {
@@ -45,10 +34,28 @@ const corsOptions = {
   },
   credentials: true, // allow cookies
 };
-
-app.use(cors(corsOptions)); // CORS configuration: prevents unauthorized cross-origin requests
+app.use(cors(corsOptions));
 
 app.use(cookieParser()); // Middleware for parsing cookies (can be used for secure session management)
+
+// NEW: global rate limiter that skips preflight and auth routes (auth has its own limiter)
+const globalLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 500, // relax global cap
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === 'OPTIONS' || req.path.startsWith('/api/auth'),
+});
+app.use(globalLimiter); // DDoS protection: rate limiting
+
+app.use(
+  helmet.hsts({
+    maxAge: 60 * 60 * 24 * 365, // 1 tahun
+    includeSubDomains: true,
+    preload: true, // opsional: untuk preload list browser
+  })
+); // Security headers: HSTS for HTTPS enforcement
+
 app.disable('x-powered-by'); // Disable X-Powered-By header to prevent information leakage
 
 // Middleware to handle caching globally
@@ -69,5 +76,4 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/cci', cciRoutes); // Add CCI routes
 app.use('/api/calculator', calculatorRoutes); // Add Calculator routes
 
-module.exports = app;
 module.exports = app;
