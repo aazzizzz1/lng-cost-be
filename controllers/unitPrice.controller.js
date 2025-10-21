@@ -35,24 +35,44 @@ exports.createUnitPrice = async (req, res) => {
 
 exports.getAllUnitPrices = async (req, res) => {
   try {
-    const { page = 1, limit = 10, sort, order, search, tipe, infrastruktur, kelompok, volume } = req.query;
+    const { page = 1, limit = 10, sort, order, search, tipe, infrastruktur, kelompok, volume, minVolume, maxVolume } = req.query;
+
+    // NEW: normalize page/limit to numbers
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 10;
 
     const filters = {};
     if (tipe) filters.tipe = { equals: tipe.toLowerCase(), mode: 'insensitive' };
     if (infrastruktur) filters.infrastruktur = { equals: infrastruktur.toLowerCase(), mode: 'insensitive' };
     if (kelompok) filters.kelompok = { equals: kelompok.toLowerCase(), mode: 'insensitive' };
 
-    // NEW: volume filter supports single value or comma-separated list
+    // NEW: helper to parse numeric (supports "125,5")
+    const parseNum = (v) => {
+      if (v === undefined || v === null) return undefined;
+      const n = parseFloat(String(v).replace(',', '.'));
+      return Number.isNaN(n) ? undefined : n;
+    };
+
+    // Volume filter: supports exact/list; if absent, support minVolume/maxVolume range
     if (volume) {
       if (typeof volume === 'string' && volume.includes(',')) {
         const vols = volume
           .split(',')
-          .map(v => parseFloat(v.trim()))
-          .filter(v => !Number.isNaN(v));
+          .map(v => parseNum(v.trim()))
+          .filter(v => v !== undefined);
         if (vols.length) filters.volume = { in: vols };
       } else {
-        const v = parseFloat(volume);
-        if (!Number.isNaN(v)) filters.volume = { equals: v };
+        const v = parseNum(volume);
+        if (v !== undefined) filters.volume = { equals: v };
+      }
+    } else {
+      const minV = parseNum(minVolume);
+      const maxV = parseNum(maxVolume);
+      if (minV !== undefined || maxV !== undefined) {
+        filters.volume = {
+          ...(minV !== undefined ? { gte: minV } : {}),
+          ...(maxV !== undefined ? { lte: maxV } : {}),
+        };
       }
     }
 
@@ -64,9 +84,9 @@ exports.getAllUnitPrices = async (req, res) => {
     }
 
     const total = await prisma.unitPrice.count({ where: filters });
-    const totalPages = Math.ceil(total / limit);
+    const totalPages = Math.ceil(total / limitNum);
 
-    if (page > totalPages) {
+    if (pageNum > totalPages && totalPages > 0) {
       return res.status(400).json({
         message: 'Page exceeds total data available.',
         totalData: total,
@@ -77,8 +97,8 @@ exports.getAllUnitPrices = async (req, res) => {
     const unitPrices = await prisma.unitPrice.findMany({
       where: filters,
       orderBy: { [sort || 'createdAt']: order || 'asc' }, // Default sorting applied if empty
-      skip: (page - 1) * limit,
-      take: parseInt(limit),
+      skip: (pageNum - 1) * limitNum,
+      take: limitNum,
     });
 
     res.json({
@@ -87,12 +107,12 @@ exports.getAllUnitPrices = async (req, res) => {
       pagination: {
         totalData: total,
         totalPages,
-        currentPage: parseInt(page),
-        limit: parseInt(limit),
+        currentPage: pageNum,
+        limit: limitNum,
       },
     });
   } catch (error) {
-    console.error('Error fetching unit prices:', error); // Log the error for debugging
+    console.error('Error fetching unit prices:', error);
     res.status(500).json({ message: 'Failed to fetch unit prices', error: error.message });
   }
 };
