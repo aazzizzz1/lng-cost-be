@@ -164,11 +164,18 @@ exports.uploadCalculatorExcel = async (req, res) => {
   }
 };
 
-// Helper: Calculate R² for linear regression
-function calculateRSquared(data, predictFn) {
-  const meanY = data.reduce((acc, d) => acc + d.cost, 0) / data.length;
-  const ssTot = data.reduce((acc, d) => acc + Math.pow(d.cost - meanY, 2), 0);
-  const ssRes = data.reduce((acc, d) => acc + Math.pow(d.cost - predictFn(d.capacity), 2), 0);
+// Helper: Calculate R² with optional transform (e.g., LN for log-log)
+// If transformY is provided, R² is computed in the transformed domain (Excel RSQ equivalent).
+function calculateRSquared(data, predictFn, { transformY } = {}) {
+  const yVals = data.map(d => (transformY ? transformY(d.cost) : d.cost));
+  const yHatVals = data.map(d => {
+    const yhat = predictFn(d.capacity);
+    return transformY ? transformY(yhat) : yhat;
+  });
+
+  const meanY = yVals.reduce((acc, y) => acc + y, 0) / yVals.length;
+  const ssTot = yVals.reduce((acc, y) => acc + Math.pow(y - meanY, 2), 0);
+  const ssRes = yVals.reduce((acc, y, i) => acc + Math.pow(y - yHatVals[i], 2), 0);
   return ssTot === 0 ? 1 : 1 - ssRes / ssTot;
 }
 
@@ -449,7 +456,8 @@ exports.estimateCost = async (req, res) => {
         return res.status(400).json({ message: 'Data terlalu sedikit untuk regresi log-log.' });
 
       result = logLogRegression(data, desiredCapacity);
-      r2 = calculateRSquared(data, result.predictFn);
+      // Compute R² in ln-space to match Excel: RSQ(LN(y), LN(x))
+      r2 = calculateRSquared(data, result.predictFn, { transformY: Math.log });
       r2Interpretation = interpretRSquared(r2);
 
       const n = data.length;
@@ -458,13 +466,13 @@ exports.estimateCost = async (req, res) => {
       const sumLnXLnY = data.reduce((acc, d) => acc + Math.log(d.capacity) * Math.log(d.cost), 0);
       const sumLnX2 = data.reduce((acc, d) => acc + Math.log(d.capacity) ** 2, 0);
 
-      // Excel roles on ln-space: a=SLOPE, b=INTERCEPT
       const a = (n * sumLnXLnY - sumLnX * sumLnY) / (n * sumLnX2 - sumLnX ** 2);
       const b = (sumLnY - a * sumLnX) / n;
 
       regressionStep = { n, sumLnX, sumLnY, sumLnXLnY, sumLnX2, a, b };
       mathFormula = 'ln(y) = b + a·ln(x) → y = exp(b)·x^a';
-      regressionData = { a, b, estimate: result.estimate };
+      // Add Excel hint for R² in ln-space
+      regressionData = { a, b, estimate: result.estimate, r2Excel: 'RSQ(LN(y), LN(x))' };
       methodCalculation = {
         type: 'loglog',
         formula: 'ln(y)=b + a ln(x) -> y = exp(b)*x^a',
