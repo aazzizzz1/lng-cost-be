@@ -22,6 +22,9 @@ router.get('/chart-data', controller.getUnitPriceChartData);
 router.get('/unique-infrastruktur-proyek', controller.getUniqueInfrastrukturAndProyek);
 
 // New route for best price recommendation per workcode
+// Supports query params: ?search=...&infrastruktur=...&kelompok=...
+// - search matches uraian/specification/workcode (case-insensitive)
+// - infrastruktur, kelompok accept single value or comma-separated list
 router.get('/best-prices', controller.getBestPricesByWorkcode);
 
 // NEW: update unit price + sync construction costs in the same project

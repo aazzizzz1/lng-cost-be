@@ -365,8 +365,43 @@ exports.getUniqueInfrastrukturAndProyek = async (req, res) => {
 // NEW: Get best price per workcode with outlier analysis
 exports.getBestPricesByWorkcode = async (req, res) => {
   try {
-    // 1. Fetch all unit prices
-    const unitPrices = await prisma.unitPrice.findMany();
+    // Parse filters from query
+    const { search, infrastruktur, kelompok } = req.query;
+
+    // Build case-insensitive filters, support comma-separated lists for infrastruktur/kelompok
+    const AND = [];
+
+    if (search) {
+      AND.push({
+        OR: [
+          { uraian: { contains: String(search), mode: 'insensitive' } },
+          { specification: { contains: String(search), mode: 'insensitive' } },
+          { workcode: { contains: String(search), mode: 'insensitive' } },
+        ],
+      });
+    }
+
+    const buildOREquals = (field, raw) => {
+      const vals = String(raw)
+        .split(',')
+        .map(v => v.trim())
+        .filter(Boolean);
+      if (!vals.length) return null;
+      if (vals.length === 1) return { [field]: { equals: vals[0], mode: 'insensitive' } };
+      return {
+        OR: vals.map(v => ({ [field]: { equals: v, mode: 'insensitive' } })),
+      };
+    };
+
+    const infraFilter = infrastruktur ? buildOREquals('infrastruktur', infrastruktur) : null;
+    const kelompokFilter = kelompok ? buildOREquals('kelompok', kelompok) : null;
+    if (infraFilter) AND.push(infraFilter);
+    if (kelompokFilter) AND.push(kelompokFilter);
+
+    const where = AND.length ? { AND } : undefined;
+
+    // 1. Fetch filtered unit prices
+    const unitPrices = await prisma.unitPrice.findMany({ where });
 
     // 2. Group by workcode
     const grouped = {};
@@ -525,7 +560,7 @@ exports.getBestPricesByWorkcode = async (req, res) => {
         });
       }
 
-      // Pick representative item (full record) closest to recommendedPrice
+      // Pick recommended item (full record) closest to recommendedPrice
       let recommendedItem = null;
       if (recommended != null && pricedItems.length) {
         recommendedItem = pricedItems.reduce((best, curr) => {
@@ -548,7 +583,6 @@ exports.getBestPricesByWorkcode = async (req, res) => {
     res.json({
       message: 'Best price recommendation per workcode with outlier analysis.',
       recommendations,
-      // allUnitPrices: unitPrices,
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to get best prices', error: error.message });
