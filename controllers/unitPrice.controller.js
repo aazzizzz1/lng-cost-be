@@ -277,6 +277,8 @@ exports.recommendUnitPrices = async (req, res) => {
           hargaSatuan: Math.round(hargaLokasiProject),
           totalHarga: Math.round(adjustedQty * hargaLokasiProject), // gunakan nilai asli adjustedQty
           volume: volume,
+          // NEW: force AACE Level 5 for all recommended items
+          aaceClass: 5,
         };
       })
     );

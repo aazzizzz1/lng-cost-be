@@ -675,6 +675,8 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
         qty,
         hargaSatuan: hargaCCI,
         totalHarga: qty * hargaCCI,
+        // NEW: force AACE Level 5 for all recommended items
+        aaceClass: 5,
         rumusQty,
         rumusHargaInflasi,
         rumusBenchmark,
