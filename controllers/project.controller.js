@@ -733,6 +733,74 @@ exports.deleteProject = async (req, res) => {
   }
 };
 
+// NEW: delete all Auto-generated projects (admin-only)
+exports.deleteAutoProjects = async (req, res) => {
+  try {
+    const requester = getRequester(req);
+    if (!requester || requester.role !== 'admin') return res.status(403).json({ message: 'Forbidden' });
+
+    const counts = await prisma.$transaction(async (tx) => {
+      const projects = await tx.project.findMany({
+        where: { kategori: 'Auto-generated' },
+        select: { id: true },
+      });
+      const ids = projects.map(p => p.id);
+      if (!ids.length) {
+        return { deletedUnitPrices: 0, deletedCosts: 0, deletedProjects: 0 };
+      }
+      const deletedUP = await tx.unitPrice.deleteMany({ where: { projectId: { in: ids } } });
+      const deletedCosts = await tx.constructionCost.deleteMany({ where: { projectId: { in: ids } } });
+      const deletedProjects = await tx.project.deleteMany({ where: { id: { in: ids } } });
+      return {
+        deletedUnitPrices: deletedUP.count,
+        deletedCosts: deletedCosts.count,
+        deletedProjects: deletedProjects.count
+      };
+    });
+
+    res.status(200).json({
+      message: 'Auto-generated projects and associated data deleted successfully.',
+      ...counts,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to delete auto-generated projects', error: error.message });
+  }
+};
+
+// NEW: delete all Manual projects (non Auto-generated) (admin-only)
+exports.deleteManualProjects = async (req, res) => {
+  try {
+    const requester = getRequester(req);
+    if (!requester || requester.role !== 'admin') return res.status(403).json({ message: 'Forbidden' });
+
+    const counts = await prisma.$transaction(async (tx) => {
+      const projects = await tx.project.findMany({
+        where: { NOT: { kategori: 'Auto-generated' } },
+        select: { id: true },
+      });
+      const ids = projects.map(p => p.id);
+      if (!ids.length) {
+        return { deletedUnitPrices: 0, deletedCosts: 0, deletedProjects: 0 };
+      }
+      const deletedUP = await tx.unitPrice.deleteMany({ where: { projectId: { in: ids } } });
+      const deletedCosts = await tx.constructionCost.deleteMany({ where: { projectId: { in: ids } } });
+      const deletedProjects = await tx.project.deleteMany({ where: { id: { in: ids } } });
+      return {
+        deletedUnitPrices: deletedUP.count,
+        deletedCosts: deletedCosts.count,
+        deletedProjects: deletedProjects.count
+      };
+    });
+
+    res.status(200).json({
+      message: 'Manual projects and associated data deleted successfully.',
+      ...counts,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to delete manual projects', error: error.message });
+  }
+};
+
 exports.calculateProjectEstimation = async (req, res) => {
   try {
     const requester = getRequester(req);
