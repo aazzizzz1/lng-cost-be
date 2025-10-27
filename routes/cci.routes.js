@@ -1,10 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const controller = require('../controllers/cci.controller');
-const { authenticate, authorizeRoles } = require('../middlewares/auth.middleware');
+const { authenticate } = require('../middlewares/auth.middleware');
 
-// NEW: protect all CCI routes for admin
-router.use(authenticate, authorizeRoles('admin'));
+router.use(authenticate);
 
 router.post('/', controller.createCCI);
 router.get('/', controller.getAllCCI);
