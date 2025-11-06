@@ -23,7 +23,7 @@ app.use(helmet());
 app.use(morgan('dev'));
 
 // NEW: CORS should run before any rate-limiters and must allow credentials
-const allowedOrigins = ['http://103.196.154.31', 'http://localhost:3000', 'http://localhost:5000', 'https://lng-cost-fe.netlify.app', 'https://yourdomain.com']; // cleaned: no trailing slash
+const allowedOrigins = ['http://103.196.154.31', 'http://localhost:3000', 'http://localhost:5000', 'https://lng-cost-fe.netlify.app', 'https://engimate.pgnlng.co.id']; // cleaned: no trailing slash
 const corsOptions = {
   origin: (origin, callback) => {
     if (!origin || allowedOrigins.includes(origin)) {
