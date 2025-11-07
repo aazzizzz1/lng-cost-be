@@ -51,6 +51,26 @@ exports.register = async (req, res) => {
 
 exports.login = async (req, res) => {
   try {
+    // NEW: debug logging
+    if (process.env.DEBUG_AUTH_LOGIN === 'true') {
+      console.log('[LOGIN] headers:', req.headers);
+      console.log('[LOGIN] rawBody:', req.rawBody);
+      console.log('[LOGIN] parsedBody:', req.body);
+    }
+
+    // Fallback: if body comes in as string, try to parse once
+    if (typeof req.body === 'string' && req.body.trim().length) {
+      try {
+        req.body = JSON.parse(req.body);
+      } catch {
+        return res.status(400).json({ message: 'Invalid JSON payload' });
+      }
+    }
+
+    if (!req.body || typeof req.body !== 'object') {
+      return res.status(400).json({ message: 'Request body not parsed (invalid Content-Type or JSON).' });
+    }
+
     const { email, password } = req.body || {};
     if (!email || !password) {
       return res.status(400).json({ message: 'Email and password are required' });
@@ -75,6 +95,9 @@ exports.login = async (req, res) => {
       },
     });
   } catch (err) {
+    if (process.env.DEBUG_AUTH_LOGIN === 'true') {
+      console.error('[LOGIN ERROR]', err);
+    }
     return res.status(400).json({ message: 'Login failed. Check payload format and credentials.' });
   }
 };

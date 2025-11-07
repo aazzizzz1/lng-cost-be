@@ -18,13 +18,22 @@ const app = express();
 // NEW: trust proxy so secure cookies (SameSite=None; Secure) work behind reverse proxies
 app.set('trust proxy', 1);
 
-// NEW: robust JSON parsing
+// NEW: capture raw body for debugging parse failures
+app.use((req, res, next) => {
+  if (req.method === 'POST' || req.method === 'PATCH' || req.method === 'PUT') {
+    req._startTs = Date.now();
+  }
+  next();
+});
+
+// Parse JSON even if proxy sets text/plain or application/*+json
 app.use(express.json({
   limit: '50mb',
-  // Accept common JSON types even when client/proxy sets text/plain or +json
   type: ['application/json', 'application/*+json', 'text/plain'],
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString();
+  },
 }));
-// Fallback: accept form-urlencoded payloads (in case clients send as forms)
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(helmet());
 app.use(morgan('dev'));
@@ -86,10 +95,23 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/cci', cciRoutes); // Add CCI routes
 app.use('/api/calculator', calculatorRoutes); // Add Calculator routes
 
-// NEW: friendly JSON parse error
+// NEW: friendly JSON parse / generic error handler (forces JSON response)
 app.use((err, req, res, next) => {
-  if (err && err.type === 'entity.parse.failed') {
-    return res.status(400).json({ error: 'Invalid JSON payload' });
+  if (err) {
+    const isParse = err.type === 'entity.parse.failed';
+    if (process.env.DEBUG_REQUEST === 'true') {
+      console.error('[ERROR]', {
+        path: req.path,
+        method: req.method,
+        message: err.message,
+        type: err.type,
+        rawBody: req.rawBody,
+        headers: req.headers,
+      });
+    }
+    return res
+      .status(isParse ? 400 : (err.status || 500))
+      .json({ error: isParse ? 'Invalid JSON payload' : 'Request error', detail: err.message });
   }
   next(err);
 });
