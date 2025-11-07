@@ -16,7 +16,22 @@ const calculatorRoutes = require('./routes/calculator.routes'); // Import Calcul
 
 const app = express();
 // NEW: trust proxy so secure cookies (SameSite=None; Secure) work behind reverse proxies
-app.set('trust proxy', 1);
+// app.set('trust proxy', 1);
+app.enable('trust proxy');
+
+// NEW: optional proxy/header debug
+if (process.env.DEBUG_PROXY === 'true') {
+  app.use((req, res, next) => {
+    console.log('[PROXY]', {
+      secure: req.secure,
+      protocol: req.protocol,
+      xfp: req.headers['x-forwarded-proto'],
+      host: req.headers.host,
+      url: req.originalUrl,
+    });
+    next();
+  });
+}
 
 // NEW: capture raw body for debugging parse failures
 app.use((req, res, next) => {
