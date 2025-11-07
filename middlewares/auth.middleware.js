@@ -9,6 +9,9 @@ const accessCookieOpts = {
   secure: isProd && isHttps,
   sameSite: isProd && isHttps ? 'None' : 'Lax',
   maxAge: 15 * 60 * 1000, // 15 minutes
+  path: '/',
+  // domain only when provided
+  ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}),
 };
 
 // Helper: try refreshing access token using refreshToken cookie

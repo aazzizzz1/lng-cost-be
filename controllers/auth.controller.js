@@ -9,13 +9,18 @@ const generateToken = (user, secret, expiresIn) =>
 const isProd = process.env.NODE_ENV === 'production';
 const isHttps = process.env.USE_HTTPS === "true";
 
-const cookieOpts = (maxAge) => ({
-  httpOnly: true,
-  secure: isProd && isHttps,
-  sameSite: isProd && isHttps ? 'None' : 'Lax',
-  domain: process.env.COOKIE_DOMAIN,
-  maxAge,
-});
+// Only apply Domain when provided; always set path for reliable clearing
+const cookieOpts = (maxAge) => {
+  const base = {
+    httpOnly: true,
+    secure: isProd && isHttps,
+    sameSite: isProd && isHttps ? 'None' : 'Lax',
+    maxAge,
+    path: '/',
+  };
+  if (process.env.COOKIE_DOMAIN) base.domain = process.env.COOKIE_DOMAIN;
+  return base;
+};
 
 const setTokenCookies = (res, accessToken, refreshToken) => {
   res.cookie('accessToken', accessToken, cookieOpts(15 * 60 * 1000)); // 15 minutes
@@ -45,26 +50,33 @@ exports.register = async (req, res) => {
 };
 
 exports.login = async (req, res) => {
-  const { email, password } = req.body;
-  const user = await prisma.user.findUnique({ where: { email } });
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password are required' });
+    }
 
-  if (!user || !(await bcrypt.compare(password, user.password))) {
-    return res.status(401).json({ message: 'Invalid credentials' });
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const accessToken = generateToken(user, process.env.JWT_SECRET, '15m');
+    const refreshToken = generateToken(user, process.env.REFRESH_SECRET, '7d');
+
+    await prisma.user.update({ where: { id: user.id }, data: { refreshToken } });
+    setTokenCookies(res, accessToken, refreshToken);
+
+    return res.json({
+      message: 'Login successful',
+      data: {
+        user: { id: user.id, username: user.username, email: user.email, role: user.role },
+        // accessToken removed from response (HttpOnly cookie only)
+      },
+    });
+  } catch (err) {
+    return res.status(400).json({ message: 'Login failed. Check payload format and credentials.' });
   }
-
-  const accessToken = generateToken(user, process.env.JWT_SECRET, '15m');
-  const refreshToken = generateToken(user, process.env.REFRESH_SECRET, '7d');
-
-  await prisma.user.update({ where: { id: user.id }, data: { refreshToken } });
-  setTokenCookies(res, accessToken, refreshToken);
-
-  res.json({
-    message: 'Login successful',
-    data: {
-      user: { id: user.id, username: user.username, email: user.email, role: user.role },
-      // accessToken removed from response (HttpOnly cookie only)
-    },
-  });
 };
 
 exports.refreshToken = async (req, res) => {
@@ -130,8 +142,9 @@ exports.logout = async (req, res) => {
     const payload = jwt.verify(token, process.env.REFRESH_SECRET);
     await prisma.user.update({ where: { id: payload.userId }, data: { refreshToken: null } });
 
-    res.clearCookie('accessToken');
-    res.clearCookie('refreshToken');
+    // Ensure clearing uses the same cookie attributes as when set
+    res.clearCookie('accessToken', cookieOpts(0));
+    res.clearCookie('refreshToken', cookieOpts(0));
     res.json({ message: 'Logout successful' });
   } catch (err) {
     res.status(403).json({ message: 'Invalid or expired token' });

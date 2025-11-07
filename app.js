@@ -18,7 +18,14 @@ const app = express();
 // NEW: trust proxy so secure cookies (SameSite=None; Secure) work behind reverse proxies
 app.set('trust proxy', 1);
 
-app.use(express.json({ limit: '50mb' })); // Increase payload size limit to 50MB
+// NEW: robust JSON parsing
+app.use(express.json({
+  limit: '50mb',
+  // Accept common JSON types even when client/proxy sets text/plain or +json
+  type: ['application/json', 'application/*+json', 'text/plain'],
+}));
+// Fallback: accept form-urlencoded payloads (in case clients send as forms)
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(helmet());
 app.use(morgan('dev'));
 
@@ -33,6 +40,9 @@ const corsOptions = {
     }
   },
   credentials: true, // allow cookies
+  // Helpful for preflight under some proxies
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 };
 app.use(cors(corsOptions));
 
@@ -75,5 +85,13 @@ app.use('/api/construction-costs', constructionCostRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/cci', cciRoutes); // Add CCI routes
 app.use('/api/calculator', calculatorRoutes); // Add Calculator routes
+
+// NEW: friendly JSON parse error
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+  next(err);
+});
 
 module.exports = app;
