@@ -13,6 +13,7 @@ const cookieOpts = (maxAge) => ({
   httpOnly: true,
   secure: isProd && isHttps,
   sameSite: isProd && isHttps ? 'None' : 'Lax',
+  domain: process.env.COOKIE_DOMAIN,
   maxAge,
 });
 
