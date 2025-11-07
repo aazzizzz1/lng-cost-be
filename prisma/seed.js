@@ -101,6 +101,7 @@ async function main() {
 
   await prisma.unitPrice.create({
     data: {
+      workcode: "PM-001",
       uraian: "Project Management LNGC",
       specification: "Manajemen proyek LNGC Papua",
       qty: 1,
@@ -124,6 +125,7 @@ async function main() {
 
   await prisma.constructionCost.create({
     data: {
+      workcode: "PM-002",
       uraian: "Project Management",
       specification: "Project Management untuk FSRU Lampung",
       qty: 1,
