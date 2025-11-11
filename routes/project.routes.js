@@ -8,6 +8,7 @@ router.get('/manual', controller.getManualProjects);
 // NEW: auto-generated projects
 router.get('/auto', controller.getAutoProjects);
 // NEW: approved projects library (public)
+router.get('/library/:id', controller.getApprovedProjectById); // NEW: public approved project detail
 router.get('/library', controller.getApprovedProjects);
 // NEW: filters for dropdowns
 router.get('/filters', controller.getProjectFilterOptions);

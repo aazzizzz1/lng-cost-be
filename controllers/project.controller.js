@@ -394,7 +394,8 @@ exports.getProjectById = async (req, res) => {
     }
 
     const isAdmin = requester.role === 'admin';
-    if (!isAdmin && project.userId !== requester.userId) {
+    // CHANGED: allow access if project.approval === true
+    if (!isAdmin && project.userId !== requester.userId && !project.approval) {
       return res.status(403).json({ message: 'Forbidden' });
     }
 
@@ -818,7 +819,8 @@ exports.calculateProjectEstimation = async (req, res) => {
     }
 
     const isAdmin = requester.role === 'admin';
-    if (!isAdmin && project.userId !== requester.userId) {
+    // CHANGED: allow if approved
+    if (!isAdmin && project.userId !== requester.userId && !project.approval) {
       return res.status(403).json({ message: 'Forbidden' });
     }
 
@@ -1127,5 +1129,42 @@ exports.getApprovedProjects = async (req, res) => {
     res.json({ message: 'Approved projects retrieved successfully.', data: projects });
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch approved projects', error: error.message });
+  }
+};
+
+// NEW: public fetch approved project by id (no auth required)
+exports.getApprovedProjectById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const project = await prisma.project.findFirst({
+      where: { id: parseInt(id), approval: true },
+      include: { constructionCosts: true },
+    });
+    if (!project) {
+      return res.status(404).json({ message: 'Approved project not found', data: null });
+    }
+
+    const totalConstructionCost = project.constructionCosts.reduce((sum, cost) => sum + (cost.totalHarga || 0), 0);
+    const totalAACE = project.constructionCosts.reduce((sum, cost) => sum + (cost.aaceClass || 0), 0);
+    const averageAACE = project.constructionCosts.length ? totalAACE / project.constructionCosts.length : 0;
+    const ppnRate = 0.11;
+    const insuranceRate = 0.025;
+    const ppn = totalConstructionCost * ppnRate;
+    const insurance = totalConstructionCost * insuranceRate;
+    const totalEstimation = totalConstructionCost + ppn + insurance;
+
+    return res.json({
+      message: 'Approved project retrieved successfully.',
+      data: {
+        ...project,
+        totalConstructionCost,
+        averageAACE: Math.round(averageAACE),
+        ppn,
+        insurance,
+        totalEstimation,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Failed to fetch approved project', data: null });
   }
 };
