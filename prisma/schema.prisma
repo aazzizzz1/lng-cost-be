@@ -47,6 +47,8 @@ model Project {
 
   constructionCosts ConstructionCost[]
   unitPrices        UnitPrice[]        // NEW: back-relation for UnitPrice.project
+  // NEW: back relation for ConstructionCost.referenceProject
+  referencedByConstructionCosts ConstructionCost[] @relation("ConstructionCostReferenceProject")
 }
 
 model ConstructionCost {
@@ -73,6 +75,13 @@ model ConstructionCost {
 
   project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade) // Add onDelete: Cascade
   projectId Int
+  // NEW: optional reference to source project used for estimation
+  referenceProject   Project? @relation("ConstructionCostReferenceProject", fields: [referenceProjectId], references: [id], onDelete: SetNull)
+  referenceProjectId Int?
+  referenceProjectName String?
+  // NEW: indexes for common query patterns
+  @@index([projectId, workcode, volume])
+  @@index([referenceProjectId])
 }
 
 model UnitPrice {
@@ -99,6 +108,8 @@ model UnitPrice {
   createdAt             DateTime @default(now())
   project    Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
   projectId  Int?
+  // NEW: index to optimize sync/deletion queries
+  @@index([projectId, workcode, volume])
 }
 
 model cci {

@@ -684,7 +684,10 @@ exports.recommendConstructionCostsAndCreateProject = async (req, res) => {
         rumusHargaCCI,
         toBenchmark,
         _mode: mode,
-        _referenceVolume: refEntry.vol
+        _referenceVolume: refEntry.vol,
+        // NEW: reference project info per item
+        referenceProjectId: baseItem.projectId || null,
+        referenceProjectName: baseItem.proyek || proyek || null
       });
     }
 
@@ -873,7 +876,8 @@ exports.updateProject = async (req, res) => {
     const allowedCostFields = [
       'workcode','uraian','specification','qty','satuan','hargaSatuan','totalHarga',
       'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur','volume',
-      'satuanVolume','kelompok','kelompokDetail','lokasi','tipe'
+      'satuanVolume','kelompok','kelompokDetail','lokasi','tipe',
+      'referenceProjectId','referenceProjectName' // NEW
     ];
 
     const updated = await prisma.$transaction(async (tx) => {

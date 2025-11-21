@@ -24,10 +24,11 @@ exports.createConstructionCost = async (req, res) => {
     }
 
     const allowed = [
-      'workcode', // NEW
+      'workcode',
       'uraian','specification','qty','satuan','hargaSatuan','totalHarga',
       'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur','volume',
-      'satuanVolume','kelompok','kelompokDetail','lokasi','tipe'
+      'satuanVolume','kelompok','kelompokDetail','lokasi','tipe',
+      'referenceProjectId','referenceProjectName' // NEW
     ];
     const data = {};
     for (const k of allowed) {
@@ -173,7 +174,8 @@ exports.updateConstructionCost = async (req, res) => {
     const allowed = [
       'workcode','uraian','specification','qty','satuan','hargaSatuan','totalHarga',
       'aaceClass','accuracyLow','accuracyHigh','tahun','infrastruktur','volume',
-      'satuanVolume','kelompok','kelompokDetail','lokasi','tipe'
+      'satuanVolume','kelompok','kelompokDetail','lokasi','tipe',
+      'referenceProjectId','referenceProjectName' // NEW
     ];
     const data = {};
     for (const k of allowed) if (req.body[k] !== undefined) data[k] = req.body[k];
