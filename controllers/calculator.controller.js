@@ -67,6 +67,79 @@ exports.deleteAllTotalCosts = async (req, res) => {
   }
 };
 
+// Get calculator total cost by ID
+exports.getTotalCostById = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ message: 'Invalid id', data: null });
+    const row = await prisma.calculatorTotalCost.findUnique({ where: { id } });
+    if (!row) return res.status(404).json({ message: 'Not found', data: null });
+    res.json({ message: 'Calculator total cost retrieved successfully.', data: row });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to fetch data', error: err.message, data: null });
+  }
+};
+
+// Update calculator total cost by ID
+exports.updateTotalCostById = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ message: 'Invalid id', data: null });
+
+    const {
+      infrastructure,
+      volume,
+      unit,
+      totalCost,
+      year,
+      location,
+      low,
+      high,
+      information,
+    } = req.body;
+
+    const dataToUpdate = {};
+    if (infrastructure !== undefined) dataToUpdate.infrastructure = infrastructure;
+    if (volume !== undefined) dataToUpdate.volume = volume;
+    if (unit !== undefined) dataToUpdate.unit = unit;
+    if (totalCost !== undefined) dataToUpdate.totalCost = totalCost;
+    if (year !== undefined) dataToUpdate.year = year;
+    if (location !== undefined) dataToUpdate.location = location;
+    if (low !== undefined) dataToUpdate.low = low;
+    if (high !== undefined) dataToUpdate.high = high;
+    if (information !== undefined) dataToUpdate.information = information;
+
+    if (Object.keys(dataToUpdate).length === 0)
+      return res.status(400).json({ message: 'No valid fields to update', data: null });
+
+    const updated = await prisma.calculatorTotalCost.update({
+      where: { id },
+      data: dataToUpdate,
+    });
+    res.json({ message: 'Calculator total cost updated successfully.', data: updated });
+  } catch (err) {
+    if (err.code === 'P2025') {
+      return res.status(404).json({ message: 'Not found', data: null });
+    }
+    res.status(500).json({ message: 'Failed to update', error: err.message, data: null });
+  }
+};
+
+// Delete calculator total cost by ID
+exports.deleteTotalCostById = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ message: 'Invalid id' });
+    await prisma.calculatorTotalCost.delete({ where: { id } });
+    res.json({ message: 'Calculator total cost deleted successfully.', data: { id } });
+  } catch (err) {
+    if (err.code === 'P2025') {
+      return res.status(404).json({ message: 'Not found', data: null });
+    }
+    res.status(500).json({ message: 'Failed to delete', error: err.message });
+  }
+};
+
 // Helper: Parse number from string (remove non-numeric except . and -)
 function parseNumber(val) {
   if (typeof val === 'number') return val;
