@@ -91,7 +91,12 @@ exports.getUniqueInfrastruktur = async (req, res) => {
       },
     });
 
-    const result = groupedData.reduce((acc, item) => {
+    // NEW: skip rows where infrastruktur is "Material" (case-insensitive)
+    const rows = groupedData.filter(
+      (i) => ((i.infrastruktur ?? '').trim().toLowerCase() !== 'material')
+    );
+
+    const result = rows.reduce((acc, item) => {
       if (!acc[item.tipe]) acc[item.tipe] = {};
       if (!acc[item.tipe][item.infrastruktur]) acc[item.tipe][item.infrastruktur] = [];
 
@@ -119,7 +124,7 @@ exports.getUniqueInfrastruktur = async (req, res) => {
     });
 
     res.status(200).json({
-      message: 'Grouped values retrieved successfully (auto-generated projects only, unique by project).',
+      message: 'Grouped values retrieved successfully (auto-generated projects only, excluding "Material").',
       data: result,
     });
   } catch (error) {
