@@ -133,3 +133,19 @@ model CalculatorTotalCost {
   information    String
   createdAt      DateTime @default(now())
 }
+
+model Opex {
+  id             Int      @id @default(autoincrement())
+  infrastructure String
+  type           String
+  kategoriOpex   String
+  item           String
+  deskripsi      String?
+  hargaOpex      Float
+  volume         Float
+  satuanVolume   String
+  tahun          Int
+  lokasi         String
+  project        String
+  createdAt      DateTime @default(now())
+}

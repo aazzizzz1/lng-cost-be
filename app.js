@@ -13,6 +13,7 @@ const constructionCostRoutes = require('./routes/constructionCost.routes');
 const uploadRoutes = require('./routes/upload.routes');
 const cciRoutes = require('./routes/cci.routes'); // Import CCI routes
 const calculatorRoutes = require('./routes/calculator.routes'); // Import Calculator routes
+const opexRoutes = require('./routes/opex.routes'); // NEW: OPEX routes
 
 const app = express();
 // NEW: trust proxy so secure cookies (SameSite=None; Secure) work behind reverse proxies
@@ -109,6 +110,7 @@ app.use('/api/construction-costs', constructionCostRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/cci', cciRoutes); // Add CCI routes
 app.use('/api/calculator', calculatorRoutes); // Add Calculator routes
+app.use('/api/opex', opexRoutes); // NEW: OPEX routes
 
 // NEW: friendly JSON parse / generic error handler (forces JSON response)
 app.use((err, req, res, next) => {
