@@ -195,6 +195,24 @@ async function main() {
   }
 
   console.log("✅ CCI data seeded");
+  // Ensure one default MooringRuleSetting exists
+  const countMooring = await prisma.mooringRuleSetting.count();
+  if (countMooring === 0) {
+    await prisma.mooringRuleSetting.create({
+      data: {
+        jettyMaxDepth: 25,
+        jettyMaxDistanceKm: 2,
+        cbmMinDepth: 15,
+        cbmMaxDepth: 70,
+        cbmExposurePolicy: 'SHELTERED_SEMI',
+        spreadMaxDepth: 1000,
+        towerYokeMaxDepth: 35,
+        turretForPermanent: true,
+        calmForVisiting: true,
+      },
+    });
+    console.log('✅ Default MooringRuleSetting seeded');
+  }
   console.log("Seeding completed successfully!");
 }
 

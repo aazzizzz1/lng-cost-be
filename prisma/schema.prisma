@@ -149,3 +149,32 @@ model Opex {
   project        String
   createdAt      DateTime @default(now())
 }
+
+// Mooring rule engine settings
+model MooringRuleSetting {
+  id                 Int      @id @default(autoincrement())
+
+  // --- Jetty ---
+  jettyMaxDepth      Float    @default(25)
+  jettyMaxDistanceKm Float    @default(2)
+
+  // --- CBM ---
+  cbmMinDepth        Float    @default(15)
+  cbmMaxDepth        Float    @default(70)
+  cbmExposurePolicy  String   @default("SHELTERED_SEMI")
+
+  // --- Offshore ---
+  spreadMaxDepth     Float    @default(1000)
+
+  // --- Weathervaning ---
+  towerYokeMaxDepth  Float    @default(35)
+
+  // --- Operational Behavior ---
+  turretForPermanent Boolean  @default(true)
+  calmForVisiting    Boolean  @default(true)
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@map("mooring_rule_settings")
+}
