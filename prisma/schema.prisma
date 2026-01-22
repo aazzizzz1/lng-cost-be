@@ -178,3 +178,73 @@ model MooringRuleSetting {
 
   @@map("mooring_rule_settings")
 }
+
+model Vessel {
+  id                  Int      @id @default(autoincrement())
+  name                String   @unique
+  capacityM3          Float
+  speedKnot           Float
+  rentPerDayUSD       Float
+  voyageTonPerDay     Float
+  ballastTonPerDay    Float
+  berthTonPerDay      Float
+  portCostLTP         Float
+  portCostDelay       Float
+  portCostPerLocation Float
+  createdAt           DateTime @default(now())
+}
+
+model DistanceRoute {
+  id            Int      @id @default(autoincrement())
+  origin        String
+  destination   String
+  nauticalMiles Float
+  createdAt     DateTime @default(now())
+  @@unique([origin, destination])
+}
+
+model OruCapex {
+  id          Int      @id @default(autoincrement())
+  plantName   String   @unique
+  fixCapexUSD Float
+  createdAt   DateTime @default(now())
+}
+
+model SupplyChainScenario {
+  id         Int      @id @default(autoincrement())
+  runKey     String   @unique
+  terminal   String
+  locations  Json
+  params     Json
+  demand     Json
+  createdAt  DateTime @default(now())
+  runs       SupplyChainRun[]
+}
+
+model SupplyChainRun {
+  id         Int      @id @default(autoincrement())
+  runKey     String   @unique
+  scenario   SupplyChainScenario? @relation(fields: [scenarioId], references: [id], onDelete: SetNull)
+  scenarioId Int?
+  terminal   String
+  locations  Json
+  params     Json
+  demand     Json
+  results    Json
+  topResult  Json?
+  reuseCount Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  @@index([scenarioId])
+}
+
+model Location {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  type      String   // 'terminal' | 'plant'
+  latitude  Float?
+  longitude Float?
+  createdAt DateTime @default(now())
+
+  @@index([type])
+}
