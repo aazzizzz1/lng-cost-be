@@ -1,3 +1,14 @@
+// Single-vessel logic:
+// - Generate all permutations of selectedLocations -> evaluate each route with each vessel.
+// - Compute RTD, working volume, capacity feasibility, CAPEX (tank + ORU), OPEX (fuel/port/rent/ORU).
+// - Optional: shareTerminalORU splits terminal ORU by 50% when enabled.
+//
+// Twin-vessel probability logic:
+// - For each ratio (e.g., 50:50, 60:40...), split selectedLocations into two sets by combination count.
+// - Run the single-vessel engine independently on each set.
+// - Enforce same vessel pairing or fixed vessel names if provided.
+// - Sum CAPEX/OPEX/Unit Cost per pairing and rank ascending by Total Cost USD/MMBTU.
+
 function roundUp(x, base) {
   return Math.ceil(x / base) * base;
 }
@@ -17,6 +28,17 @@ function permutations(arr) {
   return res;
 }
 
+function combinations(arr, k) {
+  const res = [];
+  const n = arr.length;
+  function backtrack(start, comb) {
+    if (comb.length === k) { res.push(comb.slice()); return; }
+    for (let i = start; i < n; i++) backtrack(i + 1, comb.concat(arr[i]));
+  }
+  backtrack(0, []);
+  return res;
+}
+
 function buildDistanceMap(routes) {
   const m = new Map();
   for (const r of routes) {
@@ -25,12 +47,13 @@ function buildDistanceMap(routes) {
   return m;
 }
 
-// inputs: { vessels, routes, oru, terminal, selectedLocations, demandBBTUD, params, inflationFactor }
+// inputs: { vessels, routes, oru, terminal, selectedLocations, demandBBTUD, params, inflationFactor, shareTerminalORU }
 async function runSupplyChainModel(input) {
   const {
     vessels, routes, oru,
     terminal, selectedLocations, demandBBTUD,
     params, inflationFactor,
+    shareTerminalORU = false,
   } = input;
 
   const distanceMap = buildDistanceMap(routes);
@@ -98,7 +121,7 @@ async function runSupplyChainModel(input) {
 
       if (kapasitas_kapal < 20000) {
         const terminal_oru = oruMap.get(terminal_penerima);
-        if (terminal_oru) total_capex += terminal_oru;
+        if (terminal_oru) total_capex += shareTerminalORU ? (terminal_oru / 2) : terminal_oru;
       }
 
       const penyaluran_20th = Object.values(demandBBTUD).reduce((a, b) => a + b, 0) * 365 * 20 * 1000;
@@ -162,4 +185,117 @@ async function runSupplyChainModel(input) {
   return results;
 }
 
-module.exports = { runSupplyChainModel };
+// Twin vessel probability model
+async function runTwoVesselProbabilityModel(input) {
+  const {
+    vessels, routes, oru, terminal, selectedLocations, demandBBTUD,
+    params, inflationFactor,
+    ratios = ['50:50','60:40','70:30','80:20','90:10'],
+    enforceSameVessel = true,
+    vesselNames, // optional: ['VesselName1','VesselName2']
+    shareTerminalORU = true,
+  } = input;
+
+  const ratioMap = {
+    '50:50': [0.5, 0.5], '60:40': [0.6, 0.4], '70:30': [0.7, 0.3],
+    '80:20': [0.8, 0.2], '90:10': [0.9, 0.1],
+  };
+
+  const total = [];
+  for (const label of ratios) {
+    const r = ratioMap[label];
+    if (!r) continue;
+
+    const n = selectedLocations.length;
+    const n1 = Math.ceil(n * r[0]);
+    const seen = new Set();
+
+    for (const comb of combinations(selectedLocations, n1)) {
+      const loc_k1 = comb.slice().sort();
+      const loc_k2 = selectedLocations.filter(l => !loc_k1.includes(l)).sort();
+      const key = JSON.stringify([loc_k1, loc_k2]);
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const demand_k1 = Object.fromEntries(loc_k1.map(k => [k, demandBBTUD[k]]));
+      const demand_k2 = Object.fromEntries(loc_k2.map(k => [k, demandBBTUD[k]]));
+
+      const df1 = await runSupplyChainModel({
+        vessels, routes, oru, terminal,
+        selectedLocations: loc_k1, demandBBTUD: demand_k1,
+        params, inflationFactor, shareTerminalORU,
+      });
+      const df2 = await runSupplyChainModel({
+        vessels, routes, oru, terminal,
+        selectedLocations: loc_k2, demandBBTUD: demand_k2,
+        params, inflationFactor, shareTerminalORU,
+      });
+
+      if (!df1.length || !df2.length) continue;
+
+      for (const k1 of df1) {
+        for (const k2 of df2) {
+          // filter options
+          if (Array.isArray(vesselNames) && vesselNames.length === 2) {
+            if (k1['Nama Kapal'] !== vesselNames[0] || k2['Nama Kapal'] !== vesselNames[1]) continue;
+          } else if (enforceSameVessel) {
+            if (k1['Nama Kapal'] !== k2['Nama Kapal'] || k1['Kapasitas Kapal (m3)'] !== k2['Kapasitas Kapal (m3)']) continue;
+          }
+          total.push({
+            'Probability': label,
+            'split_id': total.length,
+            'Nama Kapal': k1['Nama Kapal'],
+            'Kapasitas Kapal (m3)': k1['Kapasitas Kapal (m3)'],
+
+            'Rute Kapal 1': k1['Rute'],
+            'CAPEX Kapal 1': k1['Total CAPEX (USD)'],
+            'OPEX Kapal 1': k1['Total OPEX (USD/year)'],
+            'Cost Kapal 1': k1['Total Cost USD/MMBTU'],
+
+            'Rute Kapal 2': k2['Rute'],
+            'CAPEX Kapal 2': k2['Total CAPEX (USD)'],
+            'OPEX Kapal 2': k2['Total OPEX (USD/year)'],
+            'Cost Kapal 2': k2['Total Cost USD/MMBTU'],
+
+            'Total CAPEX (USD)': k1['Total CAPEX (USD)'] + k2['Total CAPEX (USD)'],
+            'Total OPEX (USD/year)': k1['Total OPEX (USD/year)'] + k2['Total OPEX (USD/year)'],
+            'Total Cost USD/MMBTU': k1['Total Cost USD/MMBTU'] + k2['Total Cost USD/MMBTU'],
+
+            'Lokasi Kapal 1': loc_k1.join(', '),
+            'Lokasi Kapal 2': loc_k2.join(', '),
+          });
+        }
+      }
+    }
+  }
+
+  total.sort((a, b) => a['Total Cost USD/MMBTU'] - b['Total Cost USD/MMBTU']);
+
+  const kapal_1 = total.map(t => ({
+    'Probability': t['Probability'],
+    'split_id': t['split_id'],
+    'Nama Kapal': t['Nama Kapal'],
+    'Kapasitas Kapal (m3)': t['Kapasitas Kapal (m3)'],
+    'Rute': t['Rute Kapal 1'],
+    'Total CAPEX (USD)': t['CAPEX Kapal 1'],
+    'Total OPEX (USD/year)': t['OPEX Kapal 1'],
+    'Total Cost USD/MMBTU': t['Cost Kapal 1'],
+    'Lokasi Kapal 1': t['Lokasi Kapal 1'],
+  }));
+
+  const kapal_2 = total.map(t => ({
+    'Probability': t['Probability'],
+    'split_id': t['split_id'],
+    'Nama Kapal': t['Nama Kapal'],
+    'Kapasitas Kapal (m3)': t['Kapasitas Kapal (m3)'],
+    'Rute': t['Rute Kapal 2'],
+    'Total CAPEX (USD)': t['CAPEX Kapal 2'],
+    'Total OPEX (USD/year)': t['OPEX Kapal 2'],
+    'Total Cost USD/MMBTU': t['Cost Kapal 2'],
+    'Lokasi Kapal 2': t['Lokasi Kapal 2'],
+  }));
+
+  return { kapal_1, kapal_2, total };
+}
+
+module.exports = { runSupplyChainModel, runTwoVesselProbabilityModel };

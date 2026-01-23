@@ -120,6 +120,10 @@ app.use('/api/supplychain', supplychainRoutes); // NEW: Supply Chain LNG engine
 app.use((err, req, res, next) => {
   if (err) {
     const isParse = err.type === 'entity.parse.failed';
+    // NEW: hint when JSON likely contains comments
+    const hasComment = req.rawBody && (/\/\*[\s\S]*?\*\//.test(req.rawBody) || /(^|[^:])\/\/.*/m.test(req.rawBody));
+    const hint = isParse && hasComment ? 'Hint: remove comments (// or /* */) from JSON and retry.' : undefined;
+
     if (process.env.DEBUG_REQUEST === 'true') {
       console.error('[ERROR]', {
         path: req.path,
@@ -132,7 +136,11 @@ app.use((err, req, res, next) => {
     }
     return res
       .status(isParse ? 400 : (err.status || 500))
-      .json({ error: isParse ? 'Invalid JSON payload' : 'Request error', detail: err.message });
+      .json({
+        error: isParse ? 'Invalid JSON payload' : 'Request error',
+        detail: err.message,
+        ...(hint ? { hint } : {}),
+      });
   }
   next(err);
 });

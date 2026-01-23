@@ -21,14 +21,32 @@ function validateSupplyChainInput(req, res, next) {
     return res.status(400).json({ error: 'demand object is required' });
   }
   // canonical body for hashing
+  const twinCanonical = b.twin ? {
+    ratios: Array.isArray(b.twin.ratios) ? [...b.twin.ratios].sort() : undefined,
+    enforceSameVessel: !!b.twin.enforceSameVessel,
+    vesselNames: Array.isArray(b.twin.vesselNames) ? b.twin.vesselNames : undefined,
+    shareTerminalORU: !!b.twin.shareTerminalORU,
+  } : undefined;
+
   const canonical = stableStringify({
     terminal: b.terminal,
     locations: [...b.locations].sort(),
     params: b.params,
     demand: Object.keys(b.demand).sort().reduce((acc, k) => { acc[k] = b.demand[k]; return acc; }, {}),
     base_year: b.base_year ?? 2022,
+    twin: twinCanonical,
   });
   req.runKey = crypto.createHash('sha256').update(canonical).digest('hex');
+
+  // attach normalized twin for controllers/services
+  if (b.twin) {
+    req.body.twin = {
+      ratios: Array.isArray(b.twin.ratios) ? b.twin.ratios : undefined,
+      enforceSameVessel: !!b.twin.enforceSameVessel,
+      vesselNames: Array.isArray(b.twin.vesselNames) ? b.twin.vesselNames : undefined,
+      shareTerminalORU: !!b.twin.shareTerminalORU,
+    };
+  }
   next();
 }
 

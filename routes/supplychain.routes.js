@@ -8,8 +8,8 @@ const prisma = require('../config/db');
 // Create/Update scenario → return runKey
 router.post('/scenario', validateSupplyChainInput, scenCtrl.upsertScenario);
 
-// Run engine (with caching)
-router.post('/run', validateSupplyChainInput, runCtrl.run);
+// Unified run: single or twin based on body.twin
+router.post('/run', validateSupplyChainInput, runCtrl.runUnified);
 
 // Get cached run by key
 router.get('/run/:runKey', runCtrl.getByKey);
