@@ -28,17 +28,24 @@ function validateSupplyChainInput(req, res, next) {
     shareTerminalORU: !!b.twin.shareTerminalORU,
   } : undefined;
 
+  // include risk in canonical (optional)
   const canonical = stableStringify({
     terminal: b.terminal,
     locations: [...b.locations].sort(),
     params: b.params,
     demand: Object.keys(b.demand).sort().reduce((acc, k) => { acc[k] = b.demand[k]; return acc; }, {}),
     base_year: b.base_year ?? 2022,
-    twin: twinCanonical,
+    twin: b.twin ? {
+      ratios: Array.isArray(b.twin.ratios) ? [...b.twin.ratios].sort() : undefined,
+      enforceSameVessel: !!b.twin.enforceSameVessel,
+      vesselNames: Array.isArray(b.twin.vesselNames) ? b.twin.vesselNames : undefined,
+      shareTerminalORU: !!b.twin.shareTerminalORU,
+    } : undefined,
+    risk: b.risk || undefined,
   });
   req.runKey = crypto.createHash('sha256').update(canonical).digest('hex');
 
-  // attach normalized twin for controllers/services
+  // attach normalized twin and risk
   if (b.twin) {
     req.body.twin = {
       ratios: Array.isArray(b.twin.ratios) ? b.twin.ratios : undefined,
@@ -46,6 +53,10 @@ function validateSupplyChainInput(req, res, next) {
       vesselNames: Array.isArray(b.twin.vesselNames) ? b.twin.vesselNames : undefined,
       shareTerminalORU: !!b.twin.shareTerminalORU,
     };
+  }
+  if (b.risk && typeof b.risk === 'object') {
+    // expected shape: { selections: { "II.1": ["R1","R2"], "II.2": ["R22"], ... } }
+    req.body.risk = b.risk;
   }
   next();
 }

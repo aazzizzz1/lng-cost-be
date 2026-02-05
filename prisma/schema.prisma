@@ -248,3 +248,11 @@ model Location {
 
   @@index([type])
 }
+
+model RiskMatrix {
+  id        Int      @id @default(autoincrement())
+  riskCode  String   @unique
+  variable  String
+  values    Json     // key: "II.1 P1_BOP", "II.2 P2_Durasi", ...
+  createdAt DateTime @default(now())
+}

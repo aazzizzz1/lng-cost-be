@@ -58,4 +58,25 @@ router.get('/places', async (req, res) => {
   res.json(merged);
 });
 
+// NEW: RiskMatrix list (for dynamic frontend)
+router.get('/risk-matrix', async (req, res) => {
+  try {
+    const rows = await prisma.riskMatrix.findMany({ orderBy: { riskCode: 'asc' } });
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: 'RiskMatrix fetch error', detail: e.message });
+  }
+});
+
+// NEW: RiskMatrix by code
+router.get('/risk-matrix/:riskCode', async (req, res) => {
+  try {
+    const row = await prisma.riskMatrix.findUnique({ where: { riskCode: req.params.riskCode } });
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json(row);
+  } catch (e) {
+    res.status(500).json({ error: 'RiskMatrix fetch error', detail: e.message });
+  }
+});
+
 module.exports = router;
