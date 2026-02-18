@@ -5,6 +5,10 @@ const {
   buildRiskDB,
   runSupplyChainModelRisk,
   runTwoVesselProbabilityModelRisk, // NEW
+  runHubSpokeSingleModel,          // NEW
+  runHubSpokeSingleModelRisk,      // NEW
+  runHubSpokeTwoVesselModel,       // NEW
+  runHubSpokeTwoVesselModelRisk,   // NEW
 } = require('../services/supplychainEngine');
 
 async function run(req, res) {
@@ -138,15 +142,25 @@ async function runUnified(req, res) {
   try {
     const runKey = req.runKey;
     const { terminal, locations, params, demand, twin, risk } = req.body;
+    const method = req.body.method || 'milk-run'; // 'milk-run' | 'hub-spoke'
 
     // cache
     const cached = await prisma.supplyChainRun.findUnique({ where: { runKey } });
     if (cached) {
       await prisma.supplyChainRun.update({ where: { runKey }, data: { reuseCount: cached.reuseCount + 1 } });
+      const cachedMethod = cached.params?.method || method || 'milk-run';
       const mode = cached.results?.kapal_1
         ? ((twin && risk && risk.selections) ? 'twin-risk' : 'twin')
         : (risk && risk.selections ? 'single-risk' : 'single');
-      return res.json({ runKey, cached: true, twin: !!cached.results?.kapal_1, mode, results: cached.results, topResult: cached.topResult });
+      return res.json({
+        runKey,
+        cached: true,
+        method: cachedMethod,
+        twin: !!cached.results?.kapal_1,
+        mode,
+        results: cached.results,
+        topResult: cached.topResult,
+      });
     }
 
     const [vessels, routes, oru] = await Promise.all([
@@ -157,6 +171,163 @@ async function runUnified(req, res) {
 
     const baseYear = req.body.base_year ?? 2022;
     const inflationFactor = Math.pow(1 + params.inflation_rate, params.analysis_year - baseYear);
+    const paramsWithMethod = { ...params, method }; // simpan method di params JSON
+
+    // ==========================
+    // METHOD: HUB & SPOKE
+    // ==========================
+    if (method === 'hub-spoke') {
+      // Twin RISK (2 kapal, dengan risiko)
+      if (twin && risk && risk.selections) {
+        const riskRows = await prisma.riskMatrix.findMany();
+        const riskDB = buildRiskDB(risk, riskRows);
+
+        const twinCfg = {
+          ratios: (twin && Array.isArray(twin.ratios)) ? twin.ratios : ['50:50','60:40','70:30','80:20','90:10'],
+          enforceSameVessel: twin ? !!twin.enforceSameVessel : true,
+          vesselNames: twin && Array.isArray(twin.vesselNames) ? twin.vesselNames : undefined,
+        };
+
+        const { kapal_1, kapal_2, total } = await runHubSpokeTwoVesselModelRisk({
+          vessels, routes, oru, terminal,
+          selectedLocations: locations, demandBBTUD: demand,
+          params, inflationFactor, riskDB,
+          ...twinCfg,
+        });
+        const topResult = total[0] || null;
+
+        await prisma.supplyChainRun.create({
+          data: {
+            runKey,
+            terminal,
+            locations,
+            params: paramsWithMethod,
+            demand,
+            results: { kapal_1, kapal_2, total },
+            topResult,
+          },
+        });
+
+        return res.json({
+          runKey,
+          cached: false,
+          method,
+          twin: true,
+          mode: 'twin-risk',
+          results: { kapal_1, kapal_2, total },
+          topResult,
+        });
+      }
+
+      // Twin NO-RISK (2 kapal, tanpa risiko)
+      if (twin) {
+        const twinCfg = {
+          ratios: (twin && Array.isArray(twin.ratios)) ? twin.ratios : ['50:50','60:40','70:30','80:20','90:10'],
+          enforceSameVessel: twin ? !!twin.enforceSameVessel : true,
+          vesselNames: twin && Array.isArray(twin.vesselNames) ? twin.vesselNames : undefined,
+          shareTerminalORU: twin ? !!twin.shareTerminalORU : true,
+        };
+
+        const { kapal_1, kapal_2, total } = await runHubSpokeTwoVesselModel({
+          vessels, routes, oru, terminal,
+          selectedLocations: locations, demandBBTUD: demand,
+          params, inflationFactor,
+          ...twinCfg,
+        });
+        const topResult = total[0] || null;
+
+        await prisma.supplyChainRun.create({
+          data: {
+            runKey,
+            terminal,
+            locations,
+            params: paramsWithMethod,
+            demand,
+            results: { kapal_1, kapal_2, total },
+            topResult,
+          },
+        });
+
+        return res.json({
+          runKey,
+          cached: false,
+          method,
+          twin: true,
+          mode: 'twin',
+          results: { kapal_1, kapal_2, total },
+          topResult,
+        });
+      }
+
+      // Single-vessel RISK (1 kapal, dengan risiko)
+      if (risk && risk.selections) {
+        const riskRows = await prisma.riskMatrix.findMany();
+        const riskDB = buildRiskDB(risk, riskRows);
+
+        const results = await runHubSpokeSingleModelRisk({
+          vessels, routes, oru, terminal,
+          selectedLocations: locations, demandBBTUD: demand,
+          params, inflationFactor, riskDB,
+        });
+        const topResult = results[0] || null;
+
+        await prisma.supplyChainRun.create({
+          data: {
+            runKey,
+            terminal,
+            locations,
+            params: paramsWithMethod,
+            demand,
+            results,
+            topResult,
+          },
+        });
+
+        return res.json({
+          runKey,
+          cached: false,
+          method,
+          twin: false,
+          mode: 'single-risk',
+          results,
+          topResult,
+        });
+      }
+
+      // Single-vessel NO-RISK (1 kapal, tanpa risiko)
+      const resultsHS = await runHubSpokeSingleModel({
+        vessels, routes, oru, terminal,
+        selectedLocations: locations, demandBBTUD: demand,
+        params, inflationFactor,
+      });
+      const topResultHS = resultsHS[0] || null;
+
+      await prisma.supplyChainRun.create({
+        data: {
+          runKey,
+          terminal,
+          locations,
+          params: paramsWithMethod,
+          demand,
+          results: resultsHS,
+          topResult: topResultHS,
+        },
+      });
+
+      return res.json({
+        runKey,
+        cached: false,
+        method,
+        twin: false,
+        mode: 'single',
+        results: resultsHS,
+        topResult: topResultHS,
+      });
+    }
+
+    // ==========================
+    // METHOD: MILK-RUN (DEFAULT)
+    // ==========================
 
     // Twin RISK mode (NEW)
     if (twin && risk && risk.selections) {
@@ -178,9 +349,17 @@ async function runUnified(req, res) {
       const topResult = total[0] || null;
 
       await prisma.supplyChainRun.create({
-        data: { runKey, terminal, locations, params, demand, results: { kapal_1, kapal_2, total }, topResult },
+        data: {
+          runKey,
+          terminal,
+          locations,
+          params: paramsWithMethod,
+          demand,
+          results: { kapal_1, kapal_2, total },
+          topResult,
+        },
       });
-      return res.json({ runKey, cached: false, twin: true, mode: 'twin-risk', results: { kapal_1, kapal_2, total }, topResult });
+      return res.json({ runKey, cached: false, method, twin: true, mode: 'twin-risk', results: { kapal_1, kapal_2, total }, topResult });
     }
 
     // Twin NO-RISK mode
@@ -192,11 +371,24 @@ async function runUnified(req, res) {
         shareTerminalORU: twin ? !!twin.shareTerminalORU : true,
       };
       const { kapal_1, kapal_2, total } = await runTwoVesselProbabilityModel({
-        vessels, routes, oru, terminal, selectedLocations: locations, demandBBTUD: demand, params, inflationFactor, ...twinCfg,
+        vessels, routes, oru, terminal,
+        selectedLocations: locations, demandBBTUD: demand,
+        params, inflationFactor,
+        ...twinCfg,
       });
       const topResult = total[0] || null;
-      await prisma.supplyChainRun.create({ data: { runKey, terminal, locations, params, demand, results: { kapal_1, kapal_2, total }, topResult } });
-      return res.json({ runKey, cached: false, twin: true, mode: 'twin', results: { kapal_1, kapal_2, total }, topResult });
+      await prisma.supplyChainRun.create({
+        data: {
+          runKey,
+          terminal,
+          locations,
+          params: paramsWithMethod,
+          demand,
+          results: { kapal_1, kapal_2, total },
+          topResult,
+        },
+      });
+      return res.json({ runKey, cached: false, method, twin: true, mode: 'twin', results: { kapal_1, kapal_2, total }, topResult });
     }
 
     // Single-vessel RISK mode
@@ -211,8 +403,18 @@ async function runUnified(req, res) {
       });
       const topResult = results[0] || null;
 
-      await prisma.supplyChainRun.create({ data: { runKey, terminal, locations, params, demand, results, topResult } });
-      return res.json({ runKey, cached: false, twin: false, mode: 'single-risk', results, topResult });
+      await prisma.supplyChainRun.create({
+        data: {
+          runKey,
+          terminal,
+          locations,
+          params: paramsWithMethod,
+          demand,
+          results,
+          topResult,
+        },
+      });
+      return res.json({ runKey, cached: false, method, twin: false, mode: 'single-risk', results, topResult });
     }
 
     // Single-vessel NO-RISK mode
@@ -223,8 +425,18 @@ async function runUnified(req, res) {
     });
     const topResult = results[0] || null;
 
-    await prisma.supplyChainRun.create({ data: { runKey, terminal, locations, params, demand, results, topResult } });
-    return res.json({ runKey, cached: false, twin: false, mode: 'single', results, topResult });
+    await prisma.supplyChainRun.create({
+      data: {
+        runKey,
+        terminal,
+        locations,
+        params: paramsWithMethod,
+        demand,
+        results,
+        topResult,
+      },
+    });
+    return res.json({ runKey, cached: false, method, twin: false, mode: 'single', results, topResult });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: 'Engine run error', detail: e.message });

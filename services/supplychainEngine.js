@@ -630,10 +630,54 @@ async function runTwoVesselProbabilityModelRisk(input) {
   return { kapal_1, kapal_2, total };
 }
 
+// NEW: Hub & Spoke engines (sementara proxy ke Milk & Run)
+// --------------------------------------------------------
+
+/**
+ * Hub & Spoke, 1 kapal, NO-RISK
+ * Untuk sementara: gunakan engine single-vessel Milk & Run yang sama.
+ */
+async function runHubSpokeSingleModel(input) {
+  // TODO: ganti dengan implementasi Hub & Spoke 1 kapal NO-RISK (mother + feeder)
+  return runSupplyChainModel(input);
+}
+
+/**
+ * Hub & Spoke, 1 kapal, RISK
+ * Untuk sementara: gunakan engine single-vessel Milk & Run (risk) yang sama.
+ */
+async function runHubSpokeSingleModelRisk(input) {
+  // TODO: ganti dengan implementasi Hub & Spoke 1 kapal RISK (pakai riskDB)
+  return runSupplyChainModelRisk(input);
+}
+
+/**
+ * Hub & Spoke, 2 kapal, NO-RISK
+ * Untuk sementara: gunakan twin-vessel Milk & Run yang sama.
+ */
+async function runHubSpokeTwoVesselModel(input) {
+  // TODO: ganti dengan implementasi Hub & Spoke 2 kapal NO-RISK (mother + feeder)
+  return runTwoVesselProbabilityModel(input);
+}
+
+/**
+ * Hub & Spoke, 2 kapal, RISK
+ * Untuk sementara: gunakan twin-vessel Milk & Run (risk) yang sama.
+ */
+async function runHubSpokeTwoVesselModelRisk(input) {
+  // TODO: ganti dengan implementasi Hub & Spoke 2 kapal RISK (pakai riskDB)
+  return runTwoVesselProbabilityModelRisk(input);
+}
+
 module.exports = {
   runSupplyChainModel,
   runTwoVesselProbabilityModel,
   buildRiskDB,
   runSupplyChainModelRisk,
   runTwoVesselProbabilityModelRisk,
+  // NEW:
+  runHubSpokeSingleModel,
+  runHubSpokeSingleModelRisk,
+  runHubSpokeTwoVesselModel,
+  runHubSpokeTwoVesselModelRisk,
 };

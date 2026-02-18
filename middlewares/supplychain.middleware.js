@@ -20,21 +20,28 @@ function validateSupplyChainInput(req, res, next) {
   if (!b.demand || typeof b.demand !== 'object') {
     return res.status(400).json({ error: 'demand object is required' });
   }
-  // canonical body for hashing
-  const twinCanonical = b.twin ? {
-    ratios: Array.isArray(b.twin.ratios) ? [...b.twin.ratios].sort() : undefined,
-    enforceSameVessel: !!b.twin.enforceSameVessel,
-    vesselNames: Array.isArray(b.twin.vesselNames) ? b.twin.vesselNames : undefined,
-    shareTerminalORU: !!b.twin.shareTerminalORU,
-  } : undefined;
 
-  // include risk in canonical (optional)
+  // NEW: normalize locations (unique, and must NOT include terminal)
+  const rawLocations = Array.isArray(b.locations) ? b.locations : [];
+  const normLocations = [...new Set(rawLocations)].filter((name) => !!name && name !== b.terminal);
+  if (normLocations.length < 1) {
+    return res.status(400).json({ error: 'locations[] must contain at least one destination different from terminal' });
+  }
+
+  // NEW: normalize method (milk-run | hub-spoke)
+  const rawMethod = typeof b.method === 'string' ? b.method.toLowerCase() : 'milk-run';
+  if (rawMethod !== 'milk-run' && rawMethod !== 'hub-spoke') {
+    return res.status(400).json({ error: 'method must be "milk-run" or "hub-spoke"' });
+  }
+
+  // canonical body for hashing
   const canonical = stableStringify({
     terminal: b.terminal,
-    locations: [...b.locations].sort(),
+    locations: [...normLocations].sort(),
     params: b.params,
     demand: Object.keys(b.demand).sort().reduce((acc, k) => { acc[k] = b.demand[k]; return acc; }, {}),
     base_year: b.base_year ?? 2022,
+    method: rawMethod,
     twin: b.twin ? {
       ratios: Array.isArray(b.twin.ratios) ? [...b.twin.ratios].sort() : undefined,
       enforceSameVessel: !!b.twin.enforceSameVessel,
@@ -45,7 +52,10 @@ function validateSupplyChainInput(req, res, next) {
   });
   req.runKey = crypto.createHash('sha256').update(canonical).digest('hex');
 
-  // attach normalized twin and risk
+  // attach normalized method, locations, twin and risk
+  req.body.method = rawMethod;
+  req.body.locations = normLocations;
+
   if (b.twin) {
     req.body.twin = {
       ratios: Array.isArray(b.twin.ratios) ? b.twin.ratios : undefined,
