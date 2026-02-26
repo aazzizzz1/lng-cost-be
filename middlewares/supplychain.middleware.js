@@ -34,6 +34,25 @@ function validateSupplyChainInput(req, res, next) {
     return res.status(400).json({ error: 'method must be "milk-run" or "hub-spoke"' });
   }
 
+  // NEW: optional GEO map (nama -> { latitude, longitude }) untuk custom titik Leaflet
+  let geo = undefined;
+  if (b.geo && typeof b.geo === 'object') {
+    geo = {};
+    for (const [name, val] of Object.entries(b.geo)) {
+      if (
+        val &&
+        typeof val.latitude === 'number' &&
+        typeof val.longitude === 'number'
+      ) {
+        geo[name] = {
+          latitude: val.latitude,
+          longitude: val.longitude,
+        };
+      }
+    }
+    if (Object.keys(geo).length === 0) geo = undefined;
+  }
+
   // canonical body for hashing
   const canonical = stableStringify({
     terminal: b.terminal,
@@ -49,6 +68,8 @@ function validateSupplyChainInput(req, res, next) {
       shareTerminalORU: !!b.twin.shareTerminalORU,
     } : undefined,
     risk: b.risk || undefined,
+    // NEW: ikut mempengaruhi runKey bila pakai koordinat custom
+    geo,
   });
   req.runKey = crypto.createHash('sha256').update(canonical).digest('hex');
 
@@ -68,6 +89,11 @@ function validateSupplyChainInput(req, res, next) {
     // expected shape: { selections: { "II.1": ["R1","R2"], "II.2": ["R22"], ... } }
     req.body.risk = b.risk;
   }
+  if (geo) {
+    // NEW: simpan geo normal ke body, dipakai engine untuk hitung jarak dinamis
+    req.body.geo = geo;
+  }
+
   next();
 }
 
