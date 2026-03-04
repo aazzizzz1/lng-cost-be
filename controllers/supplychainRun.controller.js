@@ -140,14 +140,14 @@ async function runTwin(req, res) {
 
 // NEW: normalisasi hasil menjadi tabel-tabel untuk response
 function normalizeResultsForResponse({ method, twin, results }) {
+  const addScenarioIndex = (rows) =>
+    (Array.isArray(rows) ? rows : []).map((r, i) =>
+      Object.prototype.hasOwnProperty.call(r, 'No. Skenario')
+        ? r
+        : { 'No. Skenario': i + 1, ...r }
+    );
+
   // === CASE 1: Hub & Spoke 3-kapal (Mother + Feeder 1 + Feeder 2 + System) ===
-  // Bentuk yang diharapkan dari engine:
-  // {
-  //   mother:   [ { Skenario Hub, Nama Kapal, Rute, Kapasitas Kapal, Nominal Capacity, Demand LNG/day, RTD, days_stock, voyages_year, Utilitasi_Factor_LNGC, Batas_Maksimum_Utilisasi_LNGC, selected_storage Total, fuel_voyage, fuel_ballast, fuel_berth, lng_fuel_cost, port_cost, rent_cost, Total CAPEX (USD), Total CAPEX USD/MMBTU, Total OPEX (USD/year), Total OPEX (USD/MMBTU), Total Cost (USD/MMBTU), ... }, ... ],
-  //   feeder1:  [ { ...kolom sama + Spokes }, ... ],
-  //   feeder2:  [ { ...kolom sama + Spokes }, ... ],
-  //   system:   [ { Skenario Hub, Probability, M_Nama Kapal 1 (Mother), F1_Nama Kapal 2 (Feeder 1), F2_Nama Kapal 3 (Feeder 2), Total CAPEX (USD), Total OPEX (USD/year), Total Cost (USD/MMBTU), ... }, ... ]
-  // }
   if (
     twin &&
     method === 'hub-spoke' &&
@@ -157,14 +157,35 @@ function normalizeResultsForResponse({ method, twin, results }) {
     Array.isArray(results.feeder2) &&
     Array.isArray(results.system)
   ) {
-    const mother = results.mother.map((r, i) => ({ 'No. Skenario': i + 1, ...r }));
-    const feeder1 = results.feeder1.map((r, i) => ({ 'No. Skenario': i + 1, ...r }));
-    const feeder2 = results.feeder2.map((r, i) => ({ 'No. Skenario': i + 1, ...r }));
-    const system = results.system.map((r, i) => ({ 'No. Skenario': i + 1, ...r }));
-    return { tables: { mother, feeder1, feeder2, system } };
+    return {
+      tables: {
+        mother: addScenarioIndex(results.mother),
+        feeder1: addScenarioIndex(results.feeder1),
+        feeder2: addScenarioIndex(results.feeder2),
+        system: addScenarioIndex(results.system),
+      },
+    };
   }
 
-  // === CASE 2: Twin mode generic (bentuk lama { kapal_1, kapal_2, total }) ===
+  // === CASE 2: Hub & Spoke 1-kapal (Mother + Feeder 1 + System) - NO TWIN ===
+  if (
+    !twin &&
+    method === 'hub-spoke' &&
+    results &&
+    Array.isArray(results.mother) &&
+    Array.isArray(results.feeder1) &&
+    Array.isArray(results.system)
+  ) {
+    return {
+      tables: {
+        mother: addScenarioIndex(results.mother),
+        feeder1: addScenarioIndex(results.feeder1),
+        system: addScenarioIndex(results.system),
+      },
+    };
+  }
+
+  // === CASE 3: Twin mode generic (bentuk lama { kapal_1, kapal_2, total }) ===
   if (
     twin &&
     results &&
@@ -172,41 +193,42 @@ function normalizeResultsForResponse({ method, twin, results }) {
     Array.isArray(results.kapal_2) &&
     Array.isArray(results.total)
   ) {
-    const k1 = results.kapal_1.map((r, i) => ({ 'No. Skenario': i + 1, ...r }));
-    const k2 = results.kapal_2.map((r, i) => ({ 'No. Skenario': i + 1, ...r }));
-    const sys = results.total.map((r, i) => ({ 'No. Skenario': i + 1, ...r }));
+    const k1 = addScenarioIndex(results.kapal_1);
+    const k2 = addScenarioIndex(results.kapal_2);
+    const sys = addScenarioIndex(results.total);
 
     if (method === 'hub-spoke') {
-      // Untuk Hub & Spoke 2-kapal (Mother + Feeder + System)
       return { tables: { mother: k1, feeder: k2, system: sys } };
     }
-    // Milk & Run 2 kapal
     return { tables: { kapal_1: k1, kapal_2: k2, system: sys } };
   }
 
-  // === CASE 3: Single-vessel (array of rows penuh) ===
+  // === CASE 4: Single-vessel (array of rows penuh) ===
   const rows = Array.isArray(results) ? results : [];
-  const indexed = rows.map((r, i) => ({ 'No. Skenario': i + 1, ...r }));
+  const indexed = addScenarioIndex(rows);
 
   if (method === 'hub-spoke') {
-    // 1 Kapal Hub & Spoke → 1 tabel lengkap
     return { tables: { hubSpoke: indexed } };
   }
-  // 1 Kapal Milk & Run → 1 tabel lengkap
   return { tables: { milkRun: indexed } };
 }
 
 /**
  * Unified Supply Chain Runner (API /api/supplychain/run)
  * ======================================================
- * Cara pakai via Postman:
+ * Body (ringkasan):
  *
- * POST http://localhost:5000/api/supplychain/run
- * Body (JSON):
  * {
- *   "terminal": "Badak NGL Bontang",
- *   "method": "milk-run",          // atau "hub-spoke"
- *   "locations": ["MPP Jeranjang (Lombok Peaker)", "PLTMG Alor", "PLTMG Bima", "PLTMG Kupang"],
+ *   // Terminal bisa 1 atau lebih dari 1
+ *   "terminal": "Badak NGL Bontang" | ["Badak NGL Bontang","Terminal X"],   // string ATAU array
+ *
+ *   // Arsitektur perhitungan
+ *   "method": "milk-run" | "hub-spoke",
+ *
+ *   // Daftar lokasi demand (plant)
+ *   "locations": ["MPP Jeranjang (Lombok Peaker)", "PLTMG Alor", ...],
+ *
+ *   // Parameter teknis & ekonomi (disamakan dengan notebook / Colab)
  *   "params": {
  *     "harga_bbm": 543,
  *     "harga_lng": 350,
@@ -218,63 +240,89 @@ function normalizeResultsForResponse({ method, twin, results }) {
  *     "bog_pct": 0.0015,
  *     "filling_pct": 0.98,
  *     "gross_storage_pct": 1.1,
- *     "analysis_year": 2022,
+ *     "analysis_year": 2024,
  *     "inflation_rate": 0.05,
- *     "Penyaluran": 20           // opsional; di JS diasumsikan 20 tahun untuk CAPEX
+ *     "Penyaluran": 20,
+ *     // OPTIONAL: setting tambahan untuk CAPEX storage
+ *     "harga_tangki_500m3": 1030000,
+ *     "ukuran_tangki_500m3": 500
  *   },
- *   "demand": {
- *     "MPP Jeranjang (Lombok Peaker)": 1.2,
- *     "PLTMG Alor": 2.3,
- *     "PLTMG Bima": 3.3,
- *     "PLTMG Kupang": 4.4
- *   },
+ *
+ *   // Demand gas (BBTUD) per lokasi
+ *   "demand": { "MPP Jeranjang (Lombok Peaker)": 1.5, "PLTMG Alor": 2.0, ... },
+ *
+ *   // Tahun basis inflasi (sama dengan BASE_YEAR di Colab)
  *   "base_year": 2022,
  *
- *   // OPTIONAL: aktifkan 2 kapal (N=2) → Milk & Run / Hub & Spoke twin
+ *   // OPTIONAL: pilih kapal yang boleh dipakai engine (multi-select dari library Vessel)
+ *   // Jika tidak diisi → semua kapal di master Vessel akan dipakai sebagai kandidat.
+ *   "vessels": ["Shinju Maru","WSD59 3K","WSD59 5K"],
+ *
+ *   // OPTIONAL: konfigurasi multi-kapal (N ≥ 2) – konsepnya sama dengan "Twin Constraint" di Colab.
+ *   //   - Backend yang mengerjakan semua kombinasi pembagian lokasi (generate_partitions),
+ *   //     jadi TIDAK perlu dan TIDAK ada lagi input "ratio" dari frontend.
+ *   //   - Untuk saat ini implementasi penuh di backend masih fokus ke:
+ *   //       • Milk Run 1 kapal (NO-RISK / RISK)
+ *   //       • Milk Run 2 kapal (N=2, NO-RISK / RISK) → pakai engine twin-*VesselProbabilityModel*
+ *   //       • Hub & Spoke 2 kapal (Mother + 2 Feeder, RISK) → runHubSpokeTwoVesselModelRisk
+ *   //
+ *   // Field "twin" di sini dibaca sebagai opsi/constraint untuk kasus N > 1
+ *   // (misalnya N=2 sekarang, nanti bisa diperluas untuk N-kapal) – bukan berarti
+ *   // sistem cuma boleh 2 kapal saja.
  *   "twin": {
- *     "ratios": ["50:50","60:40","70:30","80:20","90:10"],
+ *     // Jika true → semua kapal pemecah rute wajib tipe yang sama (twin_constraint di Colab).
  *     "enforceSameVessel": true,
+ *
+ *     // Jika diisi → backend hanya membentuk kombinasi nama kapal sesuai daftar ini
+ *     // (misalnya ["Shinju Maru","WSD59 3K"]) dan mengabaikan kapal lain.
+ *     "vesselNames": ["Kapal1","Kapal2"],
+ *
+ *     // Jika true → CAPEX ORU di terminal dibagi antara kapal-kapal pemecah rute
+ *     // (untuk N=2 sekarang, artinya ORU terminal / 2).
  *     "shareTerminalORU": true
  *   },
  *
- *   // OPTIONAL: aktifkan modul risiko
+ *   // OPTIONAL: Risk (II.1–II.8, pilih kode R1..R32 – sama persis dengan wizard di Colab)
+ *   // Frontend cukup menampilkan 8 section (II.1 s/d II.8) dengan penjelasan teks,
+ *   // lalu user memilih beberapa kode risiko (R1..R32) per section.
  *   "risk": {
  *     "selections": {
- *       "II.2": ["R1","R2"],
- *       "II.3": ["R22"],
- *       "II.6": ["R7"],
- *       "II.7": ["R7"],
- *       "II.8": ["R7"]
+ *       "II.1": ["R7"],              // contoh: risiko untuk pemuatan LNG
+ *       "II.2": ["R1","R2"],         // aktivitas sandar & lepas sandar (loading)
+ *       "II.3": ["R22"],             // pengiriman LNG
+ *       "II.4": ["R7"],              // pembongkaran LNG
+ *       "II.5": ["R7"],              // aktivitas sandar & lepas sandar (unloading)
+ *       "II.6": ["R7"],              // penyimpanan LNG darat
+ *       "II.7": ["R7"],              // regasifikasi
+ *       "II.8": ["R7"]               // distribusi gas ke pelanggan
  *     }
  *   }
  * }
  *
- * Response:
- * {
- *   "runKey": "...",         // hash stabil berdasarkan input (middleware)
- *   "cached": false,
- *   "method": "milk-run" | "hub-spoke",
- *   "twin": false | true,
- *   "mode": "single" | "single-risk" | "twin" | "twin-risk",
- *   "input": { ...echo input... },
- *   "tables": {
- *     // Milk & Run 1 kapal: { "milkRun": [ { No. Skenario, Nama Kapal, Rute, ..., Total Cost USD/MMBTU }, ... ] }
- *     // Milk & Run 2 kapal: { kapal_1: [...], kapal_2: [...], system: [...] }
- *     // Hub & Spoke 1 kapal: { hubSpoke: [...] }
- *     // Hub & Spoke 2 kapal:
- *     //   - 2 kapal (Mother+Feeder): { mother: [...], feeder: [...], system: [...] }
- *     //   - 3 kapal (Mother+Feeder1+Feeder2): { mother: [...], feeder1: [...], feeder2: [...], system: [...] }
- *   },
- *   "topResult": { ...baris dengan cost terendah... }
- * }
+ * Catatan penting:
+ * - Backend sudah menghitung sendiri seluruh kombinasi pembagian lokasi ke beberapa kapal
+ *   (menggunakan generatePartitions di sisi JS, mirip fungsi run_simulation di Colab),
+ *   sehingga TIDAK ada lagi input "rasio" (% atau 50:50, 60:40, dst.) dari frontend.
+ * - Jumlah kapal pemecah rute (N) dikontrol oleh engine berdasarkan konfigurasi yang
+ *   disepakati (saat ini: 1 kapal & 2 kapal yang sudah siap pakai di backend JS).
+ * - Field "twin.enforceSameVessel" bersifat generik untuk N-kapal (bukan hanya 2 kapal),
+ *   sama seperti "Twin Constraint (y/n)" pada STEP 6 di Colab.
  */
 async function runUnified(req, res) {
   try {
     const runKey = req.runKey;
-    const { terminal, locations, params, demand, twin, risk } = req.body;
-    const method = req.body.method || 'milk-run'; // 'milk-run' | 'hub-spoke'
+    const { locations, params, demand, twin, risk } = req.body;
+    const method = req.body.method || 'milk-run';
     const baseYear = req.body.base_year ?? 2022;
-    const rawGeo = req.body.geo || undefined; // NEW: geo dari frontend (Leaflet)
+    const rawGeo = req.body.geo || undefined;
+    const primaryTerminal = req.body.terminal;
+    const terminals = Array.isArray(req.body.terminals) && req.body.terminals.length
+      ? req.body.terminals
+      : (primaryTerminal ? [primaryTerminal] : []);
+
+    if (!terminals.length) {
+      return res.status(400).json({ error: 'terminal (string atau array) wajib diisi' });
+    }
 
     // ======================
     // 1. Cek CACHE
@@ -289,7 +337,6 @@ async function runUnified(req, res) {
       const cachedMethod = cached.params?.method || method || 'milk-run';
       const cachedResults = cached.results;
 
-      // UPDATED: deteksi twin juga untuk hasil Hub & Spoke 3-kapal (mother+feeder1+feeder2+system)
       const hasTwinGeneric =
         !!cachedResults &&
         Array.isArray(cachedResults.kapal_1) &&
@@ -332,18 +379,35 @@ async function runUnified(req, res) {
     // ======================
     // 2. Load master data
     // ======================
-    const [vessels, routes, oru, locRows] = await Promise.all([
+    const [rawVessels, routes, oru, locRows, riskRows] = await Promise.all([
       prisma.vessel.findMany(),
       prisma.distanceRoute.findMany(),
       prisma.oruCapex.findMany(),
       prisma.location.findMany({
         where: {
-          name: { in: [terminal, ...(Array.isArray(locations) ? locations : [])] },
+          name: { in: [...terminals, ...(Array.isArray(locations) ? locations : [])] },
         },
       }),
+      prisma.riskMatrix.findMany(), // NEW: load risk matrix for buildRiskDB
     ]);
 
-    // NEW: bangun geoMap gabungan (DB Location + body.geo)
+    // Filter vessels jika ada req.body.vessels
+    let vessels = rawVessels;
+    const bodyVessels = Array.isArray(req.body.vessels)
+      ? req.body.vessels
+          .filter((n) => typeof n === 'string')
+          .map((n) => n.trim())
+          .filter(Boolean)
+      : [];
+    if (bodyVessels.length) {
+      const vset = new Set(bodyVessels);
+      vessels = rawVessels.filter((v) => vset.has(v.name));
+      if (!vessels.length) {
+        return res.status(400).json({ error: 'Daftar vessels[] tidak cocok dengan data master kapal' });
+      }
+    }
+
+    // build geoMap gabungan
     const dbGeo = {};
     for (const l of locRows) {
       if (typeof l.latitude === 'number' && typeof l.longitude === 'number') {
@@ -355,11 +419,13 @@ async function runUnified(req, res) {
     const inflationFactor = Math.pow(1 + params.inflation_rate, params.analysis_year - baseYear);
     const paramsWithMethod = { ...params, method };
 
+    // Helper: save and respond
     async function saveAndRespond({ resultsObj, topResult, twinFlag, mode }) {
+      const terminalLabel = terminals.length > 1 ? terminals.join(', ') : terminals[0];
       await prisma.supplyChainRun.create({
         data: {
           runKey,
-          terminal,
+          terminal: terminalLabel,
           locations,
           params: paramsWithMethod,
           demand,
@@ -380,260 +446,193 @@ async function runUnified(req, res) {
         twin: twinFlag,
         mode,
         input: {
-          terminal,
+          terminal: terminalLabel,
+          terminals,
           locations,
           params: paramsWithMethod,
           demand,
           base_year: baseYear,
-          geo: geoMap, // NEW: echo geo yang dipakai
+          geo: geoMap,
         },
         tables,
         topResult,
       });
     }
 
-    // ==========================
-    // 3. METHOD: HUB & SPOKE
-    // ==========================
+    // ======================
+    // 3. HUB & SPOKE
+    // ======================
     if (method === 'hub-spoke') {
-      // 3.a Twin + RISK
-      if (twin && risk && risk.selections) {
-        const riskRows = await prisma.riskMatrix.findMany();
-        const riskDB = buildRiskDB(risk, riskRows);
-
-        const twinCfg = {
-          ratios: twin && Array.isArray(twin.ratios)
-            ? twin.ratios
-            : ['50:50', '60:40', '70:30', '80:20', '90:10'],
-          enforceSameVessel: twin ? !!twin.enforceSameVessel : true,
-          vesselNames:
-            twin && Array.isArray(twin.vesselNames)
-              ? twin.vesselNames
-              : undefined,
-        };
-
-        const { mother, feeder1, feeder2, system } =
-          await runHubSpokeTwoVesselModelRisk({
-            vessels,
-            routes,
-            oru,
-            terminal,
-            selectedLocations: locations,
-            demandBBTUD: demand,
-            params,
-            inflationFactor,
-            riskDB,
-            geoMap, // NEW
-            ...twinCfg,
-          });
-
-        const topResult = system && system.length > 0 ? system[0] : null;
-        return saveAndRespond({
-          resultsObj: { mother, feeder1, feeder2, system },
-          topResult,
-          twinFlag: true,
-          mode: 'twin-risk',
-        });
+      if (terminals.length > 1) {
+        return res.status(400).json({ error: 'Multiple terminals belum didukung untuk metode hub-spoke' });
       }
+      const terminal = terminals[0];
 
-      // 3.b Twin NO-RISK
-      if (twin) {
+      // 3.a Hub-Spoke Twin + Risk
+      if (twin && risk && risk.selections) {
+        const riskDB = buildRiskDB(risk, riskRows);
         const twinCfg = {
-          ratios: (twin && Array.isArray(twin.ratios))
-            ? twin.ratios
-            : ['50:50', '60:40', '70:30', '80:20', '90:10'],
-          enforceSameVessel: twin ? !!twin.enforceSameVessel : true,
-          vesselNames: twin && Array.isArray(twin.vesselNames) ? twin.vesselNames : undefined,
-          shareTerminalORU: twin ? !!twin.shareTerminalORU : true,
+          enforceSameVessel: twin.enforceSameVessel !== false,
+          vesselNames: Array.isArray(twin.vesselNames) ? twin.vesselNames : undefined,
+          shareTerminalORU: twin.shareTerminalORU !== false,
         };
-
-        const { kapal_1, kapal_2, total } = await runHubSpokeTwoVesselModel({
-          vessels,
-          routes,
-          oru,
-          terminal,
+        const hubResult = await runHubSpokeTwoVesselModelRisk({
+          vessels, routes, oru, terminal,
           selectedLocations: locations,
           demandBBTUD: demand,
-          params,
-          inflationFactor,
-          geoMap, // NEW
+          params, inflationFactor, riskDB, geoMap,
           ...twinCfg,
         });
-        const topResult = total[0] || null;
-        return saveAndRespond({
-          resultsObj: { kapal_1, kapal_2, total },
-          topResult,
-          twinFlag: true,
-          mode: 'twin',
-        });
+        const topResult = hubResult.system?.[0] || null;
+        return saveAndRespond({ resultsObj: hubResult, topResult, twinFlag: true, mode: 'twin' });
       }
 
-      // 3.c Single + RISK
-      if (risk && risk.selections) {
-        const riskRows = await prisma.riskMatrix.findMany();
-        const riskDB = buildRiskDB(risk, riskRows);
-
-        const resultsHSRisk = await runHubSpokeSingleModelRisk({
-          vessels,
-          routes,
-          oru,
-          terminal,
+      // 3.b Hub-Spoke Twin NO-RISK
+      if (twin) {
+        const twinCfg = {
+          enforceSameVessel: twin.enforceSameVessel !== false,
+          vesselNames: Array.isArray(twin.vesselNames) ? twin.vesselNames : undefined,
+          shareTerminalORU: twin.shareTerminalORU !== false,
+        };
+        const hubResult = await runHubSpokeTwoVesselModel({
+          vessels, routes, oru, terminal,
           selectedLocations: locations,
           demandBBTUD: demand,
-          params,
-          inflationFactor,
-          riskDB,
-          geoMap, // NEW
+          params, inflationFactor, geoMap,
+          ...twinCfg,
         });
-        const topResultHSRisk = resultsHSRisk[0] || null;
-        return saveAndRespond({
-          resultsObj: resultsHSRisk,
-          topResult: topResultHSRisk,
-          twinFlag: false,
-          mode: 'single-risk',
-        });
+        const topResult = hubResult.total?.[0] || null;
+        return saveAndRespond({ resultsObj: hubResult, topResult, twinFlag: true, mode: 'twin' });
       }
 
-      // 3.d Single NO-RISK
-      const resultsHS = await runHubSpokeSingleModel({
-        vessels,
-        routes,
-        oru,
-        terminal,
+      // 3.c Hub-Spoke Single + Risk
+      if (risk && risk.selections) {
+        const riskDB = buildRiskDB(risk, riskRows);
+        const results = await runHubSpokeSingleModelRisk({
+          vessels, routes, oru, terminal,
+          selectedLocations: locations,
+          demandBBTUD: demand,
+          params, inflationFactor, riskDB, geoMap,
+        });
+        const topResult = results[0] || null;
+        return saveAndRespond({ resultsObj: results, topResult, twinFlag: false, mode: 'single' });
+      }
+
+      // 3.d Hub-Spoke Single NO-RISK
+      const results = await runHubSpokeSingleModel({
+        vessels, routes, oru, terminal,
         selectedLocations: locations,
         demandBBTUD: demand,
-        params,
-        inflationFactor,
-        geoMap, // NEW
+        params, inflationFactor, geoMap,
       });
-      const topResultHS = resultsHS[0] || null;
-      return saveAndRespond({
-        resultsObj: resultsHS,
-        topResult: topResultHS,
-        twinFlag: false,
-        mode: 'single',
-      });
+      const topResult = results[0] || null;
+      return saveAndRespond({ resultsObj: results, topResult, twinFlag: false, mode: 'single' });
     }
 
-    // ==========================
-    // 4. METHOD: MILK-RUN
-    // ==========================
+    // ======================
+    // 4. MILK-RUN
+    // ======================
 
-    // 4.a Twin + RISK
+    // 4.a Milk-Run Twin + Risk
     if (twin && risk && risk.selections) {
-      const riskRows = await prisma.riskMatrix.findMany();
+      if (terminals.length > 1) {
+        return res.status(400).json({ error: 'Multiple terminals belum didukung untuk mode twin/risk' });
+      }
+      const terminal = terminals[0];
       const riskDB = buildRiskDB(risk, riskRows);
-
       const twinCfg = {
-        ratios: twin && Array.isArray(twin.ratios)
-          ? twin.ratios
-          : ['50:50', '60:40', '70:30', '80:20', '90:10'],
-        enforceSameVessel: twin ? !!twin.enforceSameVessel : true,
-        vesselNames: twin && Array.isArray(twin.vesselNames) ? twin.vesselNames : undefined,
+        enforceSameVessel: twin.enforceSameVessel !== false,
+        vesselNames: Array.isArray(twin.vesselNames) ? twin.vesselNames : undefined,
+        shareTerminalORU: twin.shareTerminalORU !== false,
       };
-
       const { kapal_1, kapal_2, total } = await runTwoVesselProbabilityModelRisk({
-        vessels,
-        routes,
-        oru,
-        terminal,
+        vessels, routes, oru, terminal,
         selectedLocations: locations,
         demandBBTUD: demand,
-        params,
-        inflationFactor,
-        riskDB,
-        geoMap, // NEW
+        params, inflationFactor, riskDB, geoMap,
         ...twinCfg,
       });
       const topResult = total[0] || null;
-      return saveAndRespond({
-        resultsObj: { kapal_1, kapal_2, total },
-        topResult,
-        twinFlag: true,
-        mode: 'twin-risk',
-      });
+      return saveAndRespond({ resultsObj: { kapal_1, kapal_2, total }, topResult, twinFlag: true, mode: 'twin' });
     }
 
-    // 4.b Twin NO-RISK
+    // 4.b Milk-Run Twin NO-RISK
     if (twin) {
+      if (terminals.length > 1) {
+        return res.status(400).json({ error: 'Multiple terminals belum didukung untuk mode twin' });
+      }
+      const terminal = terminals[0];
       const twinCfg = {
-        ratios: twin && Array.isArray(twin.ratios)
-          ? twin.ratios
-          : ['50:50', '60:40', '70:30', '80:20', '90:10'],
-        enforceSameVessel: twin ? !!twin.enforceSameVessel : true,
-        vesselNames: twin && Array.isArray(twin.vesselNames) ? twin.vesselNames : undefined,
-        shareTerminalORU: twin ? !!twin.shareTerminalORU : true,
+        enforceSameVessel: twin.enforceSameVessel !== false,
+        vesselNames: Array.isArray(twin.vesselNames) ? twin.vesselNames : undefined,
+        shareTerminalORU: twin.shareTerminalORU !== false,
       };
-
       const { kapal_1, kapal_2, total } = await runTwoVesselProbabilityModel({
-        vessels,
-        routes,
-        oru,
-        terminal,
+        vessels, routes, oru, terminal,
         selectedLocations: locations,
         demandBBTUD: demand,
-        params,
-        inflationFactor,
-        geoMap, // NEW
+        params, inflationFactor, geoMap,
         ...twinCfg,
       });
       const topResult = total[0] || null;
-      return saveAndRespond({
-        resultsObj: { kapal_1, kapal_2, total },
-        topResult,
-        twinFlag: true,
-        mode: 'twin',
-      });
+      return saveAndRespond({ resultsObj: { kapal_1, kapal_2, total }, topResult, twinFlag: true, mode: 'twin' });
     }
 
-    // 4.c Single + RISK
+    // 4.c Milk-Run Single + Risk
     if (risk && risk.selections) {
-      const riskRows = await prisma.riskMatrix.findMany();
+      if (terminals.length > 1) {
+        return res.status(400).json({ error: 'Multiple terminals belum didukung untuk mode risk' });
+      }
+      const terminal = terminals[0];
       const riskDB = buildRiskDB(risk, riskRows);
-
-      const resultsRisk = await runSupplyChainModelRisk({
-        vessels,
-        routes,
-        oru,
-        terminal,
+      const results = await runSupplyChainModelRisk({
+        vessels, routes, oru, terminal,
         selectedLocations: locations,
         demandBBTUD: demand,
-        params,
-        inflationFactor,
-        riskDB,
-        geoMap, // NEW
+        params, inflationFactor, riskDB, geoMap,
       });
-      const topResultRisk = resultsRisk[0] || null;
-      return saveAndRespond({
-        resultsObj: resultsRisk,
-        topResult: topResultRisk,
-        twinFlag: false,
-        mode: 'single-risk',
-      });
+      const topResult = results[0] || null;
+      return saveAndRespond({ resultsObj: results, topResult, twinFlag: false, mode: 'single' });
     }
 
-    // 4.d Single NO-RISK
-    const results = await runSupplyChainModel({
-      vessels,
-      routes,
-      oru,
-      terminal,
-      selectedLocations: locations,
-      demandBBTUD: demand,
-      params,
-      inflationFactor,
-      geoMap, // NEW
-    });
-    const topResult = results[0] || null;
-    return saveAndRespond({
-      resultsObj: results,
-      topResult,
-      twinFlag: false,
-      mode: 'single',
-    });
+    // 4.d Milk-Run Single NO-RISK (1 terminal)
+    if (terminals.length === 1) {
+      const terminal = terminals[0];
+      const results = await runSupplyChainModel({
+        vessels, routes, oru, terminal,
+        selectedLocations: locations,
+        demandBBTUD: demand,
+        params, inflationFactor, geoMap,
+      });
+      const topResult = results[0] || null;
+      return saveAndRespond({ resultsObj: results, topResult, twinFlag: false, mode: 'single' });
+    }
+
+    // 4.e Milk-Run Single NO-RISK (multi-terminal)
+    let combinedResults = [];
+    for (const terminal of terminals) {
+      const partial = await runSupplyChainModel({
+        vessels, routes, oru, terminal,
+        selectedLocations: locations,
+        demandBBTUD: demand,
+        params, inflationFactor, geoMap,
+      });
+      const tagged = partial.map((row) => ({
+        ...row,
+        'Terminal Sumber LNG': terminal,
+      }));
+      combinedResults = combinedResults.concat(tagged);
+    }
+
+    combinedResults.sort((a, b) => a['Total Cost USD/MMBTU'] - b['Total Cost USD/MMBTU']);
+    const top20 = combinedResults.slice(0, 20);
+    const topResult = top20[0] || null;
+
+    return saveAndRespond({ resultsObj: top20, topResult, twinFlag: false, mode: 'single' });
+
   } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: 'Engine run error', detail: e.message });
+    console.error('runUnified error:', e);
+    return res.status(500).json({ error: 'Engine run error', detail: e.message, stack: e.stack });
   }
 }
 

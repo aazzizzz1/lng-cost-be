@@ -11,9 +11,23 @@ function validateSupplyChainInput(req, res, next) {
   const b = req.body || {};
   // minimal required structure
   const requiredParams = ['harga_bbm','harga_lng','scf_lng','scf_mgo','loading_hour','maintenance_days','unpumpable_pct','bog_pct','filling_pct','gross_storage_pct','analysis_year','inflation_rate'];
-  if (!b.terminal || !Array.isArray(b.locations) || b.locations.length < 1) {
-    return res.status(400).json({ error: 'terminal and locations[] are required' });
+
+  // NEW: dukung terminal string atau array
+  let terminals = [];
+  if (Array.isArray(b.terminal)) {
+    terminals = b.terminal
+      .filter((n) => typeof n === 'string')
+      .map((n) => n.trim())
+      .filter(Boolean);
+  } else if (typeof b.terminal === 'string') {
+    const t = b.terminal.trim();
+    if (t) terminals = [t];
   }
+
+  if (!terminals.length || !Array.isArray(b.locations) || b.locations.length < 1) {
+    return res.status(400).json({ error: 'terminal (string atau array) dan locations[] wajib diisi' });
+  }
+
   if (!b.params || requiredParams.some((p) => typeof b.params[p] !== 'number')) {
     return res.status(400).json({ error: 'params is incomplete' });
   }
@@ -21,20 +35,25 @@ function validateSupplyChainInput(req, res, next) {
     return res.status(400).json({ error: 'demand object is required' });
   }
 
-  // NEW: normalize locations (unique, and must NOT include terminal)
+  const primaryTerminal = terminals[0];
+
+  // normalize locations (unique, dan TIDAK boleh mengandung salah satu terminal)
   const rawLocations = Array.isArray(b.locations) ? b.locations : [];
-  const normLocations = [...new Set(rawLocations)].filter((name) => !!name && name !== b.terminal);
+  const termSet = new Set(terminals);
+  const normLocations = [...new Set(rawLocations)].filter(
+    (name) => !!name && !termSet.has(name)
+  );
   if (normLocations.length < 1) {
-    return res.status(400).json({ error: 'locations[] must contain at least one destination different from terminal' });
+    return res.status(400).json({ error: 'locations[] must contain at least one destination different from terminal(s)' });
   }
 
-  // NEW: normalize method (milk-run | hub-spoke)
+  // normalize method (milk-run | hub-spoke)
   const rawMethod = typeof b.method === 'string' ? b.method.toLowerCase() : 'milk-run';
   if (rawMethod !== 'milk-run' && rawMethod !== 'hub-spoke') {
     return res.status(400).json({ error: 'method must be "milk-run" or "hub-spoke"' });
   }
 
-  // NEW: optional GEO map (nama -> { latitude, longitude }) untuk custom titik Leaflet
+  // optional GEO map
   let geo = undefined;
   if (b.geo && typeof b.geo === 'object') {
     geo = {};
@@ -53,44 +72,60 @@ function validateSupplyChainInput(req, res, next) {
     if (Object.keys(geo).length === 0) geo = undefined;
   }
 
-  // canonical body for hashing
+  // NORMALISASI daftar kapal yang dipakai (optional multi-select)
+  let normVessels;
+  if (Array.isArray(b.vessels)) {
+    normVessels = [...new Set(
+      b.vessels
+        .filter((n) => typeof n === 'string')
+        .map((n) => n.trim())
+        .filter(Boolean)
+    )];
+    if (!normVessels.length) normVessels = undefined;
+  }
+
+  // canonical body for hashing (pakai daftar terminals, tanpa ratios)
   const canonical = stableStringify({
-    terminal: b.terminal,
+    terminals: [...terminals].sort(),                        // NEW
+    terminal_primary: primaryTerminal,                       // NEW (kompat)
     locations: [...normLocations].sort(),
     params: b.params,
     demand: Object.keys(b.demand).sort().reduce((acc, k) => { acc[k] = b.demand[k]; return acc; }, {}),
     base_year: b.base_year ?? 2022,
     method: rawMethod,
     twin: b.twin ? {
-      ratios: Array.isArray(b.twin.ratios) ? [...b.twin.ratios].sort() : undefined,
       enforceSameVessel: !!b.twin.enforceSameVessel,
-      vesselNames: Array.isArray(b.twin.vesselNames) ? b.twin.vesselNames : undefined,
+      vesselNames: Array.isArray(b.twin.vesselNames)
+        ? [...new Set(b.twin.vesselNames.filter((n) => typeof n === 'string').map((n) => n.trim()).filter(Boolean))].sort()
+        : undefined,
       shareTerminalORU: !!b.twin.shareTerminalORU,
     } : undefined,
     risk: b.risk || undefined,
-    // NEW: ikut mempengaruhi runKey bila pakai koordinat custom
     geo,
+    vessels: normVessels,        // NEW: daftar nama kapal (kandidat)
   });
   req.runKey = crypto.createHash('sha256').update(canonical).digest('hex');
 
-  // attach normalized method, locations, twin and risk
+  // attach normalized fields
   req.body.method = rawMethod;
+  req.body.terminals = terminals;          // NEW: full list
+  req.body.terminal = primaryTerminal;     // tetap ada untuk kompat
   req.body.locations = normLocations;
 
   if (b.twin) {
     req.body.twin = {
-      ratios: Array.isArray(b.twin.ratios) ? b.twin.ratios : undefined,
       enforceSameVessel: !!b.twin.enforceSameVessel,
       vesselNames: Array.isArray(b.twin.vesselNames) ? b.twin.vesselNames : undefined,
       shareTerminalORU: !!b.twin.shareTerminalORU,
     };
   }
+  if (normVessels) {
+    req.body.vessels = normVessels;  // NEW: kapal yang dipilih user (multi-select)
+  }
   if (b.risk && typeof b.risk === 'object') {
-    // expected shape: { selections: { "II.1": ["R1","R2"], "II.2": ["R22"], ... } }
     req.body.risk = b.risk;
   }
   if (geo) {
-    // NEW: simpan geo normal ke body, dipakai engine untuk hitung jarak dinamis
     req.body.geo = geo;
   }
 

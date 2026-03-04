@@ -229,7 +229,7 @@ model SupplyChainRun {
   terminal   String
   locations  Json
   params     Json
-  demand     Json
+  demand     Json?    // CHANGED: nullable dulu untuk migrasi
   results    Json
   topResult  Json?
   reuseCount Int      @default(0)
