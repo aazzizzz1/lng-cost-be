@@ -9,6 +9,11 @@ const {
   runHubSpokeSingleModelRisk,
   runHubSpokeTwoVesselModel,
   runHubSpokeTwoVesselModelRisk,
+  // NEW: N-vessel engines
+  runNVesselProbabilityModel,
+  runNVesselProbabilityModelRisk,
+  runHubSpokeNVesselModel,
+  runHubSpokeNVesselModelRisk,
 } = require('../services/supplychainEngine');
 
 async function run(req, res) {
@@ -139,7 +144,7 @@ async function runTwin(req, res) {
 }
 
 // NEW: normalisasi hasil menjadi tabel-tabel untuk response
-function normalizeResultsForResponse({ method, twin, results }) {
+function normalizeResultsForResponse({ method, numVessels, results }) {
   const addScenarioIndex = (rows) =>
     (Array.isArray(rows) ? rows : []).map((r, i) =>
       Object.prototype.hasOwnProperty.call(r, 'No. Skenario')
@@ -147,63 +152,40 @@ function normalizeResultsForResponse({ method, twin, results }) {
         : { 'No. Skenario': i + 1, ...r }
     );
 
-  // === CASE 1: Hub & Spoke 3-kapal (Mother + Feeder 1 + Feeder 2 + System) ===
-  if (
-    twin &&
-    method === 'hub-spoke' &&
-    results &&
-    Array.isArray(results.mother) &&
-    Array.isArray(results.feeder1) &&
-    Array.isArray(results.feeder2) &&
-    Array.isArray(results.system)
-  ) {
-    return {
-      tables: {
-        mother: addScenarioIndex(results.mother),
-        feeder1: addScenarioIndex(results.feeder1),
-        feeder2: addScenarioIndex(results.feeder2),
-        system: addScenarioIndex(results.system),
-      },
+  // === CASE: Hub & Spoke dengan N-kapal (Mother + N Feeders) ===
+  if (method === 'hub-spoke' && results && results.mother) {
+    const tables = {
+      mother: addScenarioIndex(results.mother),
     };
-  }
-
-  // === CASE 2: Hub & Spoke 1-kapal (Mother + Feeder 1 + System) - NO TWIN ===
-  if (
-    !twin &&
-    method === 'hub-spoke' &&
-    results &&
-    Array.isArray(results.mother) &&
-    Array.isArray(results.feeder1) &&
-    Array.isArray(results.system)
-  ) {
-    return {
-      tables: {
-        mother: addScenarioIndex(results.mother),
-        feeder1: addScenarioIndex(results.feeder1),
-        system: addScenarioIndex(results.system),
-      },
-    };
-  }
-
-  // === CASE 3: Twin mode generic (bentuk lama { kapal_1, kapal_2, total }) ===
-  if (
-    twin &&
-    results &&
-    Array.isArray(results.kapal_1) &&
-    Array.isArray(results.kapal_2) &&
-    Array.isArray(results.total)
-  ) {
-    const k1 = addScenarioIndex(results.kapal_1);
-    const k2 = addScenarioIndex(results.kapal_2);
-    const sys = addScenarioIndex(results.total);
-
-    if (method === 'hub-spoke') {
-      return { tables: { mother: k1, feeder: k2, system: sys } };
+    // Tambahkan feeder1, feeder2, ..., feederN
+    for (let i = 1; i <= 10; i++) {
+      const key = `feeder${i}`;
+      if (results[key] && Array.isArray(results[key])) {
+        tables[key] = addScenarioIndex(results[key]);
+      }
     }
-    return { tables: { kapal_1: k1, kapal_2: k2, system: sys } };
+    if (results.system) {
+      tables.system = addScenarioIndex(results.system);
+    }
+    return { tables };
   }
 
-  // === CASE 4: Single-vessel (array of rows penuh) ===
+  // === CASE: Milk-Run N-kapal (kapal_1, kapal_2, ..., kapal_N + system) ===
+  if (numVessels > 1 && results) {
+    const tables = {};
+    for (let i = 1; i <= numVessels; i++) {
+      const key = `kapal_${i}`;
+      if (results[key] && Array.isArray(results[key])) {
+        tables[key] = addScenarioIndex(results[key]);
+      }
+    }
+    if (results.total || results.system) {
+      tables.system = addScenarioIndex(results.total || results.system);
+    }
+    return { tables };
+  }
+
+  // === CASE: Single-vessel (array of rows) ===
   const rows = Array.isArray(results) ? results : [];
   const indexed = addScenarioIndex(rows);
 
@@ -311,8 +293,9 @@ function normalizeResultsForResponse({ method, twin, results }) {
 async function runUnified(req, res) {
   try {
     const runKey = req.runKey;
-    const { locations, params, demand, twin, risk } = req.body;
+    const { locations, params, demand, vesselConfig, risk } = req.body;
     const method = req.body.method || 'milk-run';
+    const numVessels = req.body.numVessels || 1;
     const baseYear = req.body.base_year ?? 2022;
     const rawGeo = req.body.geo || undefined;
     const primaryTerminal = req.body.terminal;
@@ -335,26 +318,12 @@ async function runUnified(req, res) {
       });
 
       const cachedMethod = cached.params?.method || method || 'milk-run';
+      const cachedNumVessels = cached.params?.numVessels || 1;
       const cachedResults = cached.results;
-
-      const hasTwinGeneric =
-        !!cachedResults &&
-        Array.isArray(cachedResults.kapal_1) &&
-        Array.isArray(cachedResults.kapal_2) &&
-        Array.isArray(cachedResults.total);
-
-      const hasTwinHubSpoke3 =
-        !!cachedResults &&
-        Array.isArray(cachedResults.mother) &&
-        Array.isArray(cachedResults.feeder1) &&
-        Array.isArray(cachedResults.feeder2) &&
-        Array.isArray(cachedResults.system);
-
-      const isTwin = hasTwinGeneric || hasTwinHubSpoke3;
 
       const { tables } = normalizeResultsForResponse({
         method: cachedMethod,
-        twin: isTwin,
+        numVessels: cachedNumVessels,
         results: cachedResults,
       });
 
@@ -362,8 +331,8 @@ async function runUnified(req, res) {
         runKey,
         cached: true,
         method: cachedMethod,
-        twin: isTwin,
-        mode: isTwin ? 'twin' : 'single',
+        numVessels: cachedNumVessels,
+        mode: cachedNumVessels > 1 ? 'multi-vessel' : 'single',
         input: {
           terminal: cached.terminal,
           locations: cached.locations,
@@ -417,10 +386,10 @@ async function runUnified(req, res) {
     const geoMap = rawGeo ? { ...dbGeo, ...rawGeo } : dbGeo;
 
     const inflationFactor = Math.pow(1 + params.inflation_rate, params.analysis_year - baseYear);
-    const paramsWithMethod = { ...params, method };
+    const paramsWithMethod = { ...params, method, numVessels };
 
     // Helper: save and respond
-    async function saveAndRespond({ resultsObj, topResult, twinFlag, mode }) {
+    async function saveAndRespond({ resultsObj, topResult, mode }) {
       const terminalLabel = terminals.length > 1 ? terminals.join(', ') : terminals[0];
       await prisma.supplyChainRun.create({
         data: {
@@ -436,14 +405,14 @@ async function runUnified(req, res) {
 
       const { tables } = normalizeResultsForResponse({
         method,
-        twin: twinFlag,
+        numVessels,
         results: resultsObj,
       });
       return res.json({
         runKey,
         cached: false,
         method,
-        twin: twinFlag,
+        numVessels,
         mode,
         input: {
           terminal: terminalLabel,
@@ -459,6 +428,17 @@ async function runUnified(req, res) {
       });
     }
 
+    const terminal = terminals[0];
+    const hasRisk = risk && risk.selections;
+    const riskDB = hasRisk ? buildRiskDB(risk, riskRows) : null;
+
+    const vesselCfg = vesselConfig || {};
+    const engineConfig = {
+      enforceSameVessel: vesselCfg.enforceSameVessel !== false,
+      vesselNames: Array.isArray(vesselCfg.vesselNames) ? vesselCfg.vesselNames : undefined,
+      shareTerminalORU: vesselCfg.shareTerminalORU !== false,
+    };
+
     // ======================
     // 3. HUB & SPOKE
     // ======================
@@ -466,169 +446,98 @@ async function runUnified(req, res) {
       if (terminals.length > 1) {
         return res.status(400).json({ error: 'Multiple terminals belum didukung untuk metode hub-spoke' });
       }
-      const terminal = terminals[0];
 
-      // 3.a Hub-Spoke Twin + Risk
-      if (twin && risk && risk.selections) {
-        const riskDB = buildRiskDB(risk, riskRows);
-        const twinCfg = {
-          enforceSameVessel: twin.enforceSameVessel !== false,
-          vesselNames: Array.isArray(twin.vesselNames) ? twin.vesselNames : undefined,
-          shareTerminalORU: twin.shareTerminalORU !== false,
-        };
-        const hubResult = await runHubSpokeTwoVesselModelRisk({
-          vessels, routes, oru, terminal,
-          selectedLocations: locations,
-          demandBBTUD: demand,
-          params, inflationFactor, riskDB, geoMap,
-          ...twinCfg,
-        });
-        const topResult = hubResult.system?.[0] || null;
-        return saveAndRespond({ resultsObj: hubResult, topResult, twinFlag: true, mode: 'twin' });
+      if (numVessels === 1) {
+        // Single feeder
+        if (hasRisk) {
+          const results = await runHubSpokeSingleModelRisk({
+            vessels, routes, oru, terminal,
+            selectedLocations: locations, demandBBTUD: demand,
+            params, inflationFactor, riskDB, geoMap,
+          });
+          const topResult = results.system?.[0] || null;
+          return saveAndRespond({ resultsObj: results, topResult, mode: 'single' });
+        } else {
+          const results = await runHubSpokeSingleModel({
+            vessels, routes, oru, terminal,
+            selectedLocations: locations, demandBBTUD: demand,
+            params, inflationFactor, geoMap,
+          });
+          const topResult = results.system?.[0] || null;
+          return saveAndRespond({ resultsObj: results, topResult, mode: 'single' });
+        }
+      } else {
+        // N feeders (numVessels >= 2)
+        if (hasRisk) {
+          const results = await runHubSpokeNVesselModelRisk({
+            vessels, routes, oru, terminal,
+            selectedLocations: locations, demandBBTUD: demand,
+            params, inflationFactor, riskDB, geoMap,
+            numFeeders: numVessels,
+            ...engineConfig,
+          });
+          const topResult = results.system?.[0] || null;
+          return saveAndRespond({ resultsObj: results, topResult, mode: 'multi-vessel' });
+        } else {
+          const results = await runHubSpokeNVesselModel({
+            vessels, routes, oru, terminal,
+            selectedLocations: locations, demandBBTUD: demand,
+            params, inflationFactor, geoMap,
+            numFeeders: numVessels,
+            ...engineConfig,
+          });
+          const topResult = results.system?.[0] || null;
+          return saveAndRespond({ resultsObj: results, topResult, mode: 'multi-vessel' });
+        }
       }
-
-      // 3.b Hub-Spoke Twin NO-RISK
-      if (twin) {
-        const twinCfg = {
-          enforceSameVessel: twin.enforceSameVessel !== false,
-          vesselNames: Array.isArray(twin.vesselNames) ? twin.vesselNames : undefined,
-          shareTerminalORU: twin.shareTerminalORU !== false,
-        };
-        const hubResult = await runHubSpokeTwoVesselModel({
-          vessels, routes, oru, terminal,
-          selectedLocations: locations,
-          demandBBTUD: demand,
-          params, inflationFactor, geoMap,
-          ...twinCfg,
-        });
-        const topResult = hubResult.total?.[0] || null;
-        return saveAndRespond({ resultsObj: hubResult, topResult, twinFlag: true, mode: 'twin' });
-      }
-
-      // 3.c Hub-Spoke Single + Risk
-      if (risk && risk.selections) {
-        const riskDB = buildRiskDB(risk, riskRows);
-        const results = await runHubSpokeSingleModelRisk({
-          vessels, routes, oru, terminal,
-          selectedLocations: locations,
-          demandBBTUD: demand,
-          params, inflationFactor, riskDB, geoMap,
-        });
-        const topResult = results[0] || null;
-        return saveAndRespond({ resultsObj: results, topResult, twinFlag: false, mode: 'single' });
-      }
-
-      // 3.d Hub-Spoke Single NO-RISK
-      const results = await runHubSpokeSingleModel({
-        vessels, routes, oru, terminal,
-        selectedLocations: locations,
-        demandBBTUD: demand,
-        params, inflationFactor, geoMap,
-      });
-      const topResult = results[0] || null;
-      return saveAndRespond({ resultsObj: results, topResult, twinFlag: false, mode: 'single' });
     }
 
     // ======================
     // 4. MILK-RUN
     // ======================
-
-    // 4.a Milk-Run Twin + Risk
-    if (twin && risk && risk.selections) {
-      if (terminals.length > 1) {
-        return res.status(400).json({ error: 'Multiple terminals belum didukung untuk mode twin/risk' });
+    if (numVessels === 1) {
+      // Single vessel
+      if (hasRisk) {
+        const results = await runSupplyChainModelRisk({
+          vessels, routes, oru, terminal,
+          selectedLocations: locations, demandBBTUD: demand,
+          params, inflationFactor, riskDB, geoMap,
+        });
+        const topResult = results[0] || null;
+        return saveAndRespond({ resultsObj: results, topResult, mode: 'single' });
+      } else {
+        const results = await runSupplyChainModel({
+          vessels, routes, oru, terminal,
+          selectedLocations: locations, demandBBTUD: demand,
+          params, inflationFactor, geoMap,
+        });
+        const topResult = results[0] || null;
+        return saveAndRespond({ resultsObj: results, topResult, mode: 'single' });
       }
-      const terminal = terminals[0];
-      const riskDB = buildRiskDB(risk, riskRows);
-      const twinCfg = {
-        enforceSameVessel: twin.enforceSameVessel !== false,
-        vesselNames: Array.isArray(twin.vesselNames) ? twin.vesselNames : undefined,
-        shareTerminalORU: twin.shareTerminalORU !== false,
-      };
-      const { kapal_1, kapal_2, total } = await runTwoVesselProbabilityModelRisk({
-        vessels, routes, oru, terminal,
-        selectedLocations: locations,
-        demandBBTUD: demand,
-        params, inflationFactor, riskDB, geoMap,
-        ...twinCfg,
-      });
-      const topResult = total[0] || null;
-      return saveAndRespond({ resultsObj: { kapal_1, kapal_2, total }, topResult, twinFlag: true, mode: 'twin' });
-    }
-
-    // 4.b Milk-Run Twin NO-RISK
-    if (twin) {
-      if (terminals.length > 1) {
-        return res.status(400).json({ error: 'Multiple terminals belum didukung untuk mode twin' });
+    } else {
+      // N vessels (numVessels >= 2)
+      if (hasRisk) {
+        const results = await runNVesselProbabilityModelRisk({
+          vessels, routes, oru, terminal,
+          selectedLocations: locations, demandBBTUD: demand,
+          params, inflationFactor, riskDB, geoMap,
+          numVessels,
+          ...engineConfig,
+        });
+        const topResult = results.system?.[0] || results.total?.[0] || null;
+        return saveAndRespond({ resultsObj: results, topResult, mode: 'multi-vessel' });
+      } else {
+        const results = await runNVesselProbabilityModel({
+          vessels, routes, oru, terminal,
+          selectedLocations: locations, demandBBTUD: demand,
+          params, inflationFactor, geoMap,
+          numVessels,
+          ...engineConfig,
+        });
+        const topResult = results.system?.[0] || results.total?.[0] || null;
+        return saveAndRespond({ resultsObj: results, topResult, mode: 'multi-vessel' });
       }
-      const terminal = terminals[0];
-      const twinCfg = {
-        enforceSameVessel: twin.enforceSameVessel !== false,
-        vesselNames: Array.isArray(twin.vesselNames) ? twin.vesselNames : undefined,
-        shareTerminalORU: twin.shareTerminalORU !== false,
-      };
-      const { kapal_1, kapal_2, total } = await runTwoVesselProbabilityModel({
-        vessels, routes, oru, terminal,
-        selectedLocations: locations,
-        demandBBTUD: demand,
-        params, inflationFactor, geoMap,
-        ...twinCfg,
-      });
-      const topResult = total[0] || null;
-      return saveAndRespond({ resultsObj: { kapal_1, kapal_2, total }, topResult, twinFlag: true, mode: 'twin' });
     }
-
-    // 4.c Milk-Run Single + Risk
-    if (risk && risk.selections) {
-      if (terminals.length > 1) {
-        return res.status(400).json({ error: 'Multiple terminals belum didukung untuk mode risk' });
-      }
-      const terminal = terminals[0];
-      const riskDB = buildRiskDB(risk, riskRows);
-      const results = await runSupplyChainModelRisk({
-        vessels, routes, oru, terminal,
-        selectedLocations: locations,
-        demandBBTUD: demand,
-        params, inflationFactor, riskDB, geoMap,
-      });
-      const topResult = results[0] || null;
-      return saveAndRespond({ resultsObj: results, topResult, twinFlag: false, mode: 'single' });
-    }
-
-    // 4.d Milk-Run Single NO-RISK (1 terminal)
-    if (terminals.length === 1) {
-      const terminal = terminals[0];
-      const results = await runSupplyChainModel({
-        vessels, routes, oru, terminal,
-        selectedLocations: locations,
-        demandBBTUD: demand,
-        params, inflationFactor, geoMap,
-      });
-      const topResult = results[0] || null;
-      return saveAndRespond({ resultsObj: results, topResult, twinFlag: false, mode: 'single' });
-    }
-
-    // 4.e Milk-Run Single NO-RISK (multi-terminal)
-    let combinedResults = [];
-    for (const terminal of terminals) {
-      const partial = await runSupplyChainModel({
-        vessels, routes, oru, terminal,
-        selectedLocations: locations,
-        demandBBTUD: demand,
-        params, inflationFactor, geoMap,
-      });
-      const tagged = partial.map((row) => ({
-        ...row,
-        'Terminal Sumber LNG': terminal,
-      }));
-      combinedResults = combinedResults.concat(tagged);
-    }
-
-    combinedResults.sort((a, b) => a['Total Cost USD/MMBTU'] - b['Total Cost USD/MMBTU']);
-    const top20 = combinedResults.slice(0, 20);
-    const topResult = top20[0] || null;
-
-    return saveAndRespond({ resultsObj: top20, topResult, twinFlag: false, mode: 'single' });
 
   } catch (e) {
     console.error('runUnified error:', e);

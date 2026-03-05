@@ -228,7 +228,9 @@ async function runSupplyChainModel(input) {
   const SCF_MGO = params.scf_mgo;
   const Pyears = params.Penyaluran || 20;
   const totalDemandBBTUD = Object.values(demandBBTUD).reduce((a, b) => a + b, 0);
-  let globalScenarioId = 0; // NEW: global counter (tidak per-vessel)
+  let globalScenarioId = 0;
+
+  const Batas_Maksimum_Utilisasi_LNGC = ((365 - params.maintenance_days) / 365) * 100;
 
   for (const vessel of vesselAdj) {
     const kapasitas_kapal = vessel.capacityM3;
@@ -261,15 +263,18 @@ async function runSupplyChainModel(input) {
       const bog_vol = ((1 / (1 - params.bog_pct * RTD)) - 1) * working_volume_lngc;
       const max_fill = working_volume_lngc + unpumpable_vol + bog_vol;
       const nominal_capacity = max_fill / params.filling_pct;
-      const min_volume = roundUp(nominal_capacity, 100);
-      if (min_volume > kapasitas_kapal) continue;
+
+      // CHECK 1: nominal_capacity <= kapasitas_kapal
+      if (nominal_capacity > kapasitas_kapal) continue;
 
       const days_stock = working_volume_lngc / demand_m3_day;
       const voyages_year = 365 / days_stock;
       const Utilitasi_Factor_LNGC = (RTD * voyages_year / 365) * 100;
-      const Batas_Maksimum_Utilisasi_LNGC = ((365 - params.maintenance_days) / 365) * 100;
 
-      // CAPEX (UPDATED: pakai tankSize & tankPrice dari config)
+      // CHECK 2: utilisasi check
+      if (Utilitasi_Factor_LNGC > Batas_Maksimum_Utilisasi_LNGC) continue;
+
+      // CAPEX
       let total_capex = 0;
       let selected_storage_total = 0;
       for (const loc of route) {
@@ -294,7 +299,7 @@ async function runSupplyChainModel(input) {
       const penyaluran_lifetime = totalDemandBBTUD * 365 * Pyears * 1000;
       const capex_usd_mmbtu = total_capex / penyaluran_lifetime;
 
-      // OPEX (no-risk)
+      // OPEX
       const n_leg = legs.length;
       let sailing_time_voyage = 0;
       let sailing_time_ballast = 0;
@@ -319,22 +324,19 @@ async function runSupplyChainModel(input) {
       const penyaluran_year = totalDemandBBTUD * 365 * 1000;
       const opex_usd_mmbtu = total_opex / penyaluran_year;
       const total_cost = capex_usd_mmbtu + opex_usd_mmbtu;
-      const total_cost_rd3 = Math.round(total_cost * 1000) / 1000;
 
-      globalScenarioId += 1; // NEW: increment global counter
+      globalScenarioId += 1;
       results.push({
         'No. Skenario': globalScenarioId,
         'Nama Kapal': vessel.name,
         'Rute': fullRoute.join(' - '),
         'Total Jarak (NM)': totalDistance,
-        'RTD (day)': RTD,
         'RTD': RTD,
         'Demand LNG/day (m3)': demand_m3_day,
-        'buffer_day': buffer_day,
-        'buffer day': buffer_day,
         'Nominal Capacity (m3)': nominal_capacity,
         'Kapasitas Kapal (m3)': kapasitas_kapal,
         'Speed (knot)': speed,
+        'buffer day': buffer_day,
         'days_stock': days_stock,
         'voyages_year': voyages_year,
         'Utilitasi_Factor_LNGC': Utilitasi_Factor_LNGC,
@@ -350,15 +352,13 @@ async function runSupplyChainModel(input) {
         'Total CAPEX USD/MMBTU': capex_usd_mmbtu,
         'Total OPEX (USD/year)': Math.round(total_opex * 10) / 10,
         'Total OPEX (USD/MMBTU)': opex_usd_mmbtu,
-        'Total Cost USD/MMBTU': total_cost,
         'Total Cost (USD/MMBTU)': total_cost,
-        'Total Cost USD/MMBTU (Round 3)': total_cost_rd3,
+        'Spokes': route.join(', '),
       });
     }
   }
 
-  // NEW: sort + Top 20, tapi jangan ubah No. Skenario
-  results.sort((a, b) => a['Total Cost USD/MMBTU'] - b['Total Cost USD/MMBTU']);
+  results.sort((a, b) => a['Total Cost (USD/MMBTU)'] - b['Total Cost (USD/MMBTU)']);
   return results.slice(0, 20);
 }
 
@@ -376,6 +376,8 @@ async function runSupplyChainModelRisk(input) {
     ...v,
     rentPerDayUSD: v.rentPerDayUSD * inflationFactor,
     portCostPerLocation: v.portCostPerLocation * inflationFactor,
+    portCostLTP: v.portCostLTP * inflationFactor,
+    portCostDelay: v.portCostDelay * inflationFactor,
   }));
 
   const allRoutes = permutations(selectedLocations);
@@ -384,7 +386,14 @@ async function runSupplyChainModelRisk(input) {
   const SCF_MGO = params.scf_mgo;
   const Pyears = params.Penyaluran || 20;
   const totalDemandBBTUD = Object.values(demandBBTUD).reduce((a, b) => a + b, 0);
-  let globalScenarioId = 0; // NEW
+  let globalScenarioId = 0;
+
+  const Batas_Maksimum_Utilisasi_LNGC = ((365 - params.maintenance_days) / 365) * 100;
+
+  // Risk impacts
+  const im_s = getRiskImpact(riskDB, 'P2_Durasi', 'II.3');
+  const impact_lt_II2 = getRiskImpact(riskDB, 'P2_Durasi', 'II.2');
+  const impact_lt_II5 = getRiskImpact(riskDB, 'P2_Durasi', 'II.5');
 
   for (const vessel of vesselAdj) {
     const kapasitas_kapal = vessel.capacityM3;
@@ -393,7 +402,6 @@ async function runSupplyChainModelRisk(input) {
     for (const route of allRoutes) {
       const fullRoute = [terminal, ...route, terminal];
       let totalDistance = 0;
-      let sailingTime = 0;
       const legs = [];
 
       for (let i = 0; i < fullRoute.length - 1; i++) {
@@ -402,12 +410,21 @@ async function runSupplyChainModelRisk(input) {
         const dist = getDistanceNM(distanceMap, origin, dest, geoMap);
         if (!dist) { totalDistance = null; break; }
         totalDistance += dist;
-        sailingTime += dist / speed;
         legs.push(dist);
       }
       if (totalDistance == null) continue;
 
-      const totalLoadingTime = params.loading_hour * (route.length + 1);
+      // Sailing time with risk
+      let sailingTime = 0;
+      for (const d of legs) {
+        sailingTime += (d / speed) * (1 + im_s);
+      }
+
+      // Loading time with risk
+      const totalLoadingTime = 
+        params.loading_hour * (1 + impact_lt_II2) + 
+        route.length * params.loading_hour * (1 + impact_lt_II5);
+      
       const totalTimeHour = sailingTime + totalLoadingTime;
       const RTD = totalTimeHour / 24;
       const demand_m3_day = route.reduce((acc, l) => acc + ((demandBBTUD[l] / 24.04) * 1000), 0);
@@ -417,13 +434,16 @@ async function runSupplyChainModelRisk(input) {
       const bog_vol = ((1 / (1 - params.bog_pct * RTD)) - 1) * working_volume_lngc;
       const max_fill = working_volume_lngc + unpumpable_vol + bog_vol;
       const nominal_capacity = max_fill / params.filling_pct;
-      const min_volume = roundUp(nominal_capacity, 100);
-      if (min_volume > kapasitas_kapal) continue;
+
+      // CHECK 1: nominal_capacity <= kapasitas_kapal
+      if (nominal_capacity > kapasitas_kapal) continue;
 
       const days_stock = working_volume_lngc / demand_m3_day;
       const voyages_year = 365 / days_stock;
       const Utilitasi_Factor_LNGC = (RTD * voyages_year / 365) * 100;
-      const Batas_Maksimum_Utilisasi_LNGC = ((365 - params.maintenance_days) / 365) * 100;
+
+      // CHECK 2: utilisasi check
+      if (Utilitasi_Factor_LNGC > Batas_Maksimum_Utilisasi_LNGC) continue;
 
       // CAPEX with risk
       const risk_capex_6 = getRiskImpact(riskDB, 'P3_Biaya_Investasi', 'II.6');
@@ -433,7 +453,6 @@ async function runSupplyChainModelRisk(input) {
       const impact_capex_end = getRiskImpact(riskDB, 'P3_Biaya_Investasi', 'II.1') || 0;
 
       let total_capex = 0.0;
-      const capex_loc_map = new Map();
       let selected_storage_total = 0;
 
       for (const loc of route) {
@@ -445,9 +464,7 @@ async function runSupplyChainModelRisk(input) {
 
         const tank_capex = (selected_storage / tankSize) * tankPrice * inflationFactor;
         const oru_capex = oruMap.get(loc) || 0;
-        const capex_loc_risked = tank_capex + (oru_capex * (1 + impact_capex_start));
-        capex_loc_map.set(loc, capex_loc_risked);
-        total_capex += capex_loc_risked;
+        total_capex += tank_capex + (oru_capex * (1 + impact_capex_start));
       }
 
       let capex_terminal_risked = 0.0;
@@ -460,52 +477,39 @@ async function runSupplyChainModelRisk(input) {
       const penyaluran_lifetime = totalDemandBBTUD * 365 * Pyears * 1000;
       const capex_usd_mmbtu = total_capex / penyaluran_lifetime;
 
-      // OPEX ORU with risk (P1)
+      // OPEX with risk
       const risk_opex_6 = getRiskImpact(riskDB, 'P1_Biaya_Operasi', 'II.6');
       const risk_opex_7 = getRiskImpact(riskDB, 'P1_Biaya_Operasi', 'II.7');
       const risk_opex_8 = getRiskImpact(riskDB, 'P1_Biaya_Operasi', 'II.8');
       const impact_opex_start = (risk_opex_6 + risk_opex_7 + risk_opex_8) / 3 || 0;
       const impact_opex_end = getRiskImpact(riskDB, 'P1_Biaya_Operasi', 'II.1') || 0;
 
-      let opex_oru = 0.0;
-      for (const capex_loc of capex_loc_map.values()) {
-        opex_oru += capex_loc * 0.05 * (1 + impact_opex_start);
-      }
+      let opex_oru = (total_capex - capex_terminal_risked) * 0.05 * (1 + impact_opex_start);
       opex_oru += capex_terminal_risked * 0.05 * (1 + impact_opex_end);
 
-      // Fuel OPEX with risk on times (pakai legs)
-      const impact_sailing = getRiskImpact(riskDB, 'P2_Durasi', 'II.3');
-      const impact_berth_start = getRiskImpact(riskDB, 'P2_Durasi', 'II.2');
-      const impact_berth_next = getRiskImpact(riskDB, 'P2_Durasi', 'II.5');
-
-      let sailing_time_voyage = 0.0;
-      let sailing_time_ballast = 0.0;
+      // Fuel with risk
       const n_leg = legs.length;
+      let sailing_time_voyage = 0;
+      let sailing_time_ballast = 0;
       for (let i = 0; i < n_leg; i++) {
         const dist = legs[i];
-        const base_time = dist / speed;
-        const time_leg = base_time * (1 + impact_sailing);
+        const time_leg = (dist / speed) * (1 + im_s);
         sailing_time_voyage += time_leg;
         if (i === n_leg - 1) sailing_time_ballast = time_leg;
       }
 
       const fuel_voyage = (sailing_time_voyage / 24) * vessel.voyageTonPerDay;
       const fuel_ballast = (sailing_time_ballast / 24) * vessel.ballastTonPerDay;
-      const fuel_berth_start = (params.loading_hour * (1 + impact_berth_start) / 24) * vessel.berthTonPerDay;
-      const fuel_berth_next = (params.loading_hour * route.length * (1 + impact_berth_next) / 24) * vessel.berthTonPerDay;
-      const fuel_berth = fuel_berth_start + fuel_berth_next;
+      const fuel_berth = (totalLoadingTime / 24) * vessel.berthTonPerDay;
       const fuel_total = fuel_voyage + fuel_ballast + fuel_berth;
-
       const lng_fuel = fuel_total * (SCF_LNG / SCF_MGO);
       const lng_fuel_cost = voyages_year * lng_fuel * params.harga_lng;
 
-      // Port cost with risk (P1_BOP on II.2 start, II.5 next)
+      // Port cost with risk
       const impact_port_start = getRiskImpact(riskDB, 'P1_Biaya_Operasi', 'II.2');
       const impact_port_next = getRiskImpact(riskDB, 'P1_Biaya_Operasi', 'II.5');
-
-      const port_ltp = vessel.portCostLTP * inflationFactor;
-      const port_delay = vessel.portCostDelay * inflationFactor;
-
+      const port_ltp = vessel.portCostLTP;
+      const port_delay = vessel.portCostDelay;
       const port_start_per_voyage = port_ltp * (1 + impact_port_start) + port_delay;
       const port_next_per_voyage = route.length * (port_ltp * (1 + impact_port_next) + port_delay);
       const port_cost = voyages_year * (port_start_per_voyage + port_next_per_voyage);
@@ -516,22 +520,19 @@ async function runSupplyChainModelRisk(input) {
       const penyaluran_year = totalDemandBBTUD * 365 * 1000;
       const opex_usd_mmbtu = total_opex / penyaluran_year;
       const total_cost = capex_usd_mmbtu + opex_usd_mmbtu;
-      const total_cost_rd3 = Math.round(total_cost * 1000) / 1000;
 
-      globalScenarioId += 1; // NEW
+      globalScenarioId += 1;
       results.push({
         'No. Skenario': globalScenarioId,
         'Nama Kapal': vessel.name,
         'Rute': fullRoute.join(' - '),
         'Total Jarak (NM)': totalDistance,
-        'RTD (day)': RTD,
         'RTD': RTD,
         'Demand LNG/day (m3)': demand_m3_day,
-        'buffer_day': buffer_day,
-        'buffer day': buffer_day,
         'Nominal Capacity (m3)': nominal_capacity,
         'Kapasitas Kapal (m3)': kapasitas_kapal,
         'Speed (knot)': speed,
+        'buffer day': buffer_day,
         'days_stock': days_stock,
         'voyages_year': voyages_year,
         'Utilitasi_Factor_LNGC': Utilitasi_Factor_LNGC,
@@ -547,14 +548,13 @@ async function runSupplyChainModelRisk(input) {
         'Total CAPEX USD/MMBTU': capex_usd_mmbtu,
         'Total OPEX (USD/year)': Math.round(total_opex * 10) / 10,
         'Total OPEX (USD/MMBTU)': opex_usd_mmbtu,
-        'Total Cost USD/MMBTU': total_cost,
         'Total Cost (USD/MMBTU)': total_cost,
-        'Total Cost USD/MMBTU (Round 3)': total_cost_rd3,
+        'Spokes': route.join(', '),
       });
     }
   }
 
-  results.sort((a, b) => a['Total Cost USD/MMBTU'] - b['Total Cost USD/MMBTU']);
+  results.sort((a, b) => a['Total Cost (USD/MMBTU)'] - b['Total Cost (USD/MMBTU)']);
   return results.slice(0, 20);
 }
 
@@ -575,10 +575,11 @@ async function runTwoVesselProbabilityModel(input) {
     return { kapal_1: [], kapal_2: [], total: [] };
   }
 
+  const Pyears = params.Penyaluran || 20;
+  const totalDemandBBTUD = Object.values(demandBBTUD).reduce((a, b) => a + b, 0);
   const seen = new Set();
-  let globalScenarioId = 0; // NEW
+  let globalScenarioId = 0;
 
-  // NEW: auto-partition all possible 2-vessel splits
   for (let n1 = 1; n1 <= n - 1; n1++) {
     for (const comb of combinations(selectedLocations, n1)) {
       const loc_k1 = comb.slice().sort();
@@ -612,61 +613,159 @@ async function runTwoVesselProbabilityModel(input) {
           } else if (enforceSameVessel) {
             if (k1['Nama Kapal'] !== k2['Nama Kapal'] || k1['Kapasitas Kapal (m3)'] !== k2['Kapasitas Kapal (m3)']) continue;
           }
+
+          const c_usd = k1['Total CAPEX (USD)'] + k2['Total CAPEX (USD)'];
+          const o_usd_year = k1['Total OPEX (USD/year)'] + k2['Total OPEX (USD/year)'];
+          const sys_cost = (c_usd + (o_usd_year * Pyears)) / (totalDemandBBTUD * 1000 * 365 * Pyears);
           
-          globalScenarioId += 1; // NEW
+          globalScenarioId += 1;
           total.push({
             'No. Skenario': globalScenarioId,
             'Probability': label,
-            'split_id': total.length,
             'Nama Kapal': k1['Nama Kapal'],
             'Kapasitas Kapal (m3)': k1['Kapasitas Kapal (m3)'],
+            // Kapal 1 details
             'Rute Kapal 1': k1['Rute'],
+            'Total Jarak Kapal 1 (NM)': k1['Total Jarak (NM)'],
+            'RTD Kapal 1': k1['RTD'],
+            'Demand LNG/day Kapal 1 (m3)': k1['Demand LNG/day (m3)'],
+            'Nominal Capacity Kapal 1 (m3)': k1['Nominal Capacity (m3)'],
+            'Speed Kapal 1 (knot)': k1['Speed (knot)'],
+            'buffer day Kapal 1': k1['buffer day'],
+            'days_stock Kapal 1': k1['days_stock'],
+            'voyages_year Kapal 1': k1['voyages_year'],
+            'Utilitasi_Factor_LNGC Kapal 1': k1['Utilitasi_Factor_LNGC'],
+            'Batas_Maksimum_Utilisasi_LNGC Kapal 1': k1['Batas_Maksimum_Utilisasi_LNGC'],
+            'selected_storage Total Kapal 1': k1['selected_storage Total'],
+            'fuel_voyage Kapal 1': k1['fuel_voyage'],
+            'fuel_ballast Kapal 1': k1['fuel_ballast'],
+            'fuel_berth Kapal 1': k1['fuel_berth'],
+            'lng_fuel_cost Kapal 1': k1['lng_fuel_cost'],
+            'port_cost Kapal 1': k1['port_cost'],
+            'rent_cost Kapal 1': k1['rent_cost'],
             'CAPEX Kapal 1': k1['Total CAPEX (USD)'],
+            'CAPEX USD/MMBTU Kapal 1': k1['Total CAPEX USD/MMBTU'],
             'OPEX Kapal 1': k1['Total OPEX (USD/year)'],
-            'Cost Kapal 1': k1['Total Cost USD/MMBTU'],
+            'OPEX USD/MMBTU Kapal 1': k1['Total OPEX (USD/MMBTU)'],
+            'Cost Kapal 1': k1['Total Cost (USD/MMBTU)'],
+            'Spokes Kapal 1': k1['Spokes'],
+            // Kapal 2 details
             'Rute Kapal 2': k2['Rute'],
+            'Total Jarak Kapal 2 (NM)': k2['Total Jarak (NM)'],
+            'RTD Kapal 2': k2['RTD'],
+            'Demand LNG/day Kapal 2 (m3)': k2['Demand LNG/day (m3)'],
+            'Nominal Capacity Kapal 2 (m3)': k2['Nominal Capacity (m3)'],
+            'Speed Kapal 2 (knot)': k2['Speed (knot)'],
+            'buffer day Kapal 2': k2['buffer day'],
+            'days_stock Kapal 2': k2['days_stock'],
+            'voyages_year Kapal 2': k2['voyages_year'],
+            'Utilitasi_Factor_LNGC Kapal 2': k2['Utilitasi_Factor_LNGC'],
+            'Batas_Maksimum_Utilisasi_LNGC Kapal 2': k2['Batas_Maksimum_Utilisasi_LNGC'],
+            'selected_storage Total Kapal 2': k2['selected_storage Total'],
+            'fuel_voyage Kapal 2': k2['fuel_voyage'],
+            'fuel_ballast Kapal 2': k2['fuel_ballast'],
+            'fuel_berth Kapal 2': k2['fuel_berth'],
+            'lng_fuel_cost Kapal 2': k2['lng_fuel_cost'],
+            'port_cost Kapal 2': k2['port_cost'],
+            'rent_cost Kapal 2': k2['rent_cost'],
             'CAPEX Kapal 2': k2['Total CAPEX (USD)'],
+            'CAPEX USD/MMBTU Kapal 2': k2['Total CAPEX USD/MMBTU'],
             'OPEX Kapal 2': k2['Total OPEX (USD/year)'],
-            'Cost Kapal 2': k2['Total Cost USD/MMBTU'],
-            'Total CAPEX (USD)': k1['Total CAPEX (USD)'] + k2['Total CAPEX (USD)'],
-            'Total OPEX (USD/year)': k1['Total OPEX (USD/year)'] + k2['Total OPEX (USD/year)'],
-            'Total Cost USD/MMBTU': k1['Total Cost USD/MMBTU'] + k2['Total Cost USD/MMBTU'],
-            'Lokasi Kapal 1': loc_k1.join(', '),
-            'Lokasi Kapal 2': loc_k2.join(', '),
+            'OPEX USD/MMBTU Kapal 2': k2['Total OPEX (USD/MMBTU)'],
+            'Cost Kapal 2': k2['Total Cost (USD/MMBTU)'],
+            'Spokes Kapal 2': k2['Spokes'],
+            // System totals
+            'System CAPEX (USD)': c_usd,
+            'System OPEX (USD/year)': o_usd_year,
+            'System Cost (USD/MMBTU)': sys_cost,
           });
         }
       }
     }
   }
 
-  total.sort((a, b) => a['Total Cost USD/MMBTU'] - b['Total Cost USD/MMBTU']);
+  total.sort((a, b) => a['System Cost (USD/MMBTU)'] - b['System Cost (USD/MMBTU)']);
   const topTotal = total.slice(0, 20);
 
+  // Build kapal_1 and kapal_2 tables with full columns
   const kapal_1 = topTotal.map(t => ({
     'No. Skenario': t['No. Skenario'],
     'Probability': t['Probability'],
     'Nama Kapal': t['Nama Kapal'],
-    'Kapasitas Kapal (m3)': t['Kapasitas Kapal (m3)'],
     'Rute': t['Rute Kapal 1'],
+    'Total Jarak (NM)': t['Total Jarak Kapal 1 (NM)'],
+    'RTD': t['RTD Kapal 1'],
+    'Demand LNG/day (m3)': t['Demand LNG/day Kapal 1 (m3)'],
+    'Nominal Capacity (m3)': t['Nominal Capacity Kapal 1 (m3)'],
+    'Kapasitas Kapal (m3)': t['Kapasitas Kapal (m3)'],
+    'Speed (knot)': t['Speed Kapal 1 (knot)'],
+    'buffer day': t['buffer day Kapal 1'],
+    'days_stock': t['days_stock Kapal 1'],
+    'voyages_year': t['voyages_year Kapal 1'],
+    'Utilitasi_Factor_LNGC': t['Utilitasi_Factor_LNGC Kapal 1'],
+    'Batas_Maksimum_Utilisasi_LNGC': t['Batas_Maksimum_Utilisasi_LNGC Kapal 1'],
+    'selected_storage Total': t['selected_storage Total Kapal 1'],
+    'fuel_voyage': t['fuel_voyage Kapal 1'],
+    'fuel_ballast': t['fuel_ballast Kapal 1'],
+    'fuel_berth': t['fuel_berth Kapal 1'],
+    'lng_fuel_cost': t['lng_fuel_cost Kapal 1'],
+    'port_cost': t['port_cost Kapal 1'],
+    'rent_cost': t['rent_cost Kapal 1'],
     'Total CAPEX (USD)': t['CAPEX Kapal 1'],
+    'Total CAPEX USD/MMBTU': t['CAPEX USD/MMBTU Kapal 1'],
     'Total OPEX (USD/year)': t['OPEX Kapal 1'],
-    'Total Cost USD/MMBTU': t['Cost Kapal 1'],
-    'Lokasi Kapal 1': t['Lokasi Kapal 1'],
+    'Total OPEX (USD/MMBTU)': t['Total OPEX (USD/MMBTU) Kapal 1'],
+    'Total Cost (USD/MMBTU)': t['Cost Kapal 1'],
+    'Spokes': t['Spokes Kapal 1'],
   }));
 
   const kapal_2 = topTotal.map(t => ({
     'No. Skenario': t['No. Skenario'],
     'Probability': t['Probability'],
     'Nama Kapal': t['Nama Kapal'],
-    'Kapasitas Kapal (m3)': t['Kapasitas Kapal (m3)'],
     'Rute': t['Rute Kapal 2'],
+    'Total Jarak (NM)': t['Total Jarak Kapal 2 (NM)'],
+    'RTD': t['RTD Kapal 2'],
+    'Demand LNG/day (m3)': t['Demand LNG/day Kapal 2 (m3)'],
+    'Nominal Capacity (m3)': t['Nominal Capacity Kapal 2 (m3)'],
+    'Kapasitas Kapal (m3)': t['Kapasitas Kapal (m3)'],
+    'Speed (knot)': t['Speed Kapal 2 (knot)'],
+    'buffer day': t['buffer day Kapal 2'],
+    'days_stock': t['days_stock Kapal 2'],
+    'voyages_year': t['voyages_year Kapal 2'],
+    'Utilitasi_Factor_LNGC': t['Utilitasi_Factor_LNGC Kapal 2'],
+    'Batas_Maksimum_Utilisasi_LNGC': t['Batas_Maksimum_Utilisasi_LNGC Kapal 2'],
+    'selected_storage Total': t['selected_storage Total Kapal 2'],
+    'fuel_voyage': t['fuel_voyage Kapal 2'],
+    'fuel_ballast': t['fuel_ballast Kapal 2'],
+    'fuel_berth': t['fuel_berth Kapal 2'],
+    'lng_fuel_cost': t['lng_fuel_cost Kapal 2'],
+    'port_cost': t['port_cost Kapal 2'],
+    'rent_cost': t['rent_cost Kapal 2'],
     'Total CAPEX (USD)': t['CAPEX Kapal 2'],
+    'Total CAPEX USD/MMBTU': t['Total CAPEX USD/MMBTU Kapal 2'],
     'Total OPEX (USD/year)': t['OPEX Kapal 2'],
-    'Total Cost USD/MMBTU': t['Cost Kapal 2'],
-    'Lokasi Kapal 2': t['Lokasi Kapal 2'],
+    'Total OPEX (USD/MMBTU)': t['Total OPEX (USD/MMBTU) Kapal 2'],
+    'Total Cost (USD/MMBTU)': t['Cost Kapal 2'],
+    'Spokes': t['Spokes Kapal 2'],
   }));
 
-  return { kapal_1, kapal_2, total: topTotal };
+  // System table (simplified gabungan)
+  const system = topTotal.map(t => ({
+    'No. Skenario': t['No. Skenario'],
+    'Probability': t['Probability'],
+    'Nama Kapal': t['Nama Kapal'],
+    'Kapasitas Kapal (m3)': t['Kapasitas Kapal (m3)'],
+    'Rute Kapal 1': t['Rute Kapal 1'],
+    'Spokes Kapal 1': t['Spokes Kapal 1'],
+    'Rute Kapal 2': t['Rute Kapal 2'],
+    'Spokes Kapal 2': t['Spokes Kapal 2'],
+    'System CAPEX (USD)': t['System CAPEX (USD)'],
+    'System OPEX (USD/year)': t['System OPEX (USD/year)'],
+    'System Cost (USD/MMBTU)': t['System Cost (USD/MMBTU)'],
+  }));
+
+  return { kapal_1, kapal_2, total: system };
 }
 
 // Twin vessel probability model (RISK)
@@ -685,10 +784,11 @@ async function runTwoVesselProbabilityModelRisk(input) {
     return { kapal_1: [], kapal_2: [], total: [] };
   }
 
+  const Pyears = params.Penyaluran || 20;
+  const totalDemandBBTUD = Object.values(demandBBTUD).reduce((a, b) => a + b, 0);
   const seen = new Set();
-  let globalScenarioId = 0; // NEW
+  let globalScenarioId = 0;
 
-  // NEW: auto-partition all possible 2-vessel splits
   for (let n1 = 1; n1 <= n - 1; n1++) {
     for (const comb of combinations(selectedLocations, n1)) {
       const loc_k1 = comb.slice().sort();
@@ -703,14 +803,12 @@ async function runTwoVesselProbabilityModelRisk(input) {
       const df1 = await runSupplyChainModelRisk({
         vessels, routes, oru, terminal,
         selectedLocations: loc_k1, demandBBTUD: demand_k1,
-        params, inflationFactor, riskDB,
-        geoMap,
+        params, inflationFactor, riskDB, geoMap,
       });
       const df2 = await runSupplyChainModelRisk({
         vessels, routes, oru, terminal,
         selectedLocations: loc_k2, demandBBTUD: demand_k2,
-        params, inflationFactor, riskDB,
-        geoMap,
+        params, inflationFactor, riskDB, geoMap,
       });
 
       if (!df1.length || !df2.length) continue;
@@ -724,61 +822,158 @@ async function runTwoVesselProbabilityModelRisk(input) {
           } else if (enforceSameVessel) {
             if (k1['Nama Kapal'] !== k2['Nama Kapal'] || k1['Kapasitas Kapal (m3)'] !== k2['Kapasitas Kapal (m3)']) continue;
           }
+
+          const c_usd = k1['Total CAPEX (USD)'] + k2['Total CAPEX (USD)'];
+          const o_usd_year = k1['Total OPEX (USD/year)'] + k2['Total OPEX (USD/year)'];
+          const sys_cost = (c_usd + (o_usd_year * Pyears)) / (totalDemandBBTUD * 1000 * 365 * Pyears);
           
-          globalScenarioId += 1; // NEW
+          globalScenarioId += 1;
           total.push({
             'No. Skenario': globalScenarioId,
             'Probability': label,
-            'split_id': total.length,
             'Nama Kapal': k1['Nama Kapal'],
             'Kapasitas Kapal (m3)': k1['Kapasitas Kapal (m3)'],
+            // Kapal 1 full details
             'Rute Kapal 1': k1['Rute'],
+            'Total Jarak Kapal 1 (NM)': k1['Total Jarak (NM)'],
+            'RTD Kapal 1': k1['RTD'],
+            'Demand LNG/day Kapal 1 (m3)': k1['Demand LNG/day (m3)'],
+            'Nominal Capacity Kapal 1 (m3)': k1['Nominal Capacity (m3)'],
+            'Speed Kapal 1 (knot)': k1['Speed (knot)'],
+            'buffer day Kapal 1': k1['buffer day'],
+            'days_stock Kapal 1': k1['days_stock'],
+            'voyages_year Kapal 1': k1['voyages_year'],
+            'Utilitasi_Factor_LNGC Kapal 1': k1['Utilitasi_Factor_LNGC'],
+            'Batas_Maksimum_Utilisasi_LNGC Kapal 1': k1['Batas_Maksimum_Utilisasi_LNGC'],
+            'selected_storage Total Kapal 1': k1['selected_storage Total'],
+            'fuel_voyage Kapal 1': k1['fuel_voyage'],
+            'fuel_ballast Kapal 1': k1['fuel_ballast'],
+            'fuel_berth Kapal 1': k1['fuel_berth'],
+            'lng_fuel_cost Kapal 1': k1['lng_fuel_cost'],
+            'port_cost Kapal 1': k1['port_cost'],
+            'rent_cost Kapal 1': k1['rent_cost'],
             'CAPEX Kapal 1': k1['Total CAPEX (USD)'],
+            'CAPEX USD/MMBTU Kapal 1': k1['Total CAPEX USD/MMBTU'],
             'OPEX Kapal 1': k1['Total OPEX (USD/year)'],
-            'Cost Kapal 1': k1['Total Cost USD/MMBTU'],
+            'OPEX USD/MMBTU Kapal 1': k1['Total OPEX (USD/MMBTU)'],
+            'Cost Kapal 1': k1['Total Cost (USD/MMBTU)'],
+            'Spokes Kapal 1': k1['Spokes'],
+            // Kapal 2 full details
             'Rute Kapal 2': k2['Rute'],
+            'Total Jarak Kapal 2 (NM)': k2['Total Jarak (NM)'],
+            'RTD Kapal 2': k2['RTD'],
+            'Demand LNG/day Kapal 2 (m3)': k2['Demand LNG/day (m3)'],
+            'Nominal Capacity Kapal 2 (m3)': k2['Nominal Capacity (m3)'],
+            'Speed Kapal 2 (knot)': k2['Speed (knot)'],
+            'buffer day Kapal 2': k2['buffer day'],
+            'days_stock Kapal 2': k2['days_stock'],
+            'voyages_year Kapal 2': k2['voyages_year'],
+            'Utilitasi_Factor_LNGC Kapal 2': k2['Utilitasi_Factor_LNGC'],
+            'Batas_Maksimum_Utilisasi_LNGC Kapal 2': k2['Batas_Maksimum_Utilisasi_LNGC'],
+            'selected_storage Total Kapal 2': k2['selected_storage Total'],
+            'fuel_voyage Kapal 2': k2['fuel_voyage'],
+            'fuel_ballast Kapal 2': k2['fuel_ballast'],
+            'fuel_berth Kapal 2': k2['fuel_berth'],
+            'lng_fuel_cost Kapal 2': k2['lng_fuel_cost'],
+            'port_cost Kapal 2': k2['port_cost'],
+            'rent_cost Kapal 2': k2['rent_cost'],
             'CAPEX Kapal 2': k2['Total CAPEX (USD)'],
+            'CAPEX USD/MMBTU Kapal 2': k2['Total CAPEX USD/MMBTU'],
             'OPEX Kapal 2': k2['Total OPEX (USD/year)'],
-            'Cost Kapal 2': k2['Total Cost USD/MMBTU'],
-            'Total CAPEX (USD)': k1['Total CAPEX (USD)'] + k2['Total CAPEX (USD)'],
-            'Total OPEX (USD/year)': k1['Total OPEX (USD/year)'] + k2['Total OPEX (USD/year)'],
-            'Total Cost USD/MMBTU': k1['Total Cost USD/MMBTU'] + k2['Total Cost USD/MMBTU'],
-            'Lokasi Kapal 1': loc_k1.join(', '),
-            'Lokasi Kapal 2': loc_k2.join(', '),
+            'OPEX USD/MMBTU Kapal 2': k2['Total OPEX (USD/MMBTU)'],
+            'Cost Kapal 2': k2['Total Cost (USD/MMBTU)'],
+            'Spokes Kapal 2': k2['Spokes'],
+            // System totals
+            'System CAPEX (USD)': c_usd,
+            'System OPEX (USD/year)': o_usd_year,
+            'System Cost (USD/MMBTU)': sys_cost,
           });
         }
       }
     }
   }
 
-  total.sort((a, b) => a['Total Cost USD/MMBTU'] - b['Total Cost USD/MMBTU']);
+  total.sort((a, b) => a['System Cost (USD/MMBTU)'] - b['System Cost (USD/MMBTU)']);
   const topTotal = total.slice(0, 20);
 
+  // Build kapal_1 and kapal_2 tables with full columns
   const kapal_1 = topTotal.map(t => ({
     'No. Skenario': t['No. Skenario'],
     'Probability': t['Probability'],
     'Nama Kapal': t['Nama Kapal'],
-    'Kapasitas Kapal (m3)': t['Kapasitas Kapal (m3)'],
     'Rute': t['Rute Kapal 1'],
+    'Total Jarak (NM)': t['Total Jarak Kapal 1 (NM)'],
+    'RTD': t['RTD Kapal 1'],
+    'Demand LNG/day (m3)': t['Demand LNG/day Kapal 1 (m3)'],
+    'Nominal Capacity (m3)': t['Nominal Capacity Kapal 1 (m3)'],
+    'Kapasitas Kapal (m3)': t['Kapasitas Kapal (m3)'],
+    'Speed (knot)': t['Speed Kapal 1 (knot)'],
+    'buffer day': t['buffer day Kapal 1'],
+    'days_stock': t['days_stock Kapal 1'],
+    'voyages_year': t['voyages_year Kapal 1'],
+    'Utilitasi_Factor_LNGC': t['Utilitasi_Factor_LNGC Kapal 1'],
+    'Batas_Maksimum_Utilisasi_LNGC': t['Batas_Maksimum_Utilisasi_LNGC Kapal 1'],
+    'selected_storage Total': t['selected_storage Total Kapal 1'],
+    'fuel_voyage': t['fuel_voyage Kapal 1'],
+    'fuel_ballast': t['fuel_ballast Kapal 1'],
+    'fuel_berth': t['fuel_berth Kapal 1'],
+    'lng_fuel_cost': t['lng_fuel_cost Kapal 1'],
+    'port_cost': t['port_cost Kapal 1'],
+    'rent_cost': t['rent_cost Kapal 1'],
     'Total CAPEX (USD)': t['CAPEX Kapal 1'],
+    'Total CAPEX USD/MMBTU': t['CAPEX USD/MMBTU Kapal 1'],
     'Total OPEX (USD/year)': t['OPEX Kapal 1'],
-    'Total Cost USD/MMBTU': t['Cost Kapal 1'],
-    'Lokasi Kapal 1': t['Lokasi Kapal 1'],
+    'Total OPEX (USD/MMBTU)': t['Total OPEX (USD/MMBTU) Kapal 1'],
+    'Total Cost (USD/MMBTU)': t['Cost Kapal 1'],
+    'Spokes': t['Spokes Kapal 1'],
   }));
 
   const kapal_2 = topTotal.map(t => ({
     'No. Skenario': t['No. Skenario'],
     'Probability': t['Probability'],
     'Nama Kapal': t['Nama Kapal'],
-    'Kapasitas Kapal (m3)': t['Kapasitas Kapal (m3)'],
     'Rute': t['Rute Kapal 2'],
+    'Total Jarak (NM)': t['Total Jarak Kapal 2 (NM)'],
+    'RTD': t['RTD Kapal 2'],
+    'Demand LNG/day (m3)': t['Demand LNG/day Kapal 2 (m3)'],
+    'Nominal Capacity (m3)': t['Nominal Capacity Kapal 2 (m3)'],
+    'Kapasitas Kapal (m3)': t['Kapasitas Kapal (m3)'],
+    'Speed (knot)': t['Speed Kapal 2 (knot)'],
+    'buffer day': t['buffer day Kapal 2'],
+    'days_stock': t['days_stock Kapal 2'],
+    'voyages_year': t['voyages_year Kapal 2'],
+    'Utilitasi_Factor_LNGC': t['Utilitasi_Factor_LNGC Kapal 2'],
+    'Batas_Maksimum_Utilisasi_LNGC': t['Batas_Maksimum_Utilisasi_LNGC Kapal 2'],
+    'selected_storage Total': t['selected_storage Total Kapal 2'],
+    'fuel_voyage': t['fuel_voyage Kapal 2'],
+    'fuel_ballast': t['fuel_ballast Kapal 2'],
+    'fuel_berth': t['fuel_berth Kapal 2'],
+    'lng_fuel_cost': t['lng_fuel_cost Kapal 2'],
+    'port_cost': t['port_cost Kapal 2'],
+    'rent_cost': t['rent_cost Kapal 2'],
     'Total CAPEX (USD)': t['CAPEX Kapal 2'],
+    'Total CAPEX USD/MMBTU': t['Total CAPEX USD/MMBTU Kapal 2'],
     'Total OPEX (USD/year)': t['OPEX Kapal 2'],
-    'Total Cost USD/MMBTU': t['Cost Kapal 2'],
-    'Lokasi Kapal 2': t['Lokasi Kapal 2'],
+    'Total OPEX (USD/MMBTU)': t['Total OPEX (USD/MMBTU) Kapal 2'],
+    'Total Cost (USD/MMBTU)': t['Cost Kapal 2'],
+    'Spokes': t['Spokes Kapal 2'],
   }));
 
-  return { kapal_1, kapal_2, total: topTotal };
+  const system = topTotal.map(t => ({
+    'No. Skenario': t['No. Skenario'],
+    'Probability': t['Probability'],
+    'Nama Kapal': t['Nama Kapal'],
+    'Kapasitas Kapal (m3)': t['Kapasitas Kapal (m3)'],
+    'Rute Kapal 1': t['Rute Kapal 1'],
+    'Spokes Kapal 1': t['Spokes Kapal 1'],
+    'Rute Kapal 2': t['Rute Kapal 2'],
+    'Spokes Kapal 2': t['Spokes Kapal 2'],
+    'System CAPEX (USD)': t['System CAPEX (USD)'],
+    'System OPEX (USD/year)': t['System OPEX (USD/year)'],
+    'System Cost (USD/MMBTU)': t['System Cost (USD/MMBTU)'],
+  }));
+
+  return { kapal_1, kapal_2, total: system };
 }
 
 // NEW: partition generator (port dari Python generate_partitions)
@@ -959,6 +1154,7 @@ async function runHubSpokeTwoVesselModelRisk(input) {
         'Rute': `${terminal} - ${hub} - ${terminal}`,
         'Total Jarak (NM)': dist * 2,
         'RTD (day)': rtd,
+        'RTD': rtd,
         'Demand LNG/day (m3)': dem_m3,
         'Nominal Capacity (m3)': nom_cap,
         'Kapasitas Kapal (m3)': k.capacityM3,
@@ -1032,11 +1228,8 @@ async function runHubSpokeTwoVesselModelRisk(input) {
 
       for (const k of kSorted) {
         const speed = k.speedKnot;
-
-        const lt =
-          params.loading_hour * (1 + impact_lt_II2) +
-          ruteLocs.length * params.loading_hour * (1 + impact_lt_II5);
-        const st = (tdist / speed) * (1 + im_s);
+        const lt = params.loading_hour * (1 + ruteLocs.length);
+        const st = tdist / speed;
         const rtd = (st + lt) / 24.0;
 
         const buf = roundUpDecimal((params.maintenance_days / 365.0) * rtd);
@@ -1060,8 +1253,7 @@ async function runHubSpokeTwoVesselModelRisk(input) {
         for (const l of ruteLocs) {
           const demL = demandBBTUD[l] || 0;
           const s_st = roundUp(
-            (((demL * 1000.0) / LNG_EC) * rtd +
-              buf * (demL * 1000.0) / LNG_EC) * params.gross_storage_pct,
+            (((demL * 1000.0) / LNG_EC) * rtd + buf * (demL * 1000.0) / LNG_EC) * params.gross_storage_pct,
             tankSize
           );
           sel_tot += s_st;
@@ -1166,7 +1358,7 @@ async function runHubSpokeTwoVesselModelRisk(input) {
 
         const c_usd = rm['Total CAPEX (USD)'] + f1['Total CAPEX (USD)'];
         const o_usd_year = rm['Total OPEX (USD/year)'] + f1['Total OPEX (USD/year)'];
-        const sys_cost = (c_usd + o_usd_year * Pyears) / (totCluster * 1000.0 * 365.0 * Pyears);
+        const sys_cost = (c_usd + (o_usd_year * Pyears)) / (totCluster * 1000.0 * 365.0 * Pyears);
 
         const row = {
           'No. Skenario': it_c,
@@ -1291,7 +1483,6 @@ async function runHubSpokeSingleModel(input) {
       rentPerDayUSD: v.rentPerDayUSD * inflationFactor,
       portCostLTP: v.portCostLTP * inflationFactor,
       portCostDelay: v.portCostDelay * inflationFactor,
-      portCostPerLocation: v.portCostPerLocation * inflationFactor,
     }))
     .sort((a, b) => a.capacityM3 - b.capacityM3);
 
@@ -1308,8 +1499,10 @@ async function runHubSpokeSingleModel(input) {
 
     for (const k of kSorted) {
       const speed = k.speedKnot;
-      const st = (dist * 2 / speed); // jam
-      const lt = params.loading_hour * 2; // loading + unloading
+      const st = (dist * 2 / speed) * (1 + im_s); // jam
+      const lt =
+        params.loading_hour * (1 + impact_lt_II2) +
+        params.loading_hour * (1 + impact_lt_II5); // jam
       const rtd = (st + lt) / 24.0;
 
       const buf = roundUpDecimal((params.maintenance_days / 365.0) * rtd);
@@ -1328,36 +1521,55 @@ async function runHubSpokeSingleModel(input) {
       const utMax = ((365.0 - params.maintenance_days) / 365.0) * 100.0;
       if (ut > utMax) continue;
 
-      const sel_st = roundUp((dem_m3 * rtd + buf * dem_m3) * params.gross_storage_pct, 100);
+      const sel_st = roundUp(
+        (dem_m3 * rtd + buf * dem_m3) * params.gross_storage_pct,
+        100
+      );
 
-      const tankCapexHub = (sel_st / tankSize) * tankPrice * inflationFactor;
+      const tankCapexHub = (sel_st / tankSize) * tankPrice * inflationFactor; // FIXED
       const oruHub = oruMap.get(hub) || 0;
-      const cap_hub = tankCapexHub + oruHub;
+      const cap_hub = tankCapexHub + oruHub * (1 + impact_capex_start);
 
       const oruTerm = oruMap.get(terminal) || 0;
-      const cap_term = k.capacityM3 < 20000 ? oruTerm : 0;
+      const cap_term =
+        k.capacityM3 < 20000 ? oruTerm * (1 + impact_capex_end) : 0;
 
       const t_cap = cap_hub + cap_term;
 
-      const fv = (dist * 2 / speed) / 24.0 * k.voyageTonPerDay;
-      const fb = (dist / speed) / 24.0 * k.ballastTonPerDay;
+      const fv = (dist * 2 / speed) * (1 + im_s) / 24.0 * k.voyageTonPerDay;
+      const fb = (dist / speed) * (1 + im_s) / 24.0 * k.ballastTonPerDay;
       const fbt = (lt / 24.0) * k.berthTonPerDay;
 
-      const lng_c = vy * (fv + fb + fbt) * (params.scf_lng / params.scf_mgo) * params.harga_lng;
-      const pc = vy * k.portCostLTP * 2 + vy * k.portCostDelay * 2;
+      const lng_c =
+        vy *
+        (fv + fb + fbt) *
+        (params.scf_lng / params.scf_mgo) *
+        params.harga_lng;
+
+      const port_ltp = k.portCostLTP;
+      const port_delay = k.portCostDelay;
+      const pc =
+        vy *
+          port_ltp *
+          (2 + gr('P1_Biaya_Operasi', 'II.2') + gr('P1_Biaya_Operasi', 'II.5')) +
+        vy * port_delay * 2;
+
       const rc = k.rentPerDayUSD * 365.0;
 
-      const op_hub = cap_hub * 0.05;
-      const op_term = cap_term * 0.05;
+      const op_hub = cap_hub * 0.05 * (1 + impact_opex_start);
+      const op_term = cap_term * 0.05 * (1 + impact_opex_end);
       const t_op = lng_c + pc + rc + op_hub + op_term;
 
-      const c_unit = t_cap / (totDemBBTUD * 1000.0 * 365.0 * Pyears);
-      const o_unit = t_op / (totDemBBTUD * 1000.0 * 365.0);
+      const c_unit =
+        t_cap / (totDemBBTUD * 1000.0 * 365.0 * Pyears);
+      const o_unit =
+        t_op / (totDemBBTUD * 1000.0 * 365.0);
 
       rows.push({
         'Nama Kapal': k.name,
         'Rute': `${terminal} - ${hub} - ${terminal}`,
         'Total Jarak (NM)': dist * 2,
+        'RTD (day)': rtd,
         'RTD': rtd,
         'Demand LNG/day (m3)': dem_m3,
         'Nominal Capacity (m3)': nom_cap,
@@ -1382,7 +1594,7 @@ async function runHubSpokeSingleModel(input) {
         'Total Cost (USD/MMBTU)': c_unit + o_unit,
       });
 
-      if (rows.length === 3) break;
+      if (rows.length === 3) break; // maksimal 3 kandidat mother per Hub
     }
     return rows;
   }
@@ -1392,6 +1604,23 @@ async function runHubSpokeSingleModel(input) {
     const demTot = ruteLocs.reduce((s, l) => s + (demandBBTUD[l] || 0), 0);
     const dem_m3 = (demTot * 1000.0) / LNG_EC;
     const res = [];
+
+    const impact_capex_6 = gr('P3_Biaya_Investasi', 'II.6');
+    const impact_capex_7 = gr('P3_Biaya_Investasi', 'II.7');
+    const impact_capex_8 = gr('P3_Biaya_Investasi', 'II.8');
+    const impact_capex_start = (impact_capex_6 + impact_capex_7 + impact_capex_8) / 3 || 0;
+
+    const risk_opex_6 = gr('P1_Biaya_Operasi', 'II.6');
+    const risk_opex_7 = gr('P1_Biaya_Operasi', 'II.7');
+    const risk_opex_8 = gr('P1_Biaya_Operasi', 'II.8');
+    const impact_opex_start = (risk_opex_6 + risk_opex_7 + risk_opex_8) / 3 || 0;
+    const impact_opex_end = gr('P1_Biaya_Operasi', 'II.1');
+
+    const impact_lt_II2 = gr('P2_Durasi', 'II.2');
+    const impact_lt_II5 = gr('P2_Durasi', 'II.5');
+
+    const impact_port_start = gr('P1_Biaya_Operasi', 'II.2');
+    const impact_port_next = gr('P1_Biaya_Operasi', 'II.5');
 
     const perms = permutations(ruteLocs);
     for (const p of perms) {
@@ -1404,7 +1633,10 @@ async function runHubSpokeSingleModel(input) {
         const origin = fr[i];
         const dest = fr[i + 1];
         const d = getDistanceNM(distMap, origin, dest, geoMap);
-        if (!d) { valid = false; break; }
+        if (!d) {
+          valid = false;
+          break;
+        }
         tdist += d;
         legs.push(d);
       }
@@ -1443,34 +1675,54 @@ async function runHubSpokeSingleModel(input) {
           sel_tot += s_st;
           const tankCapex = (s_st / tankSize) * tankPrice * inflationFactor;
           const oruL = oruMap.get(l) || 0;
-          cap_locs += tankCapex + oruL;
+          cap_locs += tankCapex + oruL * (1 + impact_capex_start);
         }
 
-        const t_cap = cap_locs;
+        const cap_term = 0; // feeder tidak menanggung ORU terminal
+        const t_cap = cap_locs + cap_term;
 
-        let fv = 0.0, fb = 0.0;
+        let fv = 0.0;
+        let fb = 0.0;
         for (let i = 0; i < legs.length; i++) {
-          const t_leg = legs[i] / speed;
+          const d = legs[i];
+          const t_leg = (d / speed) * (1 + im_s);
           fv += (t_leg / 24.0) * k.voyageTonPerDay;
-          if (i === legs.length - 1) fb += (t_leg / 24.0) * k.ballastTonPerDay;
+          if (i === legs.length - 1) {
+            fb += (t_leg / 24.0) * k.ballastTonPerDay;
+          }
         }
         const fbt = (lt / 24.0) * k.berthTonPerDay;
 
-        const lng_c = vy * (fv + fb + fbt) * (params.scf_lng / params.scf_mgo) * params.harga_lng;
-        const pc = vy * k.portCostLTP * (1 + ruteLocs.length) + vy * k.portCostDelay * (1 + ruteLocs.length);
+        const lng_c =
+          vy *
+          (fv + fb + fbt) *
+          (params.scf_lng / params.scf_mgo) *
+          params.harga_lng;
+
+        const port_ltp = k.portCostLTP;
+        const port_delay = k.portCostDelay;
+        const port_start_per_voyage =
+          port_ltp * (1 + impact_port_start) + port_delay;
+        const port_next_per_voyage =
+          ruteLocs.length * (port_ltp * (1 + impact_port_next) + port_delay);
+        const pc = vy * (port_start_per_voyage + port_next_per_voyage);
+
         const rc = k.rentPerDayUSD * 365.0;
 
-        const op_locs = cap_locs * 0.05;
-        const t_op = lng_c + pc + rc + op_locs;
+        const op_locs = cap_locs * 0.05 * (1 + impact_opex_start);
+        const op_term = 0;
+        const t_op = lng_c + pc + rc + op_locs + op_term;
 
-        const c_unit = t_cap / (demTot * 1000.0 * 365.0 * Pyears);
-        const o_unit = t_op / (demTot * 1000.0 * 365.0);
+        const c_unit =
+          t_cap / (demTot * 1000.0 * 365.0 * Pyears);
+        const o_unit =
+          t_op / (demTot * 1000.0 * 365.0);
 
         res.push({
           'Nama Kapal': k.name,
           'Rute': fr.join(' - '),
           'Total Jarak (NM)': tdist,
-          'RTD': rtd,
+          'RTD (day)': rtd,
           'Demand LNG/day (m3)': dem_m3,
           'Nominal Capacity (m3)': nom_cap,
           'Kapasitas Kapal (m3)': k.capacityM3,
@@ -1495,9 +1747,10 @@ async function runHubSpokeSingleModel(input) {
           'Spokes': ruteLocs.join(', '),
         });
 
-        if (res.length >= 3) break;
+        if (res.length >= 3) break; // max 3 feeder candidate per subset
       }
     }
+
     return res;
   }
 
@@ -1507,7 +1760,7 @@ async function runHubSpokeSingleModel(input) {
 
   for (const hub of locs) {
     const spk_all = locs.filter(x => x !== hub);
-    if (spk_all.length === 0) continue;
+    if (numV > spk_all.length) continue;
 
     const motherRows = calcMother(hub, totCluster);
     if (!motherRows.length) continue;
@@ -1521,7 +1774,7 @@ async function runHubSpokeSingleModel(input) {
 
         const c_usd = rm['Total CAPEX (USD)'] + f1['Total CAPEX (USD)'];
         const o_usd_year = rm['Total OPEX (USD/year)'] + f1['Total OPEX (USD/year)'];
-        const sys_cost = (c_usd + o_usd_year * Pyears) / (totCluster * 1000.0 * 365.0 * Pyears);
+        const sys_cost = (c_usd + (o_usd_year * Pyears)) / (totCluster * 1000.0 * 365.0 * Pyears);
 
         const row = {
           'No. Skenario': it_c,
@@ -1539,33 +1792,72 @@ async function runHubSpokeSingleModel(input) {
     }
   }
 
-  if (!allCombos.length) return { mother: [], feeder1: [], system: [] };
+  if (!allCombos.length) {
+    return { mother: [], feeder1: [], system: [] };
+  }
 
-  const sortedAll = allCombos.sort((a, b) => a['System Cost (USD/MMBTU)'] - b['System Cost (USD/MMBTU)']).slice(0, 20);
+  // Sort & ambil Top 20 global
+  const sortedAll = allCombos
+    .slice()
+    .sort((a, b) => a['System Cost (USD/MMBTU)'] - b['System Cost (USD/MMBTU)'])
+    .slice(0, 20);
 
+  // Mother table
   const mother = sortedAll.map(r => {
-    const out = { 'No. Skenario': r['No. Skenario'], 'Skenario Hub': r['Skenario Hub'] };
-    for (const [k, v] of Object.entries(r)) if (k.startsWith('M_')) out[k.substring(2)] = v;
+    const out = {
+      'No. Skenario': r['No. Skenario'],
+      'Skenario Hub': r['Skenario Hub'],
+    };
+    for (const [k, v] of Object.entries(r)) {
+      if (k.startsWith('M_')) {
+        out[k.substring(2)] = v; // buang prefix "M_"
+      }
+    }
     return out;
   });
 
+  // Feeder 1 table
   const feeder1 = sortedAll.map(r => {
-    const out = { 'No. Skenario': r['No. Skenario'], 'Skenario Hub': r['Skenario Hub'] };
-    for (const [k, v] of Object.entries(r)) if (k.startsWith('F1_')) out[k.substring(3)] = v;
+    const out = {
+      'No. Skenario': r['No. Skenario'],
+      'Skenario Hub': r['Skenario Hub'],
+    };
+    for (const [k, v] of Object.entries(r)) {
+      if (k.startsWith('F1_')) {
+        out[k.substring(3)] = v; // buang prefix "F1_"
+      }
+    }
     return out;
   });
 
+  // Feeder 2 table
+  const feeder2 = sortedAll.map(r => {
+    const out = {
+      'No. Skenario': r['No. Skenario'],
+      'Skenario Hub': r['Skenario Hub'],
+    };
+    for (const [k, v] of Object.entries(r)) {
+      if (k.startsWith('F2_')) {
+        out[k.substring(3)] = v; // buang prefix "F2_"
+      }
+    }
+    return out;
+  });
+
+  // System gabungan (ringkas)
   const system = sortedAll.map(r => ({
     'No. Skenario': r['No. Skenario'],
     'Skenario Hub': r['Skenario Hub'],
-    'M_Nama Kapal 1 (Mother)': r['M_Nama Kapal'],
-    'F1_Nama Kapal 2 (Feeder 1)': r['F1_Nama Kapal'],
+    'Probability': r['Probability'],
+    'M_Nama Kapal 1 (Mother)': r['M_Nama Kapal'] || r['M_Nama Kapal '],
+    'F1_Nama Kapal 2 (Feeder 1)': r['F1_Nama Kapal'] || null,
+    'F2_Nama Kapal 3 (Feeder 2)': r['F2_Nama Kapal'] || null,
     'System CAPEX (USD)': r['System CAPEX (USD)'],
     'System OPEX (USD/year)': r['System OPEX (USD/year)'],
     'System Cost (USD/MMBTU)': r['System Cost (USD/MMBTU)'],
   }));
 
-  return { mother, feeder1, system };
+  return { mother, feeder1, feeder2, system };
 }
 
 /**
@@ -1636,6 +1928,380 @@ async function runHubSpokeTwoVesselModel(input) {
 
 // ...existing runHubSpokeTwoVesselModelRisk...
 
+/**
+ * N-Vessel Probability Model (Milk-Run, NO-RISK)
+ * Membagi lokasi menjadi N subset dan menjalankan engine single untuk setiap subset
+ */
+async function runNVesselProbabilityModel(input) {
+  const {
+    vessels, routes, oru, terminal, selectedLocations, demandBBTUD,
+    params, inflationFactor,
+    numVessels = 2,
+    enforceSameVessel = true,
+    vesselNames,
+    shareTerminalORU = true,
+    geoMap,
+  } = input;
+
+  const n = selectedLocations.length;
+  if (n < numVessels) {
+    const emptyResult = { system: [] };
+    for (let i = 1; i <= numVessels; i++) emptyResult[`kapal_${i}`] = [];
+    return emptyResult;
+  }
+
+  const Pyears = params.Penyaluran || 20;
+  const totalDemandBBTUD = Object.values(demandBBTUD).reduce((a, b) => a + b, 0);
+  const allCombos = [];
+  let globalScenarioId = 0;
+
+  // Generate all partitions of locations into numVessels subsets
+  const partitions = generatePartitions(selectedLocations, numVessels);
+
+  for (const partition of partitions) {
+    // Skip jika ada subset kosong
+    if (partition.some(subset => subset.length === 0)) continue;
+
+    // Run engine untuk setiap subset
+    const subResults = [];
+    let allValid = true;
+
+    for (let i = 0; i < numVessels; i++) {
+      const subset = partition[i];
+      const subsetDemand = Object.fromEntries(subset.map(k => [k, demandBBTUD[k]]));
+      
+      const df = await runSupplyChainModel({
+        vessels, routes, oru, terminal,
+        selectedLocations: subset,
+        demandBBTUD: subsetDemand,
+        params, inflationFactor,
+        shareTerminalORU,
+        geoMap,
+      });
+
+      if (!df.length) {
+        allValid = false;
+        break;
+      }
+
+      // Ambil top candidates (limit untuk performa)
+      const topN = numVessels <= 2 ? 50 : (numVessels <= 3 ? 20 : 10);
+      subResults.push(df.slice(0, topN));
+    }
+
+    if (!allValid) continue;
+
+    // Cross-join semua kombinasi kapal
+    const crossJoin = (arrays) => {
+      if (arrays.length === 0) return [[]];
+      const [first, ...rest] = arrays;
+      const restCombos = crossJoin(rest);
+      const result = [];
+      for (const item of first) {
+        for (const combo of restCombos) {
+          result.push([item, ...combo]);
+        }
+      }
+      return result;
+    };
+
+    const allKapalCombos = crossJoin(subResults);
+
+    for (const kapalCombo of allKapalCombos) {
+      // Check twin constraint
+      if (enforceSameVessel) {
+        const firstVessel = kapalCombo[0]['Nama Kapal'];
+        const firstCapacity = kapalCombo[0]['Kapasitas Kapal (m3)'];
+        const allSame = kapalCombo.every(k => 
+          k['Nama Kapal'] === firstVessel && k['Kapasitas Kapal (m3)'] === firstCapacity
+        );
+        if (!allSame) continue;
+      }
+
+      // Check vesselNames constraint
+      if (Array.isArray(vesselNames) && vesselNames.length === numVessels) {
+        let match = true;
+        for (let i = 0; i < numVessels; i++) {
+          if (kapalCombo[i]['Nama Kapal'] !== vesselNames[i]) {
+            match = false;
+            break;
+          }
+        }
+        if (!match) continue;
+      }
+
+      // Calculate system cost
+      const c_usd = kapalCombo.reduce((sum, k) => sum + k['Total CAPEX (USD)'], 0);
+      const o_usd_year = kapalCombo.reduce((sum, k) => sum + k['Total OPEX (USD/year)'], 0);
+      const sys_cost = (c_usd + (o_usd_year * Pyears)) / (totalDemandBBTUD * 1000 * 365 * Pyears);
+
+      globalScenarioId += 1;
+
+      const row = {
+        'No. Skenario': globalScenarioId,
+        'Probability': partition.map(p => p.length).join(':'),
+        'Nama Kapal': kapalCombo[0]['Nama Kapal'],
+        'Kapasitas Kapal (m3)': kapalCombo[0]['Kapasitas Kapal (m3)'],
+      };
+
+      // Add details for each kapal
+      for (let i = 0; i < numVessels; i++) {
+        const k = kapalCombo[i];
+        const prefix = `Kapal ${i + 1}`;
+        row[`Rute ${prefix}`] = k['Rute'];
+        row[`Total Jarak ${prefix} (NM)`] = k['Total Jarak (NM)'];
+        row[`RTD ${prefix}`] = k['RTD'];
+        row[`Demand LNG/day ${prefix} (m3)`] = k['Demand LNG/day (m3)'];
+        row[`Nominal Capacity ${prefix} (m3)`] = k['Nominal Capacity (m3)'];
+        row[`Utilitasi_Factor_LNGC ${prefix}`] = k['Utilitasi_Factor_LNGC'];
+        row[`CAPEX ${prefix}`] = k['Total CAPEX (USD)'];
+        row[`OPEX ${prefix}`] = k['Total OPEX (USD/year)'];
+        row[`Cost ${prefix}`] = k['Total Cost (USD/MMBTU)'];
+        row[`Spokes ${prefix}`] = k['Spokes'];
+      }
+
+      row['System CAPEX (USD)'] = c_usd;
+      row['System OPEX (USD/year)'] = o_usd_year;
+      row['System Cost (USD/MMBTU)'] = sys_cost;
+
+      allCombos.push({ row, kapalCombo, partition });
+    }
+  }
+
+  // Sort and get top 20
+  allCombos.sort((a, b) => a.row['System Cost (USD/MMBTU)'] - b.row['System Cost (USD/MMBTU)']);
+  const top20 = allCombos.slice(0, 20);
+
+  // Build output tables
+  const result = { system: [] };
+  for (let i = 1; i <= numVessels; i++) {
+    result[`kapal_${i}`] = [];
+  }
+
+  for (const { row, kapalCombo } of top20) {
+    result.system.push({
+      'No. Skenario': row['No. Skenario'],
+      'Probability': row['Probability'],
+      'Nama Kapal': row['Nama Kapal'],
+      'Kapasitas Kapal (m3)': row['Kapasitas Kapal (m3)'],
+      'System CAPEX (USD)': row['System CAPEX (USD)'],
+      'System OPEX (USD/year)': row['System OPEX (USD/year)'],
+      'System Cost (USD/MMBTU)': row['System Cost (USD/MMBTU)'],
+    });
+
+    for (let i = 0; i < numVessels; i++) {
+      const k = kapalCombo[i];
+      result[`kapal_${i + 1}`].push({
+        'No. Skenario': row['No. Skenario'],
+        'Probability': row['Probability'],
+        ...k,
+      });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * N-Vessel Probability Model (Milk-Run, WITH RISK)
+ */
+async function runNVesselProbabilityModelRisk(input) {
+  const {
+    vessels, routes, oru, terminal, selectedLocations, demandBBTUD,
+    params, inflationFactor, riskDB,
+    numVessels = 2,
+    enforceSameVessel = true,
+    vesselNames,
+    shareTerminalORU = true,
+    geoMap,
+  } = input;
+
+  const n = selectedLocations.length;
+  if (n < numVessels) {
+    const emptyResult = { system: [] };
+    for (let i = 1; i <= numVessels; i++) emptyResult[`kapal_${i}`] = [];
+    return emptyResult;
+  }
+
+  const Pyears = params.Penyaluran || 20;
+  const totalDemandBBTUD = Object.values(demandBBTUD).reduce((a, b) => a + b, 0);
+  const allCombos = [];
+  let globalScenarioId = 0;
+
+  const partitions = generatePartitions(selectedLocations, numVessels);
+
+  for (const partition of partitions) {
+    if (partition.some(subset => subset.length === 0)) continue;
+
+    const subResults = [];
+    let allValid = true;
+
+    for (let i = 0; i < numVessels; i++) {
+      const subset = partition[i];
+      const subsetDemand = Object.fromEntries(subset.map(k => [k, demandBBTUD[k]]));
+      
+      const df = await runSupplyChainModelRisk({
+        vessels, routes, oru, terminal,
+        selectedLocations: subset,
+        demandBBTUD: subsetDemand,
+        params, inflationFactor, riskDB, geoMap,
+      });
+
+      if (!df.length) {
+        allValid = false;
+        break;
+      }
+
+      const topN = numVessels <= 2 ? 50 : (numVessels <= 3 ? 20 : 10);
+      subResults.push(df.slice(0, topN));
+    }
+
+    if (!allValid) continue;
+
+    const crossJoin = (arrays) => {
+      if (arrays.length === 0) return [[]];
+      const [first, ...rest] = arrays;
+      const restCombos = crossJoin(rest);
+      const result = [];
+      for (const item of first) {
+        for (const combo of restCombos) {
+          result.push([item, ...combo]);
+        }
+      }
+      return result;
+    };
+
+    const allKapalCombos = crossJoin(subResults);
+
+    for (const kapalCombo of allKapalCombos) {
+      if (enforceSameVessel) {
+        const firstVessel = kapalCombo[0]['Nama Kapal'];
+        const firstCapacity = kapalCombo[0]['Kapasitas Kapal (m3)'];
+        const allSame = kapalCombo.every(k => 
+          k['Nama Kapal'] === firstVessel && k['Kapasitas Kapal (m3)'] === firstCapacity
+        );
+        if (!allSame) continue;
+      }
+
+      if (Array.isArray(vesselNames) && vesselNames.length === numVessels) {
+        let match = true;
+        for (let i = 0; i < numVessels; i++) {
+          if (kapalCombo[i]['Nama Kapal'] !== vesselNames[i]) {
+            match = false;
+            break;
+          }
+        }
+        if (!match) continue;
+      }
+
+      const c_usd = kapalCombo.reduce((sum, k) => sum + k['Total CAPEX (USD)'], 0);
+      const o_usd_year = kapalCombo.reduce((sum, k) => sum + k['Total OPEX (USD/year)'], 0);
+      const sys_cost = (c_usd + (o_usd_year * Pyears)) / (totalDemandBBTUD * 1000 * 365 * Pyears);
+
+      globalScenarioId += 1;
+
+      const row = {
+        'No. Skenario': globalScenarioId,
+        'Probability': partition.map(p => p.length).join(':'),
+        'Nama Kapal': kapalCombo[0]['Nama Kapal'],
+        'Kapasitas Kapal (m3)': kapalCombo[0]['Kapasitas Kapal (m3)'],
+      };
+
+      for (let i = 0; i < numVessels; i++) {
+        const k = kapalCombo[i];
+        const prefix = `Kapal ${i + 1}`;
+        row[`Rute ${prefix}`] = k['Rute'];
+        row[`Total Jarak ${prefix} (NM)`] = k['Total Jarak (NM)'];
+        row[`RTD ${prefix}`] = k['RTD'];
+        row[`Demand LNG/day ${prefix} (m3)`] = k['Demand LNG/day (m3)'];
+        row[`Nominal Capacity ${prefix} (m3)`] = k['Nominal Capacity (m3)'];
+        row[`Utilitasi_Factor_LNGC ${prefix}`] = k['Utilitasi_Factor_LNGC'];
+        row[`CAPEX ${prefix}`] = k['Total CAPEX (USD)'];
+        row[`OPEX ${prefix}`] = k['Total OPEX (USD/year)'];
+        row[`Cost ${prefix}`] = k['Total Cost (USD/MMBTU)'];
+        row[`Spokes ${prefix}`] = k['Spokes'];
+      }
+
+      row['System CAPEX (USD)'] = c_usd;
+      row['System OPEX (USD/year)'] = o_usd_year;
+      row['System Cost (USD/MMBTU)'] = sys_cost;
+
+      allCombos.push({ row, kapalCombo, partition });
+    }
+  }
+
+  allCombos.sort((a, b) => a.row['System Cost (USD/MMBTU)'] - b.row['System Cost (USD/MMBTU)']);
+  const top20 = allCombos.slice(0, 20);
+
+  const result = { system: [] };
+  for (let i = 1; i <= numVessels; i++) {
+    result[`kapal_${i}`] = [];
+  }
+
+  for (const { row, kapalCombo } of top20) {
+    result.system.push({
+      'No. Skenario': row['No. Skenario'],
+      'Probability': row['Probability'],
+      'Nama Kapal': row['Nama Kapal'],
+      'Kapasitas Kapal (m3)': row['Kapasitas Kapal (m3)'],
+      'System CAPEX (USD)': row['System CAPEX (USD)'],
+      'System OPEX (USD/year)': row['System OPEX (USD/year)'],
+      'System Cost (USD/MMBTU)': row['System Cost (USD/MMBTU)'],
+    });
+
+    for (let i = 0; i < numVessels; i++) {
+      const k = kapalCombo[i];
+      result[`kapal_${i + 1}`].push({
+        'No. Skenario': row['No. Skenario'],
+        'Probability': row['Probability'],
+        ...k,
+      });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Hub & Spoke N-Vessel Model (NO-RISK)
+ */
+async function runHubSpokeNVesselModel(input) {
+  const emptyRiskDB = {
+    P1_Biaya_Operasi: {}, P2_Durasi: {}, P3_Biaya_Investasi: {},
+    P4_Panjang_Jalur: {}, P5_Kecepatan_Kapal: {},
+  };
+  return runHubSpokeNVesselModelRisk({ ...input, riskDB: emptyRiskDB });
+}
+
+/**
+ * Hub & Spoke N-Vessel Model (WITH RISK)
+ */
+async function runHubSpokeNVesselModelRisk(input) {
+  const {
+    vessels, routes, oru, terminal,
+    selectedLocations: locs, demandBBTUD,
+    params, inflationFactor, riskDB, geoMap,
+    numFeeders = 2,
+    enforceSameVessel = true,
+  } = input;
+
+  if (!Array.isArray(locs) || locs.length === 0) {
+    const emptyResult = { mother: [], system: [] };
+    for (let i = 1; i <= numFeeders; i++) emptyResult[`feeder${i}`] = [];
+    return emptyResult;
+  }
+
+  // For now, delegate to existing 2-vessel implementation if numFeeders <= 2
+  if (numFeeders <= 2) {
+    return runHubSpokeTwoVesselModelRisk(input);
+  }
+
+  // TODO: Implement full N-feeder logic (similar pattern to runNVesselProbabilityModelRisk)
+  // This is a placeholder - full implementation would follow same partition pattern
+  console.warn(`Hub & Spoke ${numFeeders}-feeder belum diimplementasi penuh, fallback ke 2-feeder`);
+  return runHubSpokeTwoVesselModelRisk({ ...input, numFeeders: 2 });
+}
+
 module.exports = {
   runSupplyChainModel,
   runTwoVesselProbabilityModel,
@@ -1646,4 +2312,9 @@ module.exports = {
   runHubSpokeSingleModelRisk,
   runHubSpokeTwoVesselModel,
   runHubSpokeTwoVesselModelRisk,
+  // NEW: N-vessel engines
+  runNVesselProbabilityModel,
+  runNVesselProbabilityModelRisk,
+  runHubSpokeNVesselModel,
+  runHubSpokeNVesselModelRisk,
 };

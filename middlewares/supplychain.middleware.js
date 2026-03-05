@@ -72,61 +72,78 @@ function validateSupplyChainInput(req, res, next) {
     if (Object.keys(geo).length === 0) geo = undefined;
   }
 
-  // NORMALISASI daftar kapal yang dipakai (optional multi-select)
-  let normVessels;
-  if (Array.isArray(b.vessels)) {
+  // NORMALISASI numVessels (jumlah kapal): angka 1, 2, 3, dst.
+  let numVessels = 1;
+  if (typeof b.numVessels === 'number' && Number.isInteger(b.numVessels) && b.numVessels >= 1) {
+    numVessels = b.numVessels;
+  } else if (typeof b.twin === 'object' && b.twin) {
+    // backward compat: jika ada twin object, artinya 2 kapal
+    numVessels = 2;
+  }
+
+  // Validasi: numVessels tidak boleh lebih dari jumlah lokasi
+  if (numVessels > normLocations.length) {
+    return res.status(400).json({ 
+      error: `numVessels (${numVessels}) tidak boleh lebih besar dari jumlah lokasi (${normLocations.length})` 
+    });
+  }
+
+  // normalize vessels list (optional filter)
+  let normVessels = undefined;
+  if (Array.isArray(b.vessels) && b.vessels.length > 0) {
     normVessels = [...new Set(
       b.vessels
         .filter((n) => typeof n === 'string')
         .map((n) => n.trim())
         .filter(Boolean)
-    )];
-    if (!normVessels.length) normVessels = undefined;
+    )].sort();
   }
 
-  // canonical body for hashing (pakai daftar terminals, tanpa ratios)
+  // canonical body for hashing
   const canonical = stableStringify({
-    terminals: [...terminals].sort(),                        // NEW
-    terminal_primary: primaryTerminal,                       // NEW (kompat)
+    terminals: [...terminals].sort(),
+    terminal_primary: primaryTerminal,
     locations: [...normLocations].sort(),
     params: b.params,
     demand: Object.keys(b.demand).sort().reduce((acc, k) => { acc[k] = b.demand[k]; return acc; }, {}),
     base_year: b.base_year ?? 2022,
     method: rawMethod,
-    twin: b.twin ? {
-      enforceSameVessel: !!b.twin.enforceSameVessel,
-      vesselNames: Array.isArray(b.twin.vesselNames)
-        ? [...new Set(b.twin.vesselNames.filter((n) => typeof n === 'string').map((n) => n.trim()).filter(Boolean))].sort()
+    numVessels,
+    vesselConfig: b.vesselConfig ? {
+      enforceSameVessel: !!b.vesselConfig.enforceSameVessel,
+      vesselNames: Array.isArray(b.vesselConfig.vesselNames)
+        ? [...new Set(b.vesselConfig.vesselNames.filter((n) => typeof n === 'string').map((n) => n.trim()).filter(Boolean))].sort()
         : undefined,
-      shareTerminalORU: !!b.twin.shareTerminalORU,
+      shareTerminalORU: !!b.vesselConfig.shareTerminalORU,
     } : undefined,
     risk: b.risk || undefined,
     geo,
-    vessels: normVessels,        // NEW: daftar nama kapal (kandidat)
+    vessels: normVessels,
   });
   req.runKey = crypto.createHash('sha256').update(canonical).digest('hex');
 
   // attach normalized fields
   req.body.method = rawMethod;
-  req.body.terminals = terminals;          // NEW: full list
-  req.body.terminal = primaryTerminal;     // tetap ada untuk kompat
+  req.body.terminals = terminals;
+  req.body.terminal = primaryTerminal;
   req.body.locations = normLocations;
+  req.body.numVessels = numVessels;
+  req.body.vessels = normVessels; // attach normalized vessels
 
-  if (b.twin) {
-    req.body.twin = {
+  // vesselConfig (pengganti twin)
+  if (b.vesselConfig) {
+    req.body.vesselConfig = {
+      enforceSameVessel: !!b.vesselConfig.enforceSameVessel,
+      vesselNames: Array.isArray(b.vesselConfig.vesselNames) ? b.vesselConfig.vesselNames : undefined,
+      shareTerminalORU: !!b.vesselConfig.shareTerminalORU,
+    };
+  } else if (b.twin) {
+    // backward compat
+    req.body.vesselConfig = {
       enforceSameVessel: !!b.twin.enforceSameVessel,
       vesselNames: Array.isArray(b.twin.vesselNames) ? b.twin.vesselNames : undefined,
       shareTerminalORU: !!b.twin.shareTerminalORU,
     };
-  }
-  if (normVessels) {
-    req.body.vessels = normVessels;  // NEW: kapal yang dipilih user (multi-select)
-  }
-  if (b.risk && typeof b.risk === 'object') {
-    req.body.risk = b.risk;
-  }
-  if (geo) {
-    req.body.geo = geo;
   }
 
   next();
