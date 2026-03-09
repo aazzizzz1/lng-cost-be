@@ -463,7 +463,16 @@ async function main() {
     {
       riskCode: 'R11',
       variable: 'Masalah akses darat',
-      values: {}
+      values: {
+        "II.1 P1_BOP": 0, "II.1 P2_Durasi": 0, "II.1 P3_BIV": 0,
+        "II.2 P1_BOP": 0, "II.2 P2_Durasi": 0, "II.2 P3_BIV": 0, "II.2 P4_Panjang Jalur": 0, "II.2 P5_Kecepatan Kapal": 0,
+        "II.3 P1_BOP": 0, "II.3 P2_Durasi": 0, "II.3 P3_BIV": 0, "II.3 P4_Panjang Jalur": 0,
+        "II.4 P1_BOP": 0, "II.4 P2_Durasi": 0, "II.4 P3_BIV": 0,
+        "II.5 P1_BOP": 0, "II.5 P2_Durasi": 0, "II.5 P3_BIV": 0, "II.5 P4_Panjang Jalur": 0, "II.5 P5_Kecepatan Kapal": 0,
+        "II.6 P1_BOP": 0, "II.6 P3_BIV": 0,
+        "II.7 P1_BOP": 0, "II.7 P3_BIV": 0,
+        "II.8 P1_BOP": 0, "II.8 P3_BIV": 0
+      }
     },
     {
       riskCode: 'R12',
@@ -580,7 +589,16 @@ async function main() {
     {
       riskCode: 'R20',
       variable: 'Sengketa Pengiriman Pelabuhan',
-      values: {}
+      values: {
+        "II.1 P1_BOP": 0, "II.1 P2_Durasi": 0, "II.1 P3_BIV": 0,
+        "II.2 P1_BOP": 0, "II.2 P2_Durasi": 0, "II.2 P3_BIV": 0, "II.2 P4_Panjang Jalur": 0, "II.2 P5_Kecepatan Kapal": 0,
+        "II.3 P1_BOP": 0, "II.3 P2_Durasi": 0, "II.3 P3_BIV": 0, "II.3 P4_Panjang Jalur": 0,
+        "II.4 P1_BOP": 0, "II.4 P2_Durasi": 0, "II.4 P3_BIV": 0,
+        "II.5 P1_BOP": 0, "II.5 P2_Durasi": 0, "II.5 P3_BIV": 0, "II.5 P4_Panjang Jalur": 0, "II.5 P5_Kecepatan Kapal": 0,
+        "II.6 P1_BOP": 0, "II.6 P3_BIV": 0,
+        "II.7 P1_BOP": 0, "II.7 P3_BIV": 0,
+        "II.8 P1_BOP": 0, "II.8 P3_BIV": 0
+      }
     },
     {
       riskCode: 'R21',

@@ -209,18 +209,16 @@ async function runSupplyChainModel(input) {
     vessels, routes, oru,
     terminal, selectedLocations, demandBBTUD,
     params, inflationFactor,
-    shareTerminalORU = false,
     geoMap,
+    numVessels = 1, // Python: cap_term divided by num_v
+    isFeeder = false,
   } = input;
 
   const { tankSize, tankPrice } = getTankConfig(params);
   const distanceMap = buildDistanceMap(routes);
   const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD]));
-  const vesselAdj = vessels.map(v => ({
-    ...v,
-    rentPerDayUSD: v.rentPerDayUSD * inflationFactor,
-    portCostPerLocation: v.portCostPerLocation * inflationFactor,
-  }));
+  // Python: NO inflation on rent/port. Only tank CAPEX uses inflationFactor.
+  const vesselAdj = vessels.slice().sort((a, b) => a.capacityM3 - b.capacityM3);
 
   const allRoutes = permutations(selectedLocations);
   const results = [];
@@ -274,55 +272,57 @@ async function runSupplyChainModel(input) {
       // CHECK 2: utilisasi check
       if (Utilitasi_Factor_LNGC > Batas_Maksimum_Utilisasi_LNGC) continue;
 
-      // CAPEX
-      let total_capex = 0;
+      // CAPEX (Python: cap_locs + cap_term)
+      let cap_locs = 0;
       let selected_storage_total = 0;
       for (const loc of route) {
-        const gs_net = ((demandBBTUD[loc] / 24.04) * 1000) * RTD;
-        const gs_buffer = gs_net + (buffer_day * (demandBBTUD[loc] / 24.04) * 1000);
-        const net_storage = gs_buffer * params.gross_storage_pct;
-        const selected_storage = roundUp(net_storage, tankSize);
-        selected_storage_total += selected_storage;
+        const demL_m3 = (demandBBTUD[loc] / 24.04) * 1000;
+        const s_st = roundUp((demL_m3 * RTD + buffer_day * demL_m3) * params.gross_storage_pct, tankSize);
+        selected_storage_total += s_st;
 
-        const tank_capex = (selected_storage / tankSize) * tankPrice * inflationFactor;
+        const tank_capex = (s_st / tankSize) * tankPrice * inflationFactor;
         const oru_capex = oruMap.get(loc) || 0;
-        total_capex += tank_capex + oru_capex;
+        cap_locs += tank_capex + oru_capex;
       }
 
-      if (kapasitas_kapal < 20000) {
-        const terminal_oru = oruMap.get(terminal);
-        if (terminal_oru) {
-          total_capex += shareTerminalORU ? terminal_oru / 2 : terminal_oru;
-        }
+      // Terminal ORU (Python: divided by num_v for non-feeder)
+      let cap_term = 0;
+      if (!isFeeder && kapasitas_kapal < 20000) {
+        const terminal_oru = oruMap.get(terminal) || 0;
+        cap_term = terminal_oru / numVessels;
       }
+      const total_capex = cap_locs + cap_term;
 
-      const penyaluran_lifetime = totalDemandBBTUD * 365 * Pyears * 1000;
-      const capex_usd_mmbtu = total_capex / penyaluran_lifetime;
+      const dem_tot_BBTUD = route.reduce((s, l) => s + (demandBBTUD[l] || 0), 0);
+      const capex_usd_mmbtu = total_capex / (dem_tot_BBTUD * 1000 * 365 * Pyears);
 
-      // OPEX
+      // OPEX (Python: no risk, no inflation on port/rent)
       const n_leg = legs.length;
-      let sailing_time_voyage = 0;
-      let sailing_time_ballast = 0;
+      let fuel_voyage = 0;
+      let fuel_ballast = 0;
       for (let i = 0; i < n_leg; i++) {
         const dist = legs[i];
         const time_leg = dist / speed;
-        sailing_time_voyage += time_leg;
-        if (i === n_leg - 1) sailing_time_ballast = time_leg;
+        fuel_voyage += (time_leg / 24) * vessel.voyageTonPerDay;
+        if (i === n_leg - 1) fuel_ballast = (time_leg / 24) * vessel.ballastTonPerDay;
       }
 
-      const fuel_voyage = (sailing_time_voyage / 24) * vessel.voyageTonPerDay;
-      const fuel_ballast = (sailing_time_ballast / 24) * vessel.ballastTonPerDay;
-      const total_berth_call = route.length + 1;
-      const fuel_berth = (params.loading_hour * total_berth_call / 24) * vessel.berthTonPerDay;
-      const fuel_total = fuel_voyage + fuel_ballast + fuel_berth;
-      const lng_fuel = fuel_total * (SCF_LNG / SCF_MGO);
-      const lng_fuel_cost = voyages_year * lng_fuel * params.harga_lng;
-      const port_cost = voyages_year * vessel.portCostPerLocation * total_berth_call;
+      const fuel_berth = (totalLoadingTime / 24) * vessel.berthTonPerDay;
+
+      const lng_fuel_cost = voyages_year * (fuel_voyage + fuel_ballast + fuel_berth) * (SCF_LNG / SCF_MGO) * params.harga_lng;
+
+      // Port cost: Python uses LTP + Delay, not portCostPerLocation
+      // pc = (vy*LTP*(1+0) + vy*Delay) + (len(locs)*(vy*LTP*(1+0) + vy*Delay))
+      const port_cost = (voyages_year * vessel.portCostLTP + voyages_year * vessel.portCostDelay) +
+        (route.length * (voyages_year * vessel.portCostLTP + voyages_year * vessel.portCostDelay));
+
       const rent_cost = vessel.rentPerDayUSD * 365;
-      const opex_oru = total_capex * 0.05;
-      const total_opex = lng_fuel_cost + port_cost + rent_cost + opex_oru;
-      const penyaluran_year = totalDemandBBTUD * 365 * 1000;
-      const opex_usd_mmbtu = total_opex / penyaluran_year;
+
+      const op_locs = cap_locs * 0.05;
+      const op_term = cap_term * 0.05;
+      const total_opex = lng_fuel_cost + port_cost + rent_cost + op_locs + op_term;
+
+      const opex_usd_mmbtu = total_opex / (dem_tot_BBTUD * 1000 * 365);
       const total_cost = capex_usd_mmbtu + opex_usd_mmbtu;
 
       globalScenarioId += 1;
@@ -348,9 +348,9 @@ async function runSupplyChainModel(input) {
         'lng_fuel_cost': lng_fuel_cost,
         'port_cost': port_cost,
         'rent_cost': rent_cost,
-        'Total CAPEX (USD)': Math.round(total_capex),
+        'Total CAPEX (USD)': total_capex,
         'Total CAPEX USD/MMBTU': capex_usd_mmbtu,
-        'Total OPEX (USD/year)': Math.round(total_opex * 10) / 10,
+        'Total OPEX (USD/year)': total_opex,
         'Total OPEX (USD/MMBTU)': opex_usd_mmbtu,
         'Total Cost (USD/MMBTU)': total_cost,
         'Spokes': route.join(', '),
@@ -367,18 +367,15 @@ async function runSupplyChainModelRisk(input) {
   const {
     vessels, routes, oru, terminal, selectedLocations, demandBBTUD,
     params, inflationFactor, riskDB, geoMap,
+    numVessels = 1, // Python: cap_term divided by num_v
+    isFeeder = false,
   } = input;
 
   const { tankSize, tankPrice } = getTankConfig(params);
   const distanceMap = buildDistanceMap(routes);
   const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD]));
-  const vesselAdj = vessels.map(v => ({
-    ...v,
-    rentPerDayUSD: v.rentPerDayUSD * inflationFactor,
-    portCostPerLocation: v.portCostPerLocation * inflationFactor,
-    portCostLTP: v.portCostLTP * inflationFactor,
-    portCostDelay: v.portCostDelay * inflationFactor,
-  }));
+  // Python: NO inflation on rent/port. Only tank CAPEX uses inflationFactor.
+  const vesselAdj = vessels.slice().sort((a, b) => a.capacityM3 - b.capacityM3);
 
   const allRoutes = permutations(selectedLocations);
   const results = [];
@@ -468,9 +465,9 @@ async function runSupplyChainModelRisk(input) {
       }
 
       let capex_terminal_risked = 0.0;
-      if (kapasitas_kapal < 20000) {
+      if (!isFeeder && kapasitas_kapal < 20000) {
         const terminal_oru = oruMap.get(terminal) || 0;
-        capex_terminal_risked = terminal_oru * (1 + impact_capex_end);
+        capex_terminal_risked = (terminal_oru * (1 + impact_capex_end)) / numVessels;
         total_capex += capex_terminal_risked;
       }
 
@@ -544,9 +541,9 @@ async function runSupplyChainModelRisk(input) {
         'lng_fuel_cost': lng_fuel_cost,
         'port_cost': port_cost,
         'rent_cost': rent_cost,
-        'Total CAPEX (USD)': Math.round(total_capex),
+        'Total CAPEX (USD)': total_capex,
         'Total CAPEX USD/MMBTU': capex_usd_mmbtu,
-        'Total OPEX (USD/year)': Math.round(total_opex * 10) / 10,
+        'Total OPEX (USD/year)': total_opex,
         'Total OPEX (USD/MMBTU)': opex_usd_mmbtu,
         'Total Cost (USD/MMBTU)': total_cost,
         'Spokes': route.join(', '),
@@ -594,12 +591,14 @@ async function runTwoVesselProbabilityModel(input) {
       const df1 = await runSupplyChainModel({
         vessels, routes, oru, terminal,
         selectedLocations: loc_k1, demandBBTUD: demand_k1,
-        params, inflationFactor, shareTerminalORU, geoMap,
+        params, inflationFactor, geoMap,
+        numVessels: 2,
       });
       const df2 = await runSupplyChainModel({
         vessels, routes, oru, terminal,
         selectedLocations: loc_k2, demandBBTUD: demand_k2,
-        params, inflationFactor, shareTerminalORU, geoMap,
+        params, inflationFactor, geoMap,
+        numVessels: 2,
       });
 
       if (!df1.length || !df2.length) continue;
@@ -686,6 +685,9 @@ async function runTwoVesselProbabilityModel(input) {
 
   total.sort((a, b) => a['System Cost (USD/MMBTU)'] - b['System Cost (USD/MMBTU)']);
   const topTotal = total.slice(0, 20);
+
+  // Re-number scenarios sequentially after sorting
+  topTotal.forEach((t, idx) => { t['No. Skenario'] = idx + 1; });
 
   // Build kapal_1 and kapal_2 tables with full columns
   const kapal_1 = topTotal.map(t => ({
@@ -804,11 +806,13 @@ async function runTwoVesselProbabilityModelRisk(input) {
         vessels, routes, oru, terminal,
         selectedLocations: loc_k1, demandBBTUD: demand_k1,
         params, inflationFactor, riskDB, geoMap,
+        numVessels: 2,
       });
       const df2 = await runSupplyChainModelRisk({
         vessels, routes, oru, terminal,
         selectedLocations: loc_k2, demandBBTUD: demand_k2,
         params, inflationFactor, riskDB, geoMap,
+        numVessels: 2,
       });
 
       if (!df1.length || !df2.length) continue;
@@ -895,6 +899,9 @@ async function runTwoVesselProbabilityModelRisk(input) {
 
   total.sort((a, b) => a['System Cost (USD/MMBTU)'] - b['System Cost (USD/MMBTU)']);
   const topTotal = total.slice(0, 20);
+
+  // Re-number scenarios sequentially after sorting
+  topTotal.forEach((t, idx) => { t['No. Skenario'] = idx + 1; });
 
   // Build kapal_1 and kapal_2 tables with full columns
   const kapal_1 = topTotal.map(t => ({
@@ -1042,15 +1049,8 @@ async function runHubSpokeTwoVesselModelRisk(input) {
   }
 
   const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD]));
-  // vessels disortir kapasitas (kecil -> besar) dan sudah di-adjust inflasi
-  const kSorted = vessels
-    .map(v => ({
-      ...v,
-      rentPerDayUSD: v.rentPerDayUSD * inflationFactor,
-      portCostLTP: v.portCostLTP * inflationFactor,
-      portCostDelay: v.portCostDelay * inflationFactor,
-    }))
-    .sort((a, b) => a.capacityM3 - b.capacityM3);
+  // Python: NO inflation on rent/port. Only tank CAPEX uses inflationFactor.
+  const kSorted = vessels.slice().sort((a, b) => a.capacityM3 - b.capacityM3);
 
   const gr = (p, ii) => getRiskImpact(riskDB, p, ii) || 0.0;
   const im_s = gr('P2_Durasi', 'II.3');
@@ -1228,8 +1228,12 @@ async function runHubSpokeTwoVesselModelRisk(input) {
 
       for (const k of kSorted) {
         const speed = k.speedKnot;
-        const lt = params.loading_hour * (1 + ruteLocs.length);
-        const st = tdist / speed;
+        // Python: lt with risk = loading*(1+risk_II2) + nLocs*loading*(1+risk_II5)
+        const lt = params.loading_hour * (1 + impact_lt_II2) +
+          ruteLocs.length * params.loading_hour * (1 + impact_lt_II5);
+        // Python: st with risk = sum((d/speed)*(1+im_s))
+        let st = 0;
+        for (const d of legs) st += (d / speed) * (1 + im_s);
         const rtd = (st + lt) / 24.0;
 
         const buf = roundUpDecimal((params.maintenance_days / 365.0) * rtd);
@@ -1386,6 +1390,9 @@ async function runHubSpokeTwoVesselModelRisk(input) {
     .sort((a, b) => a['System Cost (USD/MMBTU)'] - b['System Cost (USD/MMBTU)'])
     .slice(0, 20);
 
+  // Re-number scenarios sequentially after sorting
+  sortedAll.forEach((r, idx) => { r['No. Skenario'] = idx + 1; });
+
   // Mother table
   const mother = sortedAll.map(r => {
     const out = {
@@ -1445,20 +1452,29 @@ async function runHubSpokeTwoVesselModelRisk(input) {
 }
 
 /**
- * Hub & Spoke, 1 kapal (feeder), NO-RISK
- * Output: { mother: [], feeder1: [], system: [] }
+ * Hub & Spoke, 1 feeder, NO-RISK
+ * Delegates to risk version with empty riskDB
  */
 async function runHubSpokeSingleModel(input) {
+  const emptyRiskDB = {
+    P1_Biaya_Operasi: {}, P2_Durasi: {}, P3_Biaya_Investasi: {},
+    P4_Panjang_Jalur: {}, P5_Kecepatan_Kapal: {},
+  };
+  return runHubSpokeSingleModelRisk({ ...input, riskDB: emptyRiskDB });
+}
+
+/**
+ * Hub & Spoke, 1 feeder, WITH RISK
+ * Python CABANG 2: HUB & SPOKE with num_v=1
+ * For each hub (each demand location):
+ *   - Mother: terminal -> hub -> terminal
+ *   - Feeder: hub -> all remaining spokes -> hub
+ */
+async function runHubSpokeSingleModelRisk(input) {
   const {
-    vessels,
-    routes,
-    oru,
-    terminal,
-    selectedLocations: locs,
-    demandBBTUD,
-    params,
-    inflationFactor,
-    geoMap,
+    vessels, routes, oru, terminal,
+    selectedLocations: locs, demandBBTUD,
+    params, inflationFactor, riskDB, geoMap,
   } = input;
 
   if (!Array.isArray(locs) || locs.length === 0) {
@@ -1467,9 +1483,10 @@ async function runHubSpokeSingleModel(input) {
 
   const { tankSize, tankPrice } = getTankConfig(params);
   const LNG_EC = 24.04;
+  const BASE_YEAR = 2022;
   const Pyears = params.Penyaluran || 20;
+  const numV = 1; // 1 feeder
 
-  // distance map dua-arah
   const distMap = new Map();
   for (const r of routes) {
     distMap.set(`${r.origin} - ${r.destination}`, r.nauticalMiles);
@@ -1477,16 +1494,26 @@ async function runHubSpokeSingleModel(input) {
   }
 
   const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD]));
-  const kSorted = vessels
-    .map(v => ({
-      ...v,
-      rentPerDayUSD: v.rentPerDayUSD * inflationFactor,
-      portCostLTP: v.portCostLTP * inflationFactor,
-      portCostDelay: v.portCostDelay * inflationFactor,
-    }))
-    .sort((a, b) => a.capacityM3 - b.capacityM3);
+  const kSorted = vessels.slice().sort((a, b) => a.capacityM3 - b.capacityM3);
 
-  // HELPER: mother vessel (Terminal → Hub → Terminal)
+  const gr = (p, ii) => getRiskImpact(riskDB, p, ii) || 0.0;
+  const im_s = gr('P2_Durasi', 'II.3');
+  const impact_lt_II2 = gr('P2_Durasi', 'II.2');
+  const impact_lt_II5 = gr('P2_Durasi', 'II.5');
+
+  const risk_capex_6 = gr('P3_Biaya_Investasi', 'II.6');
+  const risk_capex_7 = gr('P3_Biaya_Investasi', 'II.7');
+  const risk_capex_8 = gr('P3_Biaya_Investasi', 'II.8');
+  const impact_capex_start = (risk_capex_6 + risk_capex_7 + risk_capex_8) / 3;
+  const impact_capex_end = gr('P3_Biaya_Investasi', 'II.1');
+
+  const risk_opex_6 = gr('P1_Biaya_Operasi', 'II.6');
+  const risk_opex_7 = gr('P1_Biaya_Operasi', 'II.7');
+  const risk_opex_8 = gr('P1_Biaya_Operasi', 'II.8');
+  const impact_opex_start = (risk_opex_6 + risk_opex_7 + risk_opex_8) / 3;
+  const impact_opex_end = gr('P1_Biaya_Operasi', 'II.1');
+
+  // HELPER: mother vessel (Terminal -> Hub -> Terminal)
   function calcMother(hub, totDemBBTUD) {
     const rows = [];
     const baseDist =
@@ -1496,13 +1523,13 @@ async function runHubSpokeSingleModel(input) {
 
     const dist = baseDist;
     const dem_m3 = (totDemBBTUD * 1000) / LNG_EC;
+    let countShips = 0;
 
     for (const k of kSorted) {
       const speed = k.speedKnot;
-      const st = (dist * 2 / speed) * (1 + im_s); // jam
-      const lt =
-        params.loading_hour * (1 + impact_lt_II2) +
-        params.loading_hour * (1 + impact_lt_II5); // jam
+      const st = (dist * 2 / speed) * (1 + im_s);
+      const lt = params.loading_hour * (1 + impact_lt_II2) +
+        params.loading_hour * (1 + impact_lt_II5);
       const rtd = (st + lt) / 24.0;
 
       const buf = roundUpDecimal((params.maintenance_days / 365.0) * rtd);
@@ -1526,50 +1553,35 @@ async function runHubSpokeSingleModel(input) {
         100
       );
 
-      const tankCapexHub = (sel_st / tankSize) * tankPrice * inflationFactor; // FIXED
+      const tankCapexHub = (sel_st / tankSize) * tankPrice * inflationFactor;
       const oruHub = oruMap.get(hub) || 0;
       const cap_hub = tankCapexHub + oruHub * (1 + impact_capex_start);
 
       const oruTerm = oruMap.get(terminal) || 0;
-      const cap_term =
-        k.capacityM3 < 20000 ? oruTerm * (1 + impact_capex_end) : 0;
-
+      const cap_term = k.capacityM3 < 20000 ? oruTerm * (1 + impact_capex_end) : 0;
       const t_cap = cap_hub + cap_term;
 
       const fv = (dist * 2 / speed) * (1 + im_s) / 24.0 * k.voyageTonPerDay;
       const fb = (dist / speed) * (1 + im_s) / 24.0 * k.ballastTonPerDay;
       const fbt = (lt / 24.0) * k.berthTonPerDay;
+      const lng_c = vy * (fv + fb + fbt) * (params.scf_lng / params.scf_mgo) * params.harga_lng;
 
-      const lng_c =
-        vy *
-        (fv + fb + fbt) *
-        (params.scf_lng / params.scf_mgo) *
-        params.harga_lng;
-
-      const port_ltp = k.portCostLTP;
-      const port_delay = k.portCostDelay;
       const pc =
-        vy *
-          port_ltp *
-          (2 + gr('P1_Biaya_Operasi', 'II.2') + gr('P1_Biaya_Operasi', 'II.5')) +
-        vy * port_delay * 2;
-
+        vy * k.portCostLTP * (2 + gr('P1_Biaya_Operasi', 'II.2') + gr('P1_Biaya_Operasi', 'II.5')) +
+        vy * k.portCostDelay * 2;
       const rc = k.rentPerDayUSD * 365.0;
 
       const op_hub = cap_hub * 0.05 * (1 + impact_opex_start);
       const op_term = cap_term * 0.05 * (1 + impact_opex_end);
       const t_op = lng_c + pc + rc + op_hub + op_term;
 
-      const c_unit =
-        t_cap / (totDemBBTUD * 1000.0 * 365.0 * Pyears);
-      const o_unit =
-        t_op / (totDemBBTUD * 1000.0 * 365.0);
+      const c_unit = t_cap / (totDemBBTUD * 1000.0 * 365.0 * Pyears);
+      const o_unit = t_op / (totDemBBTUD * 1000.0 * 365.0);
 
       rows.push({
         'Nama Kapal': k.name,
         'Rute': `${terminal} - ${hub} - ${terminal}`,
         'Total Jarak (NM)': dist * 2,
-        'RTD (day)': rtd,
         'RTD': rtd,
         'Demand LNG/day (m3)': dem_m3,
         'Nominal Capacity (m3)': nom_cap,
@@ -1581,12 +1593,8 @@ async function runHubSpokeSingleModel(input) {
         'Utilitasi_Factor_LNGC': ut,
         'Batas_Maksimum_Utilisasi_LNGC': utMax,
         'selected_storage Total': sel_st,
-        'fuel_voyage': fv,
-        'fuel_ballast': fb,
-        'fuel_berth': fbt,
-        'lng_fuel_cost': lng_c,
-        'port_cost': pc,
-        'rent_cost': rc,
+        'fuel_voyage': fv, 'fuel_ballast': fb, 'fuel_berth': fbt,
+        'lng_fuel_cost': lng_c, 'port_cost': pc, 'rent_cost': rc,
         'Total CAPEX (USD)': t_cap,
         'Total CAPEX USD/MMBTU': c_unit,
         'Total OPEX (USD/year)': t_op,
@@ -1594,30 +1602,17 @@ async function runHubSpokeSingleModel(input) {
         'Total Cost (USD/MMBTU)': c_unit + o_unit,
       });
 
-      if (rows.length === 3) break; // maksimal 3 kandidat mother per Hub
+      countShips++;
+      if (countShips === 3) break;
     }
     return rows;
   }
 
-  // HELPER: feeder routes (Hub → Spokes → Hub)
+  // HELPER: feeder routes (Hub -> Spokes -> Hub)
   function calcFeederRoutes(ruteLocs, hub) {
     const demTot = ruteLocs.reduce((s, l) => s + (demandBBTUD[l] || 0), 0);
     const dem_m3 = (demTot * 1000.0) / LNG_EC;
     const res = [];
-
-    const impact_capex_6 = gr('P3_Biaya_Investasi', 'II.6');
-    const impact_capex_7 = gr('P3_Biaya_Investasi', 'II.7');
-    const impact_capex_8 = gr('P3_Biaya_Investasi', 'II.8');
-    const impact_capex_start = (impact_capex_6 + impact_capex_7 + impact_capex_8) / 3 || 0;
-
-    const risk_opex_6 = gr('P1_Biaya_Operasi', 'II.6');
-    const risk_opex_7 = gr('P1_Biaya_Operasi', 'II.7');
-    const risk_opex_8 = gr('P1_Biaya_Operasi', 'II.8');
-    const impact_opex_start = (risk_opex_6 + risk_opex_7 + risk_opex_8) / 3 || 0;
-    const impact_opex_end = gr('P1_Biaya_Operasi', 'II.1');
-
-    const impact_lt_II2 = gr('P2_Durasi', 'II.2');
-    const impact_lt_II5 = gr('P2_Durasi', 'II.5');
 
     const impact_port_start = gr('P1_Biaya_Operasi', 'II.2');
     const impact_port_next = gr('P1_Biaya_Operasi', 'II.5');
@@ -1630,23 +1625,21 @@ async function runHubSpokeSingleModel(input) {
       let valid = true;
 
       for (let i = 0; i < fr.length - 1; i++) {
-        const origin = fr[i];
-        const dest = fr[i + 1];
-        const d = getDistanceNM(distMap, origin, dest, geoMap);
-        if (!d) {
-          valid = false;
-          break;
-        }
+        const d = getDistanceNM(distMap, fr[i], fr[i + 1], geoMap);
+        if (!d) { valid = false; break; }
         tdist += d;
         legs.push(d);
       }
       if (!valid) continue;
 
+      let countShips = 0;
       for (const k of kSorted) {
         const speed = k.speedKnot;
-        const lt = params.loading_hour * (1 + ruteLocs.length);
-        const st = tdist / speed;
-        const rtd = (st + lt) / 24.0;
+        const lt = params.loading_hour * (1 + impact_lt_II2) +
+          ruteLocs.length * params.loading_hour * (1 + impact_lt_II5);
+        let stTotal = 0;
+        for (const d of legs) stTotal += (d / speed) * (1 + im_s);
+        const rtd = (stTotal + lt) / 24.0;
 
         const buf = roundUpDecimal((params.maintenance_days / 365.0) * rtd);
         const w_vol = dem_m3 * rtd + dem_m3 * buf;
@@ -1678,7 +1671,7 @@ async function runHubSpokeSingleModel(input) {
           cap_locs += tankCapex + oruL * (1 + impact_capex_start);
         }
 
-        const cap_term = 0; // feeder tidak menanggung ORU terminal
+        const cap_term = 0; // feeder: no terminal ORU
         const t_cap = cap_locs + cap_term;
 
         let fv = 0.0;
@@ -1687,42 +1680,28 @@ async function runHubSpokeSingleModel(input) {
           const d = legs[i];
           const t_leg = (d / speed) * (1 + im_s);
           fv += (t_leg / 24.0) * k.voyageTonPerDay;
-          if (i === legs.length - 1) {
-            fb += (t_leg / 24.0) * k.ballastTonPerDay;
-          }
+          if (i === legs.length - 1) fb += (t_leg / 24.0) * k.ballastTonPerDay;
         }
         const fbt = (lt / 24.0) * k.berthTonPerDay;
 
-        const lng_c =
-          vy *
-          (fv + fb + fbt) *
-          (params.scf_lng / params.scf_mgo) *
-          params.harga_lng;
+        const lng_c = vy * (fv + fb + fbt) * (params.scf_lng / params.scf_mgo) * params.harga_lng;
 
-        const port_ltp = k.portCostLTP;
-        const port_delay = k.portCostDelay;
-        const port_start_per_voyage =
-          port_ltp * (1 + impact_port_start) + port_delay;
-        const port_next_per_voyage =
-          ruteLocs.length * (port_ltp * (1 + impact_port_next) + port_delay);
+        const port_start_per_voyage = k.portCostLTP * (1 + impact_port_start) + k.portCostDelay;
+        const port_next_per_voyage = ruteLocs.length * (k.portCostLTP * (1 + impact_port_next) + k.portCostDelay);
         const pc = vy * (port_start_per_voyage + port_next_per_voyage);
-
         const rc = k.rentPerDayUSD * 365.0;
 
         const op_locs = cap_locs * 0.05 * (1 + impact_opex_start);
-        const op_term = 0;
-        const t_op = lng_c + pc + rc + op_locs + op_term;
+        const t_op = lng_c + pc + rc + op_locs;
 
-        const c_unit =
-          t_cap / (demTot * 1000.0 * 365.0 * Pyears);
-        const o_unit =
-          t_op / (demTot * 1000.0 * 365.0);
+        const c_unit = t_cap / (demTot * 1000.0 * 365.0 * Pyears);
+        const o_unit = t_op / (demTot * 1000.0 * 365.0);
 
         res.push({
           'Nama Kapal': k.name,
           'Rute': fr.join(' - '),
           'Total Jarak (NM)': tdist,
-          'RTD (day)': rtd,
+          'RTD': rtd,
           'Demand LNG/day (m3)': dem_m3,
           'Nominal Capacity (m3)': nom_cap,
           'Kapasitas Kapal (m3)': k.capacityM3,
@@ -1733,12 +1712,8 @@ async function runHubSpokeSingleModel(input) {
           'Utilitasi_Factor_LNGC': ut,
           'Batas_Maksimum_Utilisasi_LNGC': utMax,
           'selected_storage Total': sel_tot,
-          'fuel_voyage': fv,
-          'fuel_ballast': fb,
-          'fuel_berth': fbt,
-          'lng_fuel_cost': lng_c,
-          'port_cost': pc,
-          'rent_cost': rc,
+          'fuel_voyage': fv, 'fuel_ballast': fb, 'fuel_berth': fbt,
+          'lng_fuel_cost': lng_c, 'port_cost': pc, 'rent_cost': rc,
           'Total CAPEX (USD)': t_cap,
           'Total CAPEX USD/MMBTU': c_unit,
           'Total OPEX (USD/year)': t_op,
@@ -1747,24 +1722,26 @@ async function runHubSpokeSingleModel(input) {
           'Spokes': ruteLocs.join(', '),
         });
 
-        if (res.length >= 3) break; // max 3 feeder candidate per subset
+        countShips++;
+        if (countShips === 3) break;
       }
     }
-
     return res;
   }
 
+  // Main loop: iterate over all possible hubs
   const allCombos = [];
   const totCluster = locs.reduce((s, l) => s + (demandBBTUD[l] || 0), 0);
   let it_c = 0;
 
   for (const hub of locs) {
     const spk_all = locs.filter(x => x !== hub);
-    if (numV > spk_all.length) continue;
+    if (spk_all.length === 0) continue;
 
     const motherRows = calcMother(hub, totCluster);
     if (!motherRows.length) continue;
 
+    // For numV=1: all spokes go to one feeder
     const feederRows = calcFeederRoutes(spk_all, hub);
     if (!feederRows.length) continue;
 
@@ -1796,121 +1773,41 @@ async function runHubSpokeSingleModel(input) {
     return { mother: [], feeder1: [], system: [] };
   }
 
-  // Sort & ambil Top 20 global
   const sortedAll = allCombos
     .slice()
     .sort((a, b) => a['System Cost (USD/MMBTU)'] - b['System Cost (USD/MMBTU)'])
     .slice(0, 20);
 
-  // Mother table
+  // Re-number scenarios after sorting
+  sortedAll.forEach((r, idx) => { r['No. Skenario'] = idx + 1; });
+
   const mother = sortedAll.map(r => {
-    const out = {
-      'No. Skenario': r['No. Skenario'],
-      'Skenario Hub': r['Skenario Hub'],
-    };
+    const out = { 'No. Skenario': r['No. Skenario'], 'Skenario Hub': r['Skenario Hub'] };
     for (const [k, v] of Object.entries(r)) {
-      if (k.startsWith('M_')) {
-        out[k.substring(2)] = v; // buang prefix "M_"
-      }
+      if (k.startsWith('M_')) out[k.substring(2)] = v;
     }
     return out;
   });
 
-  // Feeder 1 table
   const feeder1 = sortedAll.map(r => {
-    const out = {
-      'No. Skenario': r['No. Skenario'],
-      'Skenario Hub': r['Skenario Hub'],
-    };
+    const out = { 'No. Skenario': r['No. Skenario'], 'Skenario Hub': r['Skenario Hub'] };
     for (const [k, v] of Object.entries(r)) {
-      if (k.startsWith('F1_')) {
-        out[k.substring(3)] = v; // buang prefix "F1_"
-      }
+      if (k.startsWith('F1_')) out[k.substring(3)] = v;
     }
     return out;
   });
 
-  // Feeder 2 table
-  const feeder2 = sortedAll.map(r => {
-    const out = {
-      'No. Skenario': r['No. Skenario'],
-      'Skenario Hub': r['Skenario Hub'],
-    };
-    for (const [k, v] of Object.entries(r)) {
-      if (k.startsWith('F2_')) {
-        out[k.substring(3)] = v; // buang prefix "F2_"
-      }
-    }
-    return out;
-  });
-
-  // System gabungan (ringkas)
   const system = sortedAll.map(r => ({
     'No. Skenario': r['No. Skenario'],
     'Skenario Hub': r['Skenario Hub'],
-    'Probability': r['Probability'],
-    'M_Nama Kapal 1 (Mother)': r['M_Nama Kapal'] || r['M_Nama Kapal '],
-    'F1_Nama Kapal 2 (Feeder 1)': r['F1_Nama Kapal'] || null,
-    'F2_Nama Kapal 3 (Feeder 2)': r['F2_Nama Kapal'] || null,
+    'M_Nama Kapal (Mother)': r['M_Nama Kapal'],
+    'F1_Nama Kapal (Feeder)': r['F1_Nama Kapal'],
     'System CAPEX (USD)': r['System CAPEX (USD)'],
     'System OPEX (USD/year)': r['System OPEX (USD/year)'],
     'System Cost (USD/MMBTU)': r['System Cost (USD/MMBTU)'],
   }));
 
-  return { mother, feeder1, feeder2, system };
-}
-
-/**
- * Hub & Spoke, 1 kapal (feeder), RISK
- * Output: { mother: [], feeder1: [], system: [] }
- */
-async function runHubSpokeSingleModelRisk(input) {
-  const {
-    vessels, routes, oru, terminal,
-    selectedLocations: locs, demandBBTUD,
-    params, inflationFactor, riskDB, geoMap,
-  } = input;
-
-  if (!Array.isArray(locs) || locs.length === 0) {
-    return { mother: [], feeder1: [], system: [] };
-  }
-
-  const { tankSize, tankPrice } = getTankConfig(params);
-  const LNG_EC = 24.04;
-  const Pyears = params.Penyaluran || 20;
-
-  const distMap = new Map();
-  for (const r of routes) {
-    distMap.set(`${r.origin} - ${r.destination}`, r.nauticalMiles);
-    distMap.set(`${r.destination} - ${r.origin}`, r.nauticalMiles);
-  }
-
-  const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD]));
-  const kSorted = vessels
-    .map(v => ({
-      ...v,
-      rentPerDayUSD: v.rentPerDayUSD * inflationFactor,
-      portCostLTP: v.portCostLTP * inflationFactor,
-      portCostDelay: v.portCostDelay * inflationFactor,
-    }))
-    .sort((a, b) => a.capacityM3 - b.capacityM3);
-
-  const gr = (p, ii) => getRiskImpact(riskDB, p, ii) || 0.0;
-  const im_s = gr('P2_Durasi', 'II.3');
-
-  // Sama seperti runHubSpokeSingleModel tapi dengan risk adjustments
-  // ... (implementasi calcMother dan calcFeederRoutes dengan risk seperti runHubSpokeTwoVesselModelRisk)
-
-  // Untuk sementara, panggil versi 2-kapal dengan numV=1 style
-  // atau copy logic dari runHubSpokeTwoVesselModelRisk dengan numV=1
-  
-  // Simplified: use non-risk version for now, risk can be added later
-  const noRiskResult = await runHubSpokeSingleModel({
-    ...input,
-    riskDB: undefined, // ignore risk for now
-  });
-  
-  return noRiskResult;
+  return { mother, feeder1, system };
 }
 
 /**
@@ -1975,8 +1872,8 @@ async function runNVesselProbabilityModel(input) {
         selectedLocations: subset,
         demandBBTUD: subsetDemand,
         params, inflationFactor,
-        shareTerminalORU,
         geoMap,
+        numVessels, // pass numVessels to divide terminal ORU properly
       });
 
       if (!df.length) {
@@ -2145,6 +2042,7 @@ async function runNVesselProbabilityModelRisk(input) {
         selectedLocations: subset,
         demandBBTUD: subsetDemand,
         params, inflationFactor, riskDB, geoMap,
+        numVessels, // pass numVessels to divide terminal ORU properly
       });
 
       if (!df.length) {
@@ -2233,6 +2131,9 @@ async function runNVesselProbabilityModelRisk(input) {
   allCombos.sort((a, b) => a.row['System Cost (USD/MMBTU)'] - b.row['System Cost (USD/MMBTU)']);
   const top20 = allCombos.slice(0, 20);
 
+  // Re-number scenarios sequentially after sorting
+  top20.forEach((item, idx) => { item.row['No. Skenario'] = idx + 1; });
+
   const result = { system: [] };
   for (let i = 1; i <= numVessels; i++) {
     result[`kapal_${i}`] = [];
@@ -2291,7 +2192,10 @@ async function runHubSpokeNVesselModelRisk(input) {
     return emptyResult;
   }
 
-  // For now, delegate to existing 2-vessel implementation if numFeeders <= 2
+  // Route to appropriate implementation based on numFeeders
+  if (numFeeders <= 1) {
+    return runHubSpokeSingleModelRisk(input);
+  }
   if (numFeeders <= 2) {
     return runHubSpokeTwoVesselModelRisk(input);
   }

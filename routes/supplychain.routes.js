@@ -58,6 +58,52 @@ router.get('/places', async (req, res) => {
   res.json(merged);
 });
 
+// Risk section descriptions (II.1 - II.8)
+router.get('/risk-sections', (req, res) => {
+  res.json([
+    {
+      code: 'II.1',
+      title: 'Pemuatan LNG',
+      description: '1. LNG yang disimpan dalam tangki penyimpanan dipompa ke dermaga produk. 2. Di dermaga, LNG dimuat ke kapal LNG untuk diekspor. 3. BOG yang terbentuk dikapal dikirim kembali ke Kilang LNG.',
+    },
+    {
+      code: 'II.2',
+      title: 'Aktivitas kapal sandar & lepas sandar (loading)',
+      description: 'Aktifitas kapal meliputi kegiatan (a) sandar ke dermaga dan (b) lepas sandar dengan tahapan mengubah cekungan (turning basins), berlabuh, persiapan untuk bongkar muat, dan keberangkatan.',
+    },
+    {
+      code: 'II.3',
+      title: 'Pengiriman LNG',
+      description: '1. Kapal bermuatan LNG berlayar dari LNG Plant ke terminal penerima LNG. 2. Kapal/truk mengangkut LNG dari terminal LNG pertama ke terminal LNG berikutnya.',
+    },
+    {
+      code: 'II.4',
+      title: 'Pembongkaran LNG',
+      description: '1. Mengeluarkan LNG dari kapal menggunakan pompa kapal dan loading arm (lengan bongkar) di dermaga. 2. Mengembalikan Boil of Gas (BOG) kembali ke tanki kapal menjaga tekanan tanki 8 - 10 Kpa.',
+    },
+    {
+      code: 'II.5',
+      title: 'Pembongkaran LNG (sandar & lepas sandar)',
+      description: 'Aktifitas kapal meliputi kegiatan (a) sandar ke dermaga dan (b) lepas sandar dengan tahapan mengubah cekungan (turning basins), berlabuh, persiapan untuk bongkar muat, dan keberangkatan.',
+    },
+    {
+      code: 'II.6',
+      title: 'Penyimpanan LNG',
+      description: 'Menyimpan LNG dalam tanki penyimpan darat LNG.',
+    },
+    {
+      code: 'II.7',
+      title: 'Regasifikasi LNG',
+      description: 'LNG dinaikan tekanan menggunakan pompa dalam tanki, kemudian dirubah menjadi gas dengan dipanaskan menggunakan media pemanas seperti air laut, air panas, udara.',
+    },
+    {
+      code: 'II.8',
+      title: 'Distribusi gas',
+      description: '1. Penambahan pembau (odorant) pada gas. 2. Pengiriman gas menuju ke pelanggan/pembangkit listrik melalui pipa.',
+    },
+  ]);
+});
+
 // NEW: RiskMatrix list (for dynamic frontend)
 router.get('/risk-matrix', async (req, res) => {
   try {
