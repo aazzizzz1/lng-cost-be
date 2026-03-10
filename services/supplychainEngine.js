@@ -471,8 +471,8 @@ async function runSupplyChainModelRisk(input) {
         total_capex += capex_terminal_risked;
       }
 
-      const penyaluran_lifetime = totalDemandBBTUD * 365 * Pyears * 1000;
-      const capex_usd_mmbtu = total_capex / penyaluran_lifetime;
+      const dem_tot_BBTUD = route.reduce((s, l) => s + (demandBBTUD[l] || 0), 0);
+      const capex_usd_mmbtu = total_capex / (dem_tot_BBTUD * 1000 * 365 * Pyears);
 
       // OPEX with risk
       const risk_opex_6 = getRiskImpact(riskDB, 'P1_Biaya_Operasi', 'II.6');
@@ -514,8 +514,7 @@ async function runSupplyChainModelRisk(input) {
       const rent_cost = vessel.rentPerDayUSD * 365;
       const total_opex = lng_fuel_cost + port_cost + rent_cost + opex_oru;
 
-      const penyaluran_year = totalDemandBBTUD * 365 * 1000;
-      const opex_usd_mmbtu = total_opex / penyaluran_year;
+      const opex_usd_mmbtu = total_opex / (dem_tot_BBTUD * 1000 * 365);
       const total_cost = capex_usd_mmbtu + opex_usd_mmbtu;
 
       globalScenarioId += 1;
@@ -605,6 +604,10 @@ async function runTwoVesselProbabilityModel(input) {
 
       const label = `${loc_k1.length}:${loc_k2.length}`;
 
+      // Python: vol_1, vol_2 = demand volume for each partition subset
+      const vol_k1 = loc_k1.reduce((s, l) => s + (demandBBTUD[l] || 0), 0);
+      const vol_k2 = loc_k2.reduce((s, l) => s + (demandBBTUD[l] || 0), 0);
+
       for (const k1 of df1) {
         for (const k2 of df2) {
           if (Array.isArray(vesselNames) && vesselNames.length === 2) {
@@ -615,8 +618,15 @@ async function runTwoVesselProbabilityModel(input) {
 
           const c_usd = k1['Total CAPEX (USD)'] + k2['Total CAPEX (USD)'];
           const o_usd_year = k1['Total OPEX (USD/year)'] + k2['Total OPEX (USD/year)'];
-          const sys_cost = (c_usd + (o_usd_year * Pyears)) / (totalDemandBBTUD * 1000 * 365 * Pyears);
-          
+
+          // Python Milk Run weighted system cost formula:
+          // cost_numerator = sum(Total_Cost_i * vol_i * 1000 * 365 - CAPEX_i / Pyears)
+          // sys_cost = (c_usd + cost_numerator * Pyears) / (tot_cluster * 1000 * 365 * Pyears)
+          const cost_numerator =
+            (k1['Total Cost (USD/MMBTU)'] * vol_k1 * 1000 * 365 - k1['Total CAPEX (USD)'] / Pyears) +
+            (k2['Total Cost (USD/MMBTU)'] * vol_k2 * 1000 * 365 - k2['Total CAPEX (USD)'] / Pyears);
+          const sys_cost = (c_usd + (cost_numerator * Pyears)) / (totalDemandBBTUD * 1000 * 365 * Pyears);
+
           globalScenarioId += 1;
           total.push({
             'No. Skenario': globalScenarioId,
@@ -819,6 +829,10 @@ async function runTwoVesselProbabilityModelRisk(input) {
 
       const label = `${loc_k1.length}:${loc_k2.length}`;
 
+      // Python: vol_1, vol_2 = demand volume for each partition subset
+      const vol_k1 = loc_k1.reduce((s, l) => s + (demandBBTUD[l] || 0), 0);
+      const vol_k2 = loc_k2.reduce((s, l) => s + (demandBBTUD[l] || 0), 0);
+
       for (const k1 of df1) {
         for (const k2 of df2) {
           if (Array.isArray(vesselNames) && vesselNames.length === 2) {
@@ -829,8 +843,15 @@ async function runTwoVesselProbabilityModelRisk(input) {
 
           const c_usd = k1['Total CAPEX (USD)'] + k2['Total CAPEX (USD)'];
           const o_usd_year = k1['Total OPEX (USD/year)'] + k2['Total OPEX (USD/year)'];
-          const sys_cost = (c_usd + (o_usd_year * Pyears)) / (totalDemandBBTUD * 1000 * 365 * Pyears);
-          
+
+          // Python Milk Run weighted system cost formula:
+          // cost_numerator = sum(Total_Cost_i * vol_i * 1000 * 365 - CAPEX_i / Pyears)
+          // sys_cost = (c_usd + cost_numerator * Pyears) / (tot_cluster * 1000 * 365 * Pyears)
+          const cost_numerator =
+            (k1['Total Cost (USD/MMBTU)'] * vol_k1 * 1000 * 365 - k1['Total CAPEX (USD)'] / Pyears) +
+            (k2['Total Cost (USD/MMBTU)'] * vol_k2 * 1000 * 365 - k2['Total CAPEX (USD)'] / Pyears);
+          const sys_cost = (c_usd + (cost_numerator * Pyears)) / (totalDemandBBTUD * 1000 * 365 * Pyears);
+
           globalScenarioId += 1;
           total.push({
             'No. Skenario': globalScenarioId,
@@ -930,7 +951,7 @@ async function runTwoVesselProbabilityModelRisk(input) {
     'Total CAPEX (USD)': t['CAPEX Kapal 1'],
     'Total CAPEX USD/MMBTU': t['CAPEX USD/MMBTU Kapal 1'],
     'Total OPEX (USD/year)': t['OPEX Kapal 1'],
-    'Total OPEX (USD/MMBTU)': t['Total OPEX (USD/MMBTU) Kapal 1'],
+    'Total OPEX (USD/MMBTU)': t['OPEX USD/MMBTU Kapal 1'],
     'Total Cost (USD/MMBTU)': t['Cost Kapal 1'],
     'Spokes': t['Spokes Kapal 1'],
   }));
@@ -959,9 +980,9 @@ async function runTwoVesselProbabilityModelRisk(input) {
     'port_cost': t['port_cost Kapal 2'],
     'rent_cost': t['rent_cost Kapal 2'],
     'Total CAPEX (USD)': t['CAPEX Kapal 2'],
-    'Total CAPEX USD/MMBTU': t['Total CAPEX USD/MMBTU Kapal 2'],
+    'Total CAPEX USD/MMBTU': t['CAPEX USD/MMBTU Kapal 2'],
     'Total OPEX (USD/year)': t['OPEX Kapal 2'],
-    'Total OPEX (USD/MMBTU)': t['Total OPEX (USD/MMBTU) Kapal 2'],
+    'Total OPEX (USD/MMBTU)': t['OPEX USD/MMBTU Kapal 2'],
     'Total Cost (USD/MMBTU)': t['Cost Kapal 2'],
     'Spokes': t['Spokes Kapal 2'],
   }));
@@ -1353,35 +1374,92 @@ async function runHubSpokeTwoVesselModelRisk(input) {
     const motherRows = calcMother(hub, totCluster);
     if (!motherRows.length) continue;
 
-    const feederRows = calcFeederRoutes(spk_all, hub);
-    if (!feederRows.length) continue;
+    // Python: for partition in generate_partitions(spk_all, num_v)
+    const partitions = generatePartitions(spk_all, numV);
 
-    for (const rm of motherRows) {
-      for (const f1 of feederRows) {
-        it_c += 1;
+    for (const partition of partitions) {
+      // Run feeder engine for each subset in partition
+      const feederDfs = [];
+      let allValid = true;
 
-        const c_usd = rm['Total CAPEX (USD)'] + f1['Total CAPEX (USD)'];
-        const o_usd_year = rm['Total OPEX (USD/year)'] + f1['Total OPEX (USD/year)'];
-        const sys_cost = (c_usd + (o_usd_year * Pyears)) / (totCluster * 1000.0 * 365.0 * Pyears);
+      for (let si = 0; si < numV; si++) {
+        const subset = partition[si];
+        const feederResult = calcFeederRoutes(subset, hub);
+        if (!feederResult.length) {
+          allValid = false;
+          break;
+        }
+        // Python: limit results per subset
+        const topN = numV <= 2 ? 50 : 20;
+        feederDfs.push(feederResult.slice(0, topN));
+      }
+      if (!allValid || feederDfs.length !== numV) continue;
 
-        const row = {
-          'No. Skenario': it_c,
-          'Skenario Hub': hub,
-          'System CAPEX (USD)': c_usd,
-          'System OPEX (USD/year)': o_usd_year,
-          'System Cost (USD/MMBTU)': sys_cost,
-        };
+      // Cross-join feeder results (Python: merged_f = merge on 'k')
+      // For numV=2: cross-join feederDfs[0] x feederDfs[1]
+      const crossJoinFeeders = (arrays) => {
+        if (arrays.length === 0) return [[]];
+        const [first, ...rest] = arrays;
+        const restCombos = crossJoinFeeders(rest);
+        const result = [];
+        for (const item of first) {
+          for (const combo of restCombos) {
+            result.push([item, ...combo]);
+          }
+        }
+        return result;
+      };
 
-        for (const [k, v] of Object.entries(rm)) row[`M_${k}`] = v;
-        for (const [k, v] of Object.entries(f1)) row[`F1_${k}`] = v;
+      const feederCombos = crossJoinFeeders(feederDfs);
 
-        allCombos.push(row);
+      for (const feederCombo of feederCombos) {
+        // Python twin constraint: if enforceSameVessel, all feeders must be same vessel
+        // (In Python: merged on ['Nama Kapal', 'Kapasitas Kapal (m3)', 'k'])
+        if (numV > 1) {
+          const firstName = feederCombo[0]['Nama Kapal'];
+          const firstCap = feederCombo[0]['Kapasitas Kapal (m3)'];
+          const allSame = feederCombo.every(f =>
+            f['Nama Kapal'] === firstName && f['Kapasitas Kapal (m3)'] === firstCap
+          );
+          if (!allSame) continue; // twin constraint for feeders
+        }
+
+        for (const rm of motherRows) {
+          it_c += 1;
+
+          let c_usd = rm['Total CAPEX (USD)'];
+          let o_usd_year = rm['Total OPEX (USD/year)'];
+          for (const f of feederCombo) {
+            c_usd += f['Total CAPEX (USD)'];
+            o_usd_year += f['Total OPEX (USD/year)'];
+          }
+          const sys_cost = (c_usd + (o_usd_year * Pyears)) / (totCluster * 1000.0 * 365.0 * Pyears);
+
+          const row = {
+            'No. Skenario': it_c,
+            'Skenario Hub': hub,
+            'Probability': numV > 1 ? 'Split' : 'Full',
+            'System CAPEX (USD)': c_usd,
+            'System OPEX (USD/year)': o_usd_year,
+            'System Cost (USD/MMBTU)': sys_cost,
+          };
+
+          for (const [k, v] of Object.entries(rm)) row[`M_${k}`] = v;
+          for (let fi = 0; fi < numV; fi++) {
+            for (const [k, v] of Object.entries(feederCombo[fi])) {
+              row[`F${fi + 1}_${k}`] = v;
+            }
+            row[`F${fi + 1}_Spokes`] = partition[fi].join(', ');
+          }
+
+          allCombos.push(row);
+        }
       }
     }
   }
 
   if (!allCombos.length) {
-    return { mother: [], feeder1: [], system: [] };
+    return { mother: [], feeder1: [], feeder2: [], system: [] };
   }
 
   // Sort & ambil Top 20 global
@@ -1401,54 +1479,47 @@ async function runHubSpokeTwoVesselModelRisk(input) {
     };
     for (const [k, v] of Object.entries(r)) {
       if (k.startsWith('M_')) {
-        out[k.substring(2)] = v; // buang prefix "M_"
+        out[k.substring(2)] = v;
       }
     }
     return out;
   });
 
-  // Feeder 1 table
-  const feeder1 = sortedAll.map(r => {
-    const out = {
-      'No. Skenario': r['No. Skenario'],
-      'Skenario Hub': r['Skenario Hub'],
-    };
-    for (const [k, v] of Object.entries(r)) {
-      if (k.startsWith('F1_')) {
-        out[k.substring(3)] = v; // buang prefix "F1_"
+  // Feeder tables (dynamic for N feeders)
+  const feederTables = {};
+  for (let fi = 1; fi <= numV; fi++) {
+    const prefix = `F${fi}_`;
+    feederTables[`feeder${fi}`] = sortedAll.map(r => {
+      const out = {
+        'No. Skenario': r['No. Skenario'],
+        'Skenario Hub': r['Skenario Hub'],
+      };
+      for (const [k, v] of Object.entries(r)) {
+        if (k.startsWith(prefix)) {
+          out[k.substring(prefix.length)] = v;
+        }
       }
-    }
-    return out;
-  });
-
-  // Feeder 2 table
-  const feeder2 = sortedAll.map(r => {
-    const out = {
-      'No. Skenario': r['No. Skenario'],
-      'Skenario Hub': r['Skenario Hub'],
-    };
-    for (const [k, v] of Object.entries(r)) {
-      if (k.startsWith('F2_')) {
-        out[k.substring(3)] = v; // buang prefix "F2_"
-      }
-    }
-    return out;
-  });
+      return out;
+    });
+  }
 
   // System gabungan (ringkas)
-  const system = sortedAll.map(r => ({
-    'No. Skenario': r['No. Skenario'],
-    'Skenario Hub': r['Skenario Hub'],
-    'Probability': r['Probability'],
-    'M_Nama Kapal 1 (Mother)': r['M_Nama Kapal'] || r['M_Nama Kapal '],
-    'F1_Nama Kapal 2 (Feeder 1)': r['F1_Nama Kapal'] || null,
-    'F2_Nama Kapal 3 (Feeder 2)': r['F2_Nama Kapal'] || null,
-    'System CAPEX (USD)': r['System CAPEX (USD)'],
-    'System OPEX (USD/year)': r['System OPEX (USD/year)'],
-    'System Cost (USD/MMBTU)': r['System Cost (USD/MMBTU)'],
-  }));
+  const system = sortedAll.map(r => {
+    const out = {
+      'No. Skenario': r['No. Skenario'],
+      'Skenario Hub': r['Skenario Hub'],
+      'M_Nama Kapal': r['M_Nama Kapal'],
+    };
+    for (let fi = 1; fi <= numV; fi++) {
+      out[`F${fi}_Nama Kapal`] = r[`F${fi}_Nama Kapal`] || null;
+    }
+    out['System CAPEX (USD)'] = r['System CAPEX (USD)'];
+    out['System OPEX (USD/year)'] = r['System OPEX (USD/year)'];
+    out['System Cost (USD/MMBTU)'] = r['System Cost (USD/MMBTU)'];
+    return out;
+  });
 
-  return { mother, feeder1, feeder2, system };
+  return { mother, ...feederTables, system };
 }
 
 /**
@@ -1927,10 +1998,18 @@ async function runNVesselProbabilityModel(input) {
         if (!match) continue;
       }
 
-      // Calculate system cost
+      // Calculate system cost using Python's weighted formula
       const c_usd = kapalCombo.reduce((sum, k) => sum + k['Total CAPEX (USD)'], 0);
       const o_usd_year = kapalCombo.reduce((sum, k) => sum + k['Total OPEX (USD/year)'], 0);
-      const sys_cost = (c_usd + (o_usd_year * Pyears)) / (totalDemandBBTUD * 1000 * 365 * Pyears);
+
+      // Python Milk Run weighted system cost:
+      // cost_numerator = sum(Total_Cost_i * vol_i * 1000 * 365 - CAPEX_i / Pyears)
+      let cost_numerator = 0;
+      for (let i = 0; i < numVessels; i++) {
+        const vol_i = partition[i].reduce((s, l) => s + (demandBBTUD[l] || 0), 0);
+        cost_numerator += (kapalCombo[i]['Total Cost (USD/MMBTU)'] * vol_i * 1000 * 365 - kapalCombo[i]['Total CAPEX (USD)'] / Pyears);
+      }
+      const sys_cost = (c_usd + (cost_numerator * Pyears)) / (totalDemandBBTUD * 1000 * 365 * Pyears);
 
       globalScenarioId += 1;
 
@@ -2092,9 +2171,18 @@ async function runNVesselProbabilityModelRisk(input) {
         if (!match) continue;
       }
 
+      // Calculate system cost using Python's weighted formula
       const c_usd = kapalCombo.reduce((sum, k) => sum + k['Total CAPEX (USD)'], 0);
       const o_usd_year = kapalCombo.reduce((sum, k) => sum + k['Total OPEX (USD/year)'], 0);
-      const sys_cost = (c_usd + (o_usd_year * Pyears)) / (totalDemandBBTUD * 1000 * 365 * Pyears);
+
+      // Python Milk Run weighted system cost:
+      // cost_numerator = sum(Total_Cost_i * vol_i * 1000 * 365 - CAPEX_i / Pyears)
+      let cost_numerator = 0;
+      for (let i = 0; i < numVessels; i++) {
+        const vol_i = partition[i].reduce((s, l) => s + (demandBBTUD[l] || 0), 0);
+        cost_numerator += (kapalCombo[i]['Total Cost (USD/MMBTU)'] * vol_i * 1000 * 365 - kapalCombo[i]['Total CAPEX (USD)'] / Pyears);
+      }
+      const sys_cost = (c_usd + (cost_numerator * Pyears)) / (totalDemandBBTUD * 1000 * 365 * Pyears);
 
       globalScenarioId += 1;
 
