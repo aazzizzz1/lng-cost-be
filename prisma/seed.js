@@ -313,12 +313,7 @@ async function main() {
   //   console.log('✅ Locations seeded');
   // }
 
-  // NEW: seed RiskMatrix (R1–R32)
-  const existingRisk = await prisma.riskMatrix.findMany({
-    select: { riskCode: true },
-  });
-  const existingCodes = new Set(existingRisk.map(r => r.riskCode));
-
+  // NEW: seed RiskMatrix (R1–R32) - upsert to ensure values match Excel exactly
   const allRows = [
     {
       riskCode: 'R1',
@@ -339,13 +334,13 @@ async function main() {
       variable: 'Politik (kerusuhan&perang)',
       values: {
         "II.1 P1_BOP": 0.0110697265625, "II.1 P2_Durasi": 0, "II.1 P3_BIV": 0,
-        "II.2 P1_BOP": 0.01074501953125, "II.2 P2_Durasi": 0, "II.2 P3_BIV": 0.0133426757813, "II.2 P4_Panjang Jalur": 0, "II.2 P5_Kecepatan Kapal": 0,
+        "II.2 P1_BOP": 0.01074501953125, "II.2 P2_Durasi": 0, "II.2 P3_BIV": 0.01334267578125, "II.2 P4_Panjang Jalur": 0, "II.2 P5_Kecepatan Kapal": 0,
         "II.3 P1_BOP": 0, "II.3 P2_Durasi": 0, "II.3 P3_BIV": 0, "II.3 P4_Panjang Jalur": 0,
         "II.4 P1_BOP": 0.014316796875, "II.4 P2_Durasi": 0, "II.4 P3_BIV": 0,
-        "II.5 P1_BOP": 0.0133426757813, "II.5 P2_Durasi": 0, "II.5 P3_BIV": 0.0133426757813, "II.5 P4_Panjang Jalur": 0, "II.5 P5_Kecepatan Kapal": 0,
+        "II.5 P1_BOP": 0.01334267578125, "II.5 P2_Durasi": 0, "II.5 P3_BIV": 0.01334267578125, "II.5 P4_Panjang Jalur": 0, "II.5 P5_Kecepatan Kapal": 0,
         "II.6 P1_BOP": 0.014316796875, "II.6 P3_BIV": 0.014316796875,
-        "II.7 P1_BOP": 0.0152909179688, "II.7 P3_BIV": 0.0133426757813,
-        "II.8 P1_BOP": 0.0133426757813, "II.8 P3_BIV": 0
+        "II.7 P1_BOP": 0.01529091796875, "II.7 P3_BIV": 0.01334267578125,
+        "II.8 P1_BOP": 0.01334267578125, "II.8 P3_BIV": 0
       }
     },
     {
@@ -354,7 +349,7 @@ async function main() {
       values: {
         "II.1 P1_BOP": 0, "II.1 P2_Durasi": 0, "II.1 P3_BIV": 0,
         "II.2 P1_BOP": 0, "II.2 P2_Durasi": 0, "II.2 P3_BIV": 0, "II.2 P4_Panjang Jalur": 0, "II.2 P5_Kecepatan Kapal": 0,
-        "II.3 P1_BOP": 0.0118760742188, "II.3 P2_Durasi": 0.018694921875, "II.3 P3_BIV": 0.018694921875, "II.3 P4_Panjang Jalur": 0,
+        "II.3 P1_BOP": 0.01187607421875, "II.3 P2_Durasi": 0.018694921875, "II.3 P3_BIV": 0.018694921875, "II.3 P4_Panjang Jalur": 0,
         "II.4 P1_BOP": 0, "II.4 P2_Durasi": 0, "II.4 P3_BIV": 0,
         "II.5 P1_BOP": 0, "II.5 P2_Durasi": 0, "II.5 P3_BIV": 0, "II.5 P4_Panjang Jalur": 0, "II.5 P5_Kecepatan Kapal": 0,
         "II.6 P1_BOP": 0, "II.6 P3_BIV": 0,
@@ -398,7 +393,7 @@ async function main() {
         "II.2 P1_BOP": 0, "II.2 P2_Durasi": 0, "II.2 P3_BIV": 0, "II.2 P4_Panjang Jalur": 0, "II.2 P5_Kecepatan Kapal": 0,
         "II.3 P1_BOP": 0.0117203125, "II.3 P2_Durasi": 0.01324375, "II.3 P3_BIV": 0, "II.3 P4_Panjang Jalur": 0,
         "II.4 P1_BOP": 0, "II.4 P2_Durasi": 0, "II.4 P3_BIV": 0,
-        "II.5 P1_BOP": 0.0224234375, "II.5 P2_Durasi": 0.023663671875, "II.5 P3_BIV": 0, "II.5 P4_Panjang Jalur": 0, "II.5 P5_Kecepatan Kapal": 0,
+        "II.5 P1_BOP": 0, "II.5 P2_Durasi": 0, "II.5 P3_BIV": 0, "II.5 P4_Panjang Jalur": 0, "II.5 P5_Kecepatan Kapal": 0,
         "II.6 P1_BOP": 0, "II.6 P3_BIV": 0,
         "II.7 P1_BOP": 0, "II.7 P3_BIV": 0,
         "II.8 P1_BOP": 0, "II.8 P3_BIV": 0
@@ -408,14 +403,14 @@ async function main() {
       riskCode: 'R7',
       variable: 'Kerusakan peralatan',
       values: {
-        "II.1 P1_BOP": 0.031312109375, "II.1 P2_Durasi": 0.0498594726563, "II.1 P3_BIV": 0.0389390625,
-        "II.2 P1_BOP": 0.038245703125, "II.2 P2_Durasi": 0.0619932617188, "II.2 P3_BIV": 0, "II.2 P4_Panjang Jalur": 0, "II.2 P5_Kecepatan Kapal": 0,
+        "II.1 P1_BOP": 0.031312109375, "II.1 P2_Durasi": 0.04985947265625, "II.1 P3_BIV": 0.0389390625,
+        "II.2 P1_BOP": 0.038245703125, "II.2 P2_Durasi": 0.06199326171875, "II.2 P3_BIV": 0, "II.2 P4_Panjang Jalur": 0, "II.2 P5_Kecepatan Kapal": 0,
         "II.3 P1_BOP": 0, "II.3 P2_Durasi": 0, "II.3 P3_BIV": 0, "II.3 P4_Panjang Jalur": 0,
-        "II.4 P1_BOP": 0.0510728515625, "II.4 P2_Durasi": 0.0607798828125, "II.4 P3_BIV": 0.0571397460938,
-        "II.5 P1_BOP": 0.0425791992188, "II.5 P2_Durasi": 0.0522862304688, "II.5 P3_BIV": 0, "II.5 P4_Panjang Jalur": 0, "II.5 P5_Kecepatan Kapal": 0,
-        "II.6 P1_BOP": 0.04864609375, "II.6 P3_BIV": 0.0571397460938,
-        "II.7 P1_BOP": 0.04864609375,
-        "II.8 P1_BOP": 0.04864609375, "II.8 P3_BIV": 0.0474327148438
+        "II.4 P1_BOP": 0.0510728515625, "II.4 P2_Durasi": 0.0607798828125, "II.4 P3_BIV": 0.05713974609375,
+        "II.5 P1_BOP": 0.04257919921875, "II.5 P2_Durasi": 0.05228623046875, "II.5 P3_BIV": 0, "II.5 P4_Panjang Jalur": 0, "II.5 P5_Kecepatan Kapal": 0,
+        "II.6 P1_BOP": 0.04864609375, "II.6 P3_BIV": 0.05713974609375,
+        "II.7 P1_BOP": 0.04864609375, "II.7 P3_BIV": 0.0510728515625,
+        "II.8 P1_BOP": 0.04864609375, "II.8 P3_BIV": 0.04743271484375
       }
     },
     {
@@ -425,9 +420,9 @@ async function main() {
         "II.1 P1_BOP": 0.0224234375, "II.1 P2_Durasi": 0.0280044921875, "II.1 P3_BIV": 0.031105078125,
         "II.2 P1_BOP": 0.0255240234375, "II.2 P2_Durasi": 0.0317251953125, "II.2 P3_BIV": 0, "II.2 P4_Panjang Jalur": 0, "II.2 P5_Kecepatan Kapal": 0,
         "II.3 P1_BOP": 0, "II.3 P2_Durasi": 0, "II.3 P3_BIV": 0, "II.3 P4_Panjang Jalur": 0,
-        "II.4 P1_BOP": 0.0359109863281, "II.4 P2_Durasi": 0.03482578125, "II.4 P3_BIV": 0.033585546875,
+        "II.4 P1_BOP": 0.035910986328125, "II.4 P2_Durasi": 0.03482578125, "II.4 P3_BIV": 0.033585546875,
         "II.5 P1_BOP": 0.0292447265625, "II.5 P2_Durasi": 0.0342056640625, "II.5 P3_BIV": 0, "II.5 P4_Panjang Jalur": 0, "II.5 P5_Kecepatan Kapal": 0,
-        "II.6 P1_BOP": 0.033585546875, "II.6 P3_BIV": 0.0359109863281,
+        "II.6 P1_BOP": 0.033585546875, "II.6 P3_BIV": 0.035910986328125,
         "II.7 P1_BOP": 0.0317251953125, "II.7 P3_BIV": 0.0317251953125,
         "II.8 P1_BOP": 0.02986484375, "II.8 P3_BIV": 0.028624609375
       }
@@ -607,7 +602,7 @@ async function main() {
         "II.1 P1_BOP": 0.0230435546875, "II.1 P2_Durasi": 0.0317251953125, "II.1 P3_BIV": 0,
         "II.2 P1_BOP": 0.0242837890625, "II.2 P2_Durasi": 0.0280044921875, "II.2 P3_BIV": 0, "II.2 P4_Panjang Jalur": 0, "II.2 P5_Kecepatan Kapal": 0,
         "II.3 P1_BOP": 0, "II.3 P2_Durasi": 0, "II.3 P3_BIV": 0, "II.3 P4_Panjang Jalur": 0,
-        "II.4 P1_BOP": 0.023663671875, "II.4 P2_Durasi": 0.02738437, "II.4 P3_BIV": 0,
+        "II.4 P1_BOP": 0.023663671875, "II.4 P2_Durasi": 0.027384375, "II.4 P3_BIV": 0,
         "II.5 P1_BOP": 0.0218033203125, "II.5 P2_Durasi": 0.0242837890625, "II.5 P3_BIV": 0, "II.5 P4_Panjang Jalur": 0, "II.5 P5_Kecepatan Kapal": 0,
         "II.6 P1_BOP": 0, "II.6 P3_BIV": 0,
         "II.7 P1_BOP": 0, "II.7 P3_BIV": 0,
@@ -632,13 +627,13 @@ async function main() {
       riskCode: 'R23',
       variable: 'Gempa bumi',
       values: {
-        "II.1 P1_BOP": 0.0234538085938, "II.1 P2_Durasi": 0.0335709960938, "II.1 P3_BIV": 0,
-        "II.2 P1_BOP": 0.0247184570313, "II.2 P2_Durasi": 0.032938671875, "II.2 P3_BIV": 0, "II.2 P4_Panjang Jalur": 0, "II.2 P5_Kecepatan Kapal": 0,
+        "II.1 P1_BOP": 0.02345380859375, "II.1 P2_Durasi": 0.03357099609375, "II.1 P3_BIV": 0,
+        "II.2 P1_BOP": 0.02471845703125, "II.2 P2_Durasi": 0.032938671875, "II.2 P3_BIV": 0, "II.2 P4_Panjang Jalur": 0, "II.2 P5_Kecepatan Kapal": 0,
         "II.3 P1_BOP": 0, "II.3 P2_Durasi": 0, "II.3 P3_BIV": 0, "II.3 P4_Panjang Jalur": 0,
-        "II.4 P1_BOP": 0.0266154296875, "II.4 P2_Durasi": 0.0310416992188, "II.4 P3_BIV": 0,
-        "II.5 P1_BOP": 0.0272477539063, "II.5 P2_Durasi": 0.0297770507813, "II.5 P3_BIV": 0, "II.5 P4_Panjang Jalur": 0, "II.5 P5_Kecepatan Kapal": 0,
-        "II.6 P1_BOP": 0.0323063476563, "II.6 P3_BIV": 0,
-        "II.7 P1_BOP": 0.0285124023438, "II.7 P3_BIV": 0,
+        "II.4 P1_BOP": 0.0266154296875, "II.4 P2_Durasi": 0.03104169921875, "II.4 P3_BIV": 0,
+        "II.5 P1_BOP": 0.02724775390625, "II.5 P2_Durasi": 0.02977705078125, "II.5 P3_BIV": 0, "II.5 P4_Panjang Jalur": 0, "II.5 P5_Kecepatan Kapal": 0,
+        "II.6 P1_BOP": 0.03230634765625, "II.6 P3_BIV": 0,
+        "II.7 P1_BOP": 0.02851240234375, "II.7 P3_BIV": 0,
         "II.8 P1_BOP": 0.027880078125, "II.8 P3_BIV": 0
       }
     },
@@ -770,14 +765,14 @@ async function main() {
     },
   ];
 
-  const toInsert = allRows.filter(r => !existingCodes.has(r.riskCode));
-  if (toInsert.length > 0) {
-    await prisma.riskMatrix.createMany({
-      data: toInsert,
-      skipDuplicates: true,
+  for (const row of allRows) {
+    await prisma.riskMatrix.upsert({
+      where: { riskCode: row.riskCode },
+      update: { variable: row.variable, values: row.values },
+      create: row,
     });
   }
-  console.log(`✅ RiskMatrix seeded (${allRows.length} codes with all II.1-II.8 columns)`);
+  console.log(`✅ RiskMatrix seeded/updated (${allRows.length} codes with all II.1-II.8 columns)`);
 
   console.log("Seeding completed successfully!");
 }
