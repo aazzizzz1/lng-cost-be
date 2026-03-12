@@ -172,6 +172,49 @@ const II_MAP = {
   P5_Kecepatan_Kapal: ['II.2','II.5'],
 };
 
+const RISK_SECTION_DETAILS = {
+  'II.1': {
+    code: 'II.1',
+    title: 'Pemuatan LNG',
+    description: 'Pemuatan LNG dari tangki penyimpanan ke kapal dan sirkulasi BOG kembali ke kilang.',
+  },
+  'II.2': {
+    code: 'II.2',
+    title: 'Aktivitas kapal sandar & lepas sandar (loading)',
+    description: 'Tahapan manuver, sandar, persiapan bongkar muat, dan keberangkatan saat loading.',
+  },
+  'II.3': {
+    code: 'II.3',
+    title: 'Pengiriman LNG',
+    description: 'Perjalanan LNG dari terminal asal ke terminal penerima atau terminal berikutnya.',
+  },
+  'II.4': {
+    code: 'II.4',
+    title: 'Pembongkaran LNG',
+    description: 'Pembongkaran LNG dari kapal ke fasilitas darat serta pengembalian BOG.',
+  },
+  'II.5': {
+    code: 'II.5',
+    title: 'Aktivitas sandar & lepas sandar (unloading)',
+    description: 'Tahapan manuver, sandar, persiapan bongkar muat, dan keberangkatan saat unloading.',
+  },
+  'II.6': {
+    code: 'II.6',
+    title: 'Penyimpanan LNG',
+    description: 'Penyimpanan LNG pada tangki darat.',
+  },
+  'II.7': {
+    code: 'II.7',
+    title: 'Regasifikasi LNG',
+    description: 'Proses pemompaan dan pemanasan LNG hingga kembali menjadi gas.',
+  },
+  'II.8': {
+    code: 'II.8',
+    title: 'Distribusi gas',
+    description: 'Penyaluran gas ke pelanggan atau pembangkit setelah proses akhir distribusi.',
+  },
+};
+
 function buildRiskDB(riskSelections, riskRows) {
   const db = {
     P1_Biaya_Operasi: {}, P2_Durasi: {}, P3_Biaya_Investasi: {}, P4_Panjang_Jalur: {}, P5_Kecepatan_Kapal: {},
@@ -203,6 +246,49 @@ function getRiskImpact(db, pGroup, iiCode) {
   return rec ? rec.impact : 0.0;
 }
 
+function buildRiskSelectionSummary(riskSelections, riskRows) {
+  if (!riskSelections || !riskRows || !Array.isArray(riskRows)) return [];
+
+  const rowMap = new Map(riskRows.map((row) => [row.riskCode, row]));
+  const summary = [];
+
+  for (const [iiCode, codes] of Object.entries(riskSelections.selections || {})) {
+    const selectedCodes = Array.isArray(codes)
+      ? [...new Set(codes.filter((code) => typeof code === 'string').map((code) => code.trim()).filter(Boolean))]
+      : [];
+    if (!selectedCodes.length) continue;
+
+    const impacts = {};
+    for (const [pGroup, iiList] of Object.entries(II_MAP)) {
+      if (!iiList.includes(iiCode)) continue;
+
+      const colKey = `${iiCode} ${COL_MAP[pGroup]}`;
+      let total = 0;
+      for (const code of selectedCodes) {
+        const rawValue = rowMap.get(code)?.values?.[colKey];
+        if (typeof rawValue === 'number') total += rawValue;
+      }
+      impacts[pGroup] = total;
+    }
+
+    summary.push({
+      ...(RISK_SECTION_DETAILS[iiCode] || { code: iiCode, title: iiCode, description: '' }),
+      selectedRisks: selectedCodes.map((code) => ({
+        riskCode: code,
+        variable: rowMap.get(code)?.variable || null,
+      })),
+      impacts,
+    });
+  }
+
+  return summary;
+}
+
+function limitRows(rows, resultLimit) {
+  if (!Number.isFinite(resultLimit)) return rows;
+  return rows.slice(0, Math.max(0, resultLimit));
+}
+
 // --- NO-RISK SINGLE VESSEL ENGINE ---
 async function runSupplyChainModel(input) {
   const {
@@ -212,6 +298,7 @@ async function runSupplyChainModel(input) {
     geoMap,
     numVessels = 1, // Python: cap_term divided by num_v
     isFeeder = false,
+    resultLimit = 20,
   } = input;
 
   const { tankSize, tankPrice } = getTankConfig(params);
@@ -359,7 +446,7 @@ async function runSupplyChainModel(input) {
   }
 
   results.sort((a, b) => a['Total Cost (USD/MMBTU)'] - b['Total Cost (USD/MMBTU)']);
-  return results.slice(0, 20);
+  return limitRows(results, resultLimit);
 }
 
 // --- RISK-AWARE SINGLE VESSEL ENGINE (SAME REFACTOR) ---
@@ -369,6 +456,7 @@ async function runSupplyChainModelRisk(input) {
     params, inflationFactor, riskDB, geoMap,
     numVessels = 1, // Python: cap_term divided by num_v
     isFeeder = false,
+    resultLimit = 20,
   } = input;
 
   const { tankSize, tankPrice } = getTankConfig(params);
@@ -551,7 +639,7 @@ async function runSupplyChainModelRisk(input) {
   }
 
   results.sort((a, b) => a['Total Cost (USD/MMBTU)'] - b['Total Cost (USD/MMBTU)']);
-  return results.slice(0, 20);
+  return limitRows(results, resultLimit);
 }
 
 // Twin vessel probability model
@@ -1468,9 +1556,6 @@ async function runHubSpokeTwoVesselModelRisk(input) {
     .sort((a, b) => a['System Cost (USD/MMBTU)'] - b['System Cost (USD/MMBTU)'])
     .slice(0, 20);
 
-  // Re-number scenarios sequentially after sorting
-  sortedAll.forEach((r, idx) => { r['No. Skenario'] = idx + 1; });
-
   // Mother table
   const mother = sortedAll.map(r => {
     const out = {
@@ -1519,7 +1604,7 @@ async function runHubSpokeTwoVesselModelRisk(input) {
     return out;
   });
 
-  return { mother, ...feederTables, system };
+  return { rankings: sortedAll, mother, ...feederTables, system };
 }
 
 /**
@@ -1849,9 +1934,6 @@ async function runHubSpokeSingleModelRisk(input) {
     .sort((a, b) => a['System Cost (USD/MMBTU)'] - b['System Cost (USD/MMBTU)'])
     .slice(0, 20);
 
-  // Re-number scenarios after sorting
-  sortedAll.forEach((r, idx) => { r['No. Skenario'] = idx + 1; });
-
   const mother = sortedAll.map(r => {
     const out = { 'No. Skenario': r['No. Skenario'], 'Skenario Hub': r['Skenario Hub'] };
     for (const [k, v] of Object.entries(r)) {
@@ -1878,7 +1960,7 @@ async function runHubSpokeSingleModelRisk(input) {
     'System Cost (USD/MMBTU)': r['System Cost (USD/MMBTU)'],
   }));
 
-  return { mother, feeder1, system };
+  return { rankings: sortedAll, mother, feeder1, system };
 }
 
 /**
@@ -1937,6 +2019,7 @@ async function runNVesselProbabilityModel(input) {
     for (let i = 0; i < numVessels; i++) {
       const subset = partition[i];
       const subsetDemand = Object.fromEntries(subset.map(k => [k, demandBBTUD[k]]));
+      const topN = numVessels <= 2 ? 50 : (numVessels <= 3 ? 20 : 10);
       
       const df = await runSupplyChainModel({
         vessels, routes, oru, terminal,
@@ -1945,16 +2028,14 @@ async function runNVesselProbabilityModel(input) {
         params, inflationFactor,
         geoMap,
         numVessels, // pass numVessels to divide terminal ORU properly
+        resultLimit: topN,
       });
 
       if (!df.length) {
         allValid = false;
         break;
       }
-
-      // Ambil top candidates (limit untuk performa)
-      const topN = numVessels <= 2 ? 50 : (numVessels <= 3 ? 20 : 10);
-      subResults.push(df.slice(0, topN));
+      subResults.push(df);
     }
 
     if (!allValid) continue;
@@ -2018,27 +2099,18 @@ async function runNVesselProbabilityModel(input) {
         'Probability': partition.map(p => p.length).join(':'),
         'Nama Kapal': kapalCombo[0]['Nama Kapal'],
         'Kapasitas Kapal (m3)': kapalCombo[0]['Kapasitas Kapal (m3)'],
+        'System CAPEX (USD)': c_usd,
+        'System OPEX (USD/year)': o_usd_year,
+        'System Cost (USD/MMBTU)': sys_cost,
       };
 
-      // Add details for each kapal
       for (let i = 0; i < numVessels; i++) {
         const k = kapalCombo[i];
-        const prefix = `Kapal ${i + 1}`;
-        row[`Rute ${prefix}`] = k['Rute'];
-        row[`Total Jarak ${prefix} (NM)`] = k['Total Jarak (NM)'];
-        row[`RTD ${prefix}`] = k['RTD'];
-        row[`Demand LNG/day ${prefix} (m3)`] = k['Demand LNG/day (m3)'];
-        row[`Nominal Capacity ${prefix} (m3)`] = k['Nominal Capacity (m3)'];
-        row[`Utilitasi_Factor_LNGC ${prefix}`] = k['Utilitasi_Factor_LNGC'];
-        row[`CAPEX ${prefix}`] = k['Total CAPEX (USD)'];
-        row[`OPEX ${prefix}`] = k['Total OPEX (USD/year)'];
-        row[`Cost ${prefix}`] = k['Total Cost (USD/MMBTU)'];
-        row[`Spokes ${prefix}`] = k['Spokes'];
+        for (const [col, value] of Object.entries(k)) {
+          row[`V${i + 1}_${col}`] = value;
+        }
+        row[`V${i + 1}_Spokes`] = partition[i].join(', ');
       }
-
-      row['System CAPEX (USD)'] = c_usd;
-      row['System OPEX (USD/year)'] = o_usd_year;
-      row['System Cost (USD/MMBTU)'] = sys_cost;
 
       allCombos.push({ row, kapalCombo, partition });
     }
@@ -2049,12 +2121,13 @@ async function runNVesselProbabilityModel(input) {
   const top20 = allCombos.slice(0, 20);
 
   // Build output tables
-  const result = { system: [] };
+  const result = { rankings: [], system: [] };
   for (let i = 1; i <= numVessels; i++) {
     result[`kapal_${i}`] = [];
   }
 
   for (const { row, kapalCombo } of top20) {
+    result.rankings.push(row);
     result.system.push({
       'No. Skenario': row['No. Skenario'],
       'Probability': row['Probability'],
@@ -2115,6 +2188,7 @@ async function runNVesselProbabilityModelRisk(input) {
     for (let i = 0; i < numVessels; i++) {
       const subset = partition[i];
       const subsetDemand = Object.fromEntries(subset.map(k => [k, demandBBTUD[k]]));
+      const topN = numVessels <= 2 ? 50 : (numVessels <= 3 ? 20 : 10);
       
       const df = await runSupplyChainModelRisk({
         vessels, routes, oru, terminal,
@@ -2122,15 +2196,14 @@ async function runNVesselProbabilityModelRisk(input) {
         demandBBTUD: subsetDemand,
         params, inflationFactor, riskDB, geoMap,
         numVessels, // pass numVessels to divide terminal ORU properly
+        resultLimit: topN,
       });
 
       if (!df.length) {
         allValid = false;
         break;
       }
-
-      const topN = numVessels <= 2 ? 50 : (numVessels <= 3 ? 20 : 10);
-      subResults.push(df.slice(0, topN));
+      subResults.push(df);
     }
 
     if (!allValid) continue;
@@ -2191,26 +2264,18 @@ async function runNVesselProbabilityModelRisk(input) {
         'Probability': partition.map(p => p.length).join(':'),
         'Nama Kapal': kapalCombo[0]['Nama Kapal'],
         'Kapasitas Kapal (m3)': kapalCombo[0]['Kapasitas Kapal (m3)'],
+        'System CAPEX (USD)': c_usd,
+        'System OPEX (USD/year)': o_usd_year,
+        'System Cost (USD/MMBTU)': sys_cost,
       };
 
       for (let i = 0; i < numVessels; i++) {
         const k = kapalCombo[i];
-        const prefix = `Kapal ${i + 1}`;
-        row[`Rute ${prefix}`] = k['Rute'];
-        row[`Total Jarak ${prefix} (NM)`] = k['Total Jarak (NM)'];
-        row[`RTD ${prefix}`] = k['RTD'];
-        row[`Demand LNG/day ${prefix} (m3)`] = k['Demand LNG/day (m3)'];
-        row[`Nominal Capacity ${prefix} (m3)`] = k['Nominal Capacity (m3)'];
-        row[`Utilitasi_Factor_LNGC ${prefix}`] = k['Utilitasi_Factor_LNGC'];
-        row[`CAPEX ${prefix}`] = k['Total CAPEX (USD)'];
-        row[`OPEX ${prefix}`] = k['Total OPEX (USD/year)'];
-        row[`Cost ${prefix}`] = k['Total Cost (USD/MMBTU)'];
-        row[`Spokes ${prefix}`] = k['Spokes'];
+        for (const [col, value] of Object.entries(k)) {
+          row[`V${i + 1}_${col}`] = value;
+        }
+        row[`V${i + 1}_Spokes`] = partition[i].join(', ');
       }
-
-      row['System CAPEX (USD)'] = c_usd;
-      row['System OPEX (USD/year)'] = o_usd_year;
-      row['System Cost (USD/MMBTU)'] = sys_cost;
 
       allCombos.push({ row, kapalCombo, partition });
     }
@@ -2219,15 +2284,13 @@ async function runNVesselProbabilityModelRisk(input) {
   allCombos.sort((a, b) => a.row['System Cost (USD/MMBTU)'] - b.row['System Cost (USD/MMBTU)']);
   const top20 = allCombos.slice(0, 20);
 
-  // Re-number scenarios sequentially after sorting
-  top20.forEach((item, idx) => { item.row['No. Skenario'] = idx + 1; });
-
-  const result = { system: [] };
+  const result = { rankings: [], system: [] };
   for (let i = 1; i <= numVessels; i++) {
     result[`kapal_${i}`] = [];
   }
 
   for (const { row, kapalCombo } of top20) {
+    result.rankings.push(row);
     result.system.push({
       'No. Skenario': row['No. Skenario'],
       'Probability': row['Probability'],
@@ -2298,6 +2361,8 @@ module.exports = {
   runSupplyChainModel,
   runTwoVesselProbabilityModel,
   buildRiskDB,
+  buildRiskSelectionSummary,
+  RISK_SECTION_DETAILS,
   runSupplyChainModelRisk,
   runTwoVesselProbabilityModelRisk,
   runHubSpokeSingleModel,

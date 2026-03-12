@@ -3,6 +3,7 @@ const {
   runSupplyChainModel,
   runTwoVesselProbabilityModel,
   buildRiskDB,
+  buildRiskSelectionSummary,
   runSupplyChainModelRisk,
   runTwoVesselProbabilityModelRisk,
   runHubSpokeSingleModel,
@@ -151,6 +152,31 @@ function normalizeResultsForResponse({ method, numVessels, results }) {
         ? r
         : { 'No. Skenario': i + 1, ...r }
     );
+
+  if (results && Array.isArray(results.rankings)) {
+    const tables = {
+      ranking: addScenarioIndex(results.rankings),
+    };
+
+    if (method === 'hub-spoke' && results.mother) {
+      tables.mother = addScenarioIndex(results.mother);
+      for (let i = 1; i <= 10; i++) {
+        const key = `feeder${i}`;
+        if (Array.isArray(results[key])) tables[key] = addScenarioIndex(results[key]);
+      }
+      if (Array.isArray(results.system)) tables.system = addScenarioIndex(results.system);
+      return { tables };
+    }
+
+    for (let i = 1; i <= numVessels; i++) {
+      const key = `kapal_${i}`;
+      if (Array.isArray(results[key])) tables[key] = addScenarioIndex(results[key]);
+    }
+    if (Array.isArray(results.total) || Array.isArray(results.system)) {
+      tables.system = addScenarioIndex(results.total || results.system);
+    }
+    return { tables };
+  }
 
   // === CASE: Hub & Spoke dengan N-kapal (Mother + N Feeders) ===
   if (method === 'hub-spoke' && results && results.mother) {
@@ -326,6 +352,13 @@ async function runUnified(req, res) {
         numVessels: cachedNumVessels,
         results: cachedResults,
       });
+      const cachedRiskSelections = cached.params?.riskSelections;
+      const cachedRiskSummary = cachedRiskSelections
+        ? buildRiskSelectionSummary(
+            { selections: cachedRiskSelections },
+            await prisma.riskMatrix.findMany({ orderBy: { riskCode: 'asc' } })
+          )
+        : [];
 
       return res.json({
         runKey,
@@ -341,6 +374,7 @@ async function runUnified(req, res) {
           base_year: baseYear,
         },
         tables,
+        riskSummary: cachedRiskSummary,
         topResult: cached.topResult,
       });
     }
@@ -386,7 +420,17 @@ async function runUnified(req, res) {
     const geoMap = rawGeo ? { ...dbGeo, ...rawGeo } : dbGeo;
 
     const inflationFactor = Math.pow(1 + params.inflation_rate, params.analysis_year - baseYear);
-    const paramsWithMethod = { ...params, method, numVessels };
+    const terminal = terminals[0];
+    const hasRisk = risk && risk.selections;
+    const riskDB = hasRisk ? buildRiskDB(risk, riskRows) : null;
+
+    const paramsWithMethod = {
+      ...params,
+      method,
+      numVessels,
+      riskSelections: risk?.selections || undefined,
+    };
+    const riskSummary = hasRisk ? buildRiskSelectionSummary(risk, riskRows) : [];
 
     // Helper: save and respond
     async function saveAndRespond({ resultsObj, topResult, mode }) {
@@ -424,13 +468,10 @@ async function runUnified(req, res) {
           geo: geoMap,
         },
         tables,
+        riskSummary,
         topResult,
       });
     }
-
-    const terminal = terminals[0];
-    const hasRisk = risk && risk.selections;
-    const riskDB = hasRisk ? buildRiskDB(risk, riskRows) : null;
 
     const vesselCfg = vesselConfig || {};
     const engineConfig = {

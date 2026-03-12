@@ -4,6 +4,7 @@ const { validateSupplyChainInput } = require('../middlewares/supplychain.middlew
 const runCtrl = require('../controllers/supplychainRun.controller');
 const scenCtrl = require('../controllers/supplychainScenario.controller');
 const prisma = require('../config/db');
+const { RISK_SECTION_DETAILS } = require('../services/supplychainEngine');
 
 // Create/Update scenario → return runKey
 router.post('/scenario', validateSupplyChainInput, scenCtrl.upsertScenario);
@@ -54,54 +55,79 @@ router.get('/places', async (req, res) => {
       });
     }
   }
-
   res.json(merged);
+});
+
+router.get('/places/catalog', async (req, res) => {
+  const [locRows, distRows] = await Promise.all([
+    prisma.location.findMany(),
+    prisma.distanceRoute.findMany(),
+  ]);
+
+  const locMap = new Map(locRows.map(l => [l.name, l]));
+  const uniqueNames = new Set();
+  for (const r of distRows) {
+    uniqueNames.add(r.origin);
+    uniqueNames.add(r.destination);
+  }
+
+  const places = Array.from(uniqueNames).map(name => {
+    const l = locMap.get(name);
+    return {
+      name,
+      type: l?.type || (name.includes('Badak NGL') ? 'terminal' : 'plant'),
+      latitude: l?.latitude ?? null,
+      longitude: l?.longitude ?? null,
+    };
+  });
+
+  for (const l of locRows) {
+    if (!uniqueNames.has(l.name)) {
+      places.push({
+        name: l.name,
+        type: l.type,
+        latitude: l.latitude ?? null,
+        longitude: l.longitude ?? null,
+      });
+    }
+  }
+
+  res.json({
+    places,
+    terminals: places.filter((place) => place.type === 'terminal'),
+    demands: places.filter((place) => place.type !== 'terminal'),
+  });
 });
 
 // Risk section descriptions (II.1 - II.8)
 router.get('/risk-sections', (req, res) => {
-  res.json([
-    {
-      code: 'II.1',
-      title: 'Pemuatan LNG',
-      description: '1. LNG yang disimpan dalam tangki penyimpanan dipompa ke dermaga produk. 2. Di dermaga, LNG dimuat ke kapal LNG untuk diekspor. 3. BOG yang terbentuk dikapal dikirim kembali ke Kilang LNG.',
-    },
-    {
-      code: 'II.2',
-      title: 'Aktivitas kapal sandar & lepas sandar (loading)',
-      description: 'Aktifitas kapal meliputi kegiatan (a) sandar ke dermaga dan (b) lepas sandar dengan tahapan mengubah cekungan (turning basins), berlabuh, persiapan untuk bongkar muat, dan keberangkatan.',
-    },
-    {
-      code: 'II.3',
-      title: 'Pengiriman LNG',
-      description: '1. Kapal bermuatan LNG berlayar dari LNG Plant ke terminal penerima LNG. 2. Kapal/truk mengangkut LNG dari terminal LNG pertama ke terminal LNG berikutnya.',
-    },
-    {
-      code: 'II.4',
-      title: 'Pembongkaran LNG',
-      description: '1. Mengeluarkan LNG dari kapal menggunakan pompa kapal dan loading arm (lengan bongkar) di dermaga. 2. Mengembalikan Boil of Gas (BOG) kembali ke tanki kapal menjaga tekanan tanki 8 - 10 Kpa.',
-    },
-    {
-      code: 'II.5',
-      title: 'Pembongkaran LNG (sandar & lepas sandar)',
-      description: 'Aktifitas kapal meliputi kegiatan (a) sandar ke dermaga dan (b) lepas sandar dengan tahapan mengubah cekungan (turning basins), berlabuh, persiapan untuk bongkar muat, dan keberangkatan.',
-    },
-    {
-      code: 'II.6',
-      title: 'Penyimpanan LNG',
-      description: 'Menyimpan LNG dalam tanki penyimpan darat LNG.',
-    },
-    {
-      code: 'II.7',
-      title: 'Regasifikasi LNG',
-      description: 'LNG dinaikan tekanan menggunakan pompa dalam tanki, kemudian dirubah menjadi gas dengan dipanaskan menggunakan media pemanas seperti air laut, air panas, udara.',
-    },
-    {
-      code: 'II.8',
-      title: 'Distribusi gas',
-      description: '1. Penambahan pembau (odorant) pada gas. 2. Pengiriman gas menuju ke pelanggan/pembangkit listrik melalui pipa.',
-    },
-  ]);
+  res.json(Object.values(RISK_SECTION_DETAILS));
+});
+
+router.get('/risk-matrix/sections', async (req, res) => {
+  try {
+    const rows = await prisma.riskMatrix.findMany({ orderBy: { riskCode: 'asc' } });
+    const groups = Object.values(RISK_SECTION_DETAILS).map((section) => ({
+      ...section,
+      risks: rows.map((row) => {
+        const impacts = Object.fromEntries(
+          Object.entries(row.values || {})
+            .filter(([key]) => key.startsWith(`${section.code} `))
+            .map(([key, value]) => [key.replace(`${section.code} `, ''), value])
+        );
+
+        return {
+          riskCode: row.riskCode,
+          variable: row.variable,
+          impacts,
+        };
+      }).filter((risk) => Object.keys(risk.impacts).length > 0),
+    }));
+
+    res.json(groups);
+  } catch (e) {
+    res.status(500).json({ error: 'RiskMatrix section fetch error', detail: e.message });
+  }
 });
 
 // NEW: RiskMatrix list (for dynamic frontend)
