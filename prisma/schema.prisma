@@ -256,3 +256,170 @@ model RiskMatrix {
   values    Json     // key: "II.1 P1_BOP", "II.2 P2_Durasi", ...
   createdAt DateTime @default(now())
 }
+
+// ============================
+// JETTY & DOLPHINS MODULE
+// ============================
+
+// Lookup: Cb default by ship type (BS 6349-4 Table 3)
+model JdCbDefault {
+  id       Int    @id @default(autoincrement())
+  shipType String @unique // LNGC, LNGBV, SPB, Tanker, Container, Ro-Ro, Bulk
+  cb       Float
+  source   String @default("BS 6349-4 Table 3 / PIANC")
+  @@map("jd_cb_defaults")
+}
+
+// Lookup: Berthing velocity (PIANC 2002 / BS 6349)
+model JdBerthingVelocity {
+  id       Int    @id @default(autoincrement())
+  deltaMin Float  // displacement min (ton)
+  deltaMax Float  // displacement max (ton)
+  favMin   Float
+  favMax   Float
+  modMin   Float
+  modMax   Float
+  unfMin   Float
+  unfMax   Float
+  @@map("jd_berthing_velocities")
+}
+
+// Lookup: Fender catalogue + cost
+model JdFenderCatalog {
+  id         Int    @id @default(autoincrement())
+  fenderId   String @unique
+  type       String
+  energyKj   Float  // Energy rated (kJ)
+  reactionKn Float  // Reaction (kN)
+  deflPct    Float  // Deflection %
+  heightMm   Int
+  widthMm    Int
+  costIdr    Float  // Cost IDR/unit
+  notes      String?
+  referensi  String?
+  @@map("jd_fender_catalog")
+}
+
+// Lookup: Steel pipe pile properties (fy=350 MPa)
+model JdPileCatalog {
+  id      Int   @id @default(autoincrement())
+  dMm     Float // OD (mm)
+  tMm     Float // wall thickness (mm)
+  massKgM Float // kg/m
+  aMm2    Float // cross-section area mm²
+  auM2M   Float // Au m²/m
+  abMm2   Float // Ab mm²
+  welCm3  Float // section modulus cm³
+  mCapKnm Float // moment capacity kN·m
+  iCm4    Float // second moment cm4
+  eiKnm2  Float // EI kNm²
+  zKnSm   Float // Z (kN s/m)
+  @@index([dMm, tMm])
+  @@map("jd_pile_catalog")
+}
+
+// Lookup: Quick Release Hook classes & cost
+model JdQrhCatalog {
+  id          Int    @id @default(autoincrement())
+  classSwlKn  Float  @unique // Class SWL (kN)
+  swlTon      Float
+  proofFactor Float  @default(1.5)
+  costIdr     Float
+  typeSupplier String
+  supplier    String
+  tahun       Int    @default(2024)
+  @@map("jd_qrh_catalog")
+}
+
+// Lookup: Unit rates for CAPEX items
+model JdUnitRate {
+  id          Int    @id @default(autoincrement())
+  rateId      String @unique // e.g. STR-001, GEN-003, MEP-001
+  item        String
+  rateIdr     Float
+  unit        String
+  keterangan  String?
+  tahun       Int    @default(2024)
+  @@map("jd_unit_rates")
+}
+
+// Settings: all constants & defaults for J&D calculations
+model JdSetting {
+  id    Int    @id @default(autoincrement())
+  key   String @unique
+  value Float
+  unit  String?
+  notes String?
+  @@map("jd_settings")
+}
+
+// Main J&D calculation run (linked to project)
+model JdCalculation {
+  id        Int      @id @default(autoincrement())
+  projectId Int?
+
+  // --- A. VESSEL INPUT ---
+  shipType       String  @default("LNGBV")
+  tugAssist      Boolean @default(true)
+  loa            Float   // m
+  lpp            Float?  // m — null = auto
+  beam           Float   // m
+  draft          Float   // m
+  cargoCapacity  Float   // m³
+  displacement   Float?  // ton — null = auto-calc
+  freeboard      Float?  // m — null = default
+  cbOverride     Float?  // null = auto
+
+  // --- B. BERTHING SCENARIO ---
+  berthingCondition String? // Moderate / Unfavourable — null = auto
+  vbOverride        Float?  // m/s — null = lookup
+  gAngle            Float?  // deg — null = auto
+  rRadius           Float?  // m — null = auto
+  csOverride        Float?  // null = default
+  ccOverride        Float?  @default(1)
+  nEff              Float?  // null = default
+
+  // --- C. SITE & MOORING ---
+  waterDepth     Float   // m
+  hs             Float   @default(0.5) // m
+  windSpeedKnots Float   @default(20)
+  currentSpeedKnots Float @default(1)
+  awOverride     Float?  // m² — null = auto
+  acOverride     Float?  // m² — null = auto
+  waveDriftMode  String  @default("Off") // Off / User_Input / k_Wave
+  exposureClass  String  @default("Moderate") // Sheltered / Moderate / Exposed
+  fWaveUser      Float?  // kN — only if waveDriftMode=User_Input
+  nLines         Int     @default(4)
+
+  // --- D. STRUCTURAL CONCEPT ---
+  conceptType        String @default("Jetty_Dolphins") // Jetty_Dolphins / Dolphins_Only
+  trestleLength      Float  @default(600)
+  nBreastingDolphins Int    @default(4)
+  nMooringDolphins   Int    @default(4)
+  nPilesPerBd        Int    @default(14)
+  nPilesPerMd        Int    @default(11)
+  leverArmH          Float  @default(12)
+  penetrationDepth   Float  @default(10)
+  nFendersPerBd      Int    @default(2)
+  projectDuration    Int    @default(12) // months
+  usdRate            Float  @default(16300)
+  jettyHeadLength    Float  @default(30)
+  jettyHeadWidth     Float  @default(15)
+  bdPileCapLength    Float  @default(7)
+  bdPileCapWidth     Float  @default(7)
+  bdPileCapHeight    Float  @default(1.5)
+  mdPileCapLength    Float  @default(6)
+  mdPileCapWidth     Float  @default(6)
+  mdPileCapHeight    Float  @default(1.5)
+
+  // --- RESULTS (stored after calculation) ---
+  results    Json?    // full calculation results JSON
+  capexData  Json?    // full CAPEX BOQ JSON
+  qtoData    Json?    // full QTO JSON
+  summaryData Json?   // check_summary JSON
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("jd_calculations")
+}

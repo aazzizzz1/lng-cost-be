@@ -16,6 +16,7 @@ const calculatorRoutes = require('./routes/calculator.routes'); // Import Calcul
 const opexRoutes = require('./routes/opex.routes'); // NEW: OPEX routes
 const mooringRoutes = require('./routes/mooring.routes'); // NEW: Mooring settings routes
 const supplychainRoutes = require('./routes/supplychain.routes'); // NEW: Supply Chain routes
+const jettyDolphinRoutes = require('./routes/jettyDolphin.routes'); // NEW: Jetty & Dolphins routes
 
 const app = express();
 // NEW: trust proxy so secure cookies (SameSite=None; Secure) work behind reverse proxies
@@ -115,6 +116,7 @@ app.use('/api/calculator', calculatorRoutes); // Add Calculator routes
 app.use('/api/opex', opexRoutes); // NEW: OPEX routes
 app.use('/api/mooring', mooringRoutes); // NEW: Mooring settings routes
 app.use('/api/supplychain', supplychainRoutes); // NEW: Supply Chain LNG engine
+app.use('/api/jetty-dolphin', jettyDolphinRoutes); // NEW: Jetty & Dolphins engine
 
 // NEW: friendly JSON parse / generic error handler (forces JSON response)
 app.use((err, req, res, next) => {
