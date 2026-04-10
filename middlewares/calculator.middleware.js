@@ -9,6 +9,7 @@ exports.validateTotalCostInput = (req, res, next) => {
     low,
     high,
     information,
+    kategori,
   } = req.body;
 
   if (
@@ -24,11 +25,14 @@ exports.validateTotalCostInput = (req, res, next) => {
   ) {
     return res.status(400).json({ error: 'Invalid input' });
   }
+  if (kategori !== undefined && typeof kategori !== 'string') {
+    return res.status(400).json({ error: 'kategori must be a string' });
+  }
   next();
 };
 
 exports.validateTotalCostUpdate = (req, res, next) => {
-  const allowed = ['infrastructure','volume','unit','totalCost','year','location','low','high','information'];
+  const allowed = ['infrastructure','volume','unit','totalCost','year','location','low','high','information','kategori'];
   const bodyKeys = Object.keys(req.body);
   if (bodyKeys.length === 0) return res.status(400).json({ error: 'Empty body' });
   const invalid = bodyKeys.filter(k => !allowed.includes(k));

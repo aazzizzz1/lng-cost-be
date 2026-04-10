@@ -28,6 +28,7 @@ exports.createTotalCost = async (req, res) => {
       low,
       high,
       information,
+      kategori,
     } = req.body;
 
     const newEntry = await prisma.calculatorTotalCost.create({
@@ -41,6 +42,7 @@ exports.createTotalCost = async (req, res) => {
         low,
         high,
         information,
+        kategori,
       },
     });
     res.status(201).json({
@@ -96,6 +98,7 @@ exports.updateTotalCostById = async (req, res) => {
       low,
       high,
       information,
+      kategori,
     } = req.body;
 
     const dataToUpdate = {};
@@ -108,6 +111,7 @@ exports.updateTotalCostById = async (req, res) => {
     if (low !== undefined) dataToUpdate.low = low;
     if (high !== undefined) dataToUpdate.high = high;
     if (information !== undefined) dataToUpdate.information = information;
+    if (kategori !== undefined) dataToUpdate.kategori = kategori;
 
     if (Object.keys(dataToUpdate).length === 0)
       return res.status(400).json({ message: 'No valid fields to update', data: null });
@@ -178,6 +182,7 @@ exports.uploadCalculatorExcel = async (req, res) => {
       'infrastructure', 'volume', 'unit', 'totalcost', 'year',
       'location', 'low', 'high', 'information'
     ];
+    const optionalColumns = ['kategori'];
     const missingColumns = requiredColumns.filter(col => !headers.includes(col));
     if (missingColumns.length) {
       return res.status(400).json({ message: `Missing required columns: ${missingColumns.join(', ')}`, data: null });
@@ -204,7 +209,7 @@ exports.uploadCalculatorExcel = async (req, res) => {
         skippedRows.push(idx + 2); // Excel row number
         return;
       }
-      calculatorRows.push({
+      const rowData = {
         infrastructure: row['infrastructure'],
         volume: parseNumber(row['volume']),
         unit: row['unit'],
@@ -214,7 +219,11 @@ exports.uploadCalculatorExcel = async (req, res) => {
         low: parsePercent(row['low']),
         high: parsePercent(row['high']),
         information: row['information'],
-      });
+      };
+      if (row['kategori'] !== undefined && row['kategori'] !== '') {
+        rowData.kategori = row['kategori'];
+      }
+      calculatorRows.push(rowData);
     });
 
     if (calculatorRows.length > 0) {
@@ -381,6 +390,21 @@ exports.estimateCost = async (req, res) => {
 
     if (!originalData.length)
       return res.status(400).json({ message: 'Reference data invalid.' });
+
+    // ---------------------------------------------------------
+    // WARNING: data availability caution
+    // ---------------------------------------------------------
+    const distinctInformations = [...new Set(rows.map(r => r.information).filter(Boolean))];
+    const dataCount = originalData.length;
+    let warning = null;
+    if (dataCount > 0) {
+      const dbList = distinctInformations.join(', ');
+      if (dataCount < 3) {
+        warning = `Warning: The infrastructure type you selected is only available in the ${dbList} database. Only ${dataCount} data point(s) found. Please change the method accordingly.`;
+      } else {
+        warning = `Warning: The infrastructure type you selected is only available in the ${dbList} database.`;
+      }
+    }
 
     // ---------------------------------------------------------
     // 1. INFLASI (disesuaikan per baris ke target year)
@@ -639,6 +663,7 @@ exports.estimateCost = async (req, res) => {
       method,
       mathFormula,
       estimatedCost,
+      warning,
       r2: r2 !== null ? Number(r2.toFixed(4)) : null,
       r2Interpretation,
       referenceCount: originalData.length,
@@ -669,7 +694,11 @@ exports.estimateCost = async (req, res) => {
       // Ditambahkan: data referensi yang digunakan untuk perhitungan
       referenceDataOriginal: referenceDataOriginalSimple,
       referenceDataAdjusted: referenceDataAdjustedSimple,
-      information: information || null
+      information: information || null,
+      availableData: {
+        count: dataCount,
+        sources: distinctInformations
+      }
     };
 
     if (!verbose) {

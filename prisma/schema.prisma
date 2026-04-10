@@ -131,6 +131,7 @@ model CalculatorTotalCost {
   low            Float
   high           Float
   information    String
+  kategori       String?
   createdAt      DateTime @default(now())
 }
 
