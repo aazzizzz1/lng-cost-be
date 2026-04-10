@@ -176,8 +176,6 @@ model MooringRuleSetting {
 
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
-
-  @@map("mooring_rule_settings")
 }
 
 model Vessel {
@@ -268,7 +266,6 @@ model JdCbDefault {
   shipType String @unique // LNGC, LNGBV, SPB, Tanker, Container, Ro-Ro, Bulk
   cb       Float
   source   String @default("BS 6349-4 Table 3 / PIANC")
-  @@map("jd_cb_defaults")
 }
 
 // Lookup: Berthing velocity (PIANC 2002 / BS 6349)
@@ -282,7 +279,6 @@ model JdBerthingVelocity {
   modMax   Float
   unfMin   Float
   unfMax   Float
-  @@map("jd_berthing_velocities")
 }
 
 // Lookup: Fender catalogue + cost
@@ -298,7 +294,6 @@ model JdFenderCatalog {
   costIdr    Float  // Cost IDR/unit
   notes      String?
   referensi  String?
-  @@map("jd_fender_catalog")
 }
 
 // Lookup: Steel pipe pile properties (fy=350 MPa)
@@ -316,7 +311,6 @@ model JdPileCatalog {
   eiKnm2  Float // EI kNm²
   zKnSm   Float // Z (kN s/m)
   @@index([dMm, tMm])
-  @@map("jd_pile_catalog")
 }
 
 // Lookup: Quick Release Hook classes & cost
@@ -329,7 +323,6 @@ model JdQrhCatalog {
   typeSupplier String
   supplier    String
   tahun       Int    @default(2024)
-  @@map("jd_qrh_catalog")
 }
 
 // Lookup: Unit rates for CAPEX items
@@ -341,7 +334,6 @@ model JdUnitRate {
   unit        String
   keterangan  String?
   tahun       Int    @default(2024)
-  @@map("jd_unit_rates")
 }
 
 // Settings: all constants & defaults for J&D calculations
@@ -351,7 +343,6 @@ model JdSetting {
   value Float
   unit  String?
   notes String?
-  @@map("jd_settings")
 }
 
 // Main J&D calculation run (linked to project)
@@ -421,6 +412,4 @@ model JdCalculation {
 
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
-
-  @@map("jd_calculations")
 }
