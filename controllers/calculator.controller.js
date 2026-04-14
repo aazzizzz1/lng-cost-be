@@ -523,7 +523,10 @@ exports.estimateCost = async (req, res) => {
 
     if (method === 'Linear Regression') {
       if (data.length < 2)
-        return res.status(400).json({ message: 'Data terlalu sedikit untuk regresi linear.' });
+        return res.status(400).json({ message: 'Data terlalu sedikit untuk regresi linear (minimal 2 data).' });
+      if (data.length <= 3) {
+        warning = (warning ? warning + ' ' : '') + `Perhatian: Hanya ${data.length} data ditemukan. Hasil regresi linear mungkin kurang akurat. Disarankan menggunakan metode Capacity Factor Method untuk hasil yang lebih reliable.`;
+      }
 
       result = linearRegression(data, desiredCapacity);
       r2 = calculateRSquared(data, result.predictFn);
@@ -550,7 +553,10 @@ exports.estimateCost = async (req, res) => {
       };
     } else if (method === 'Log-log Regression') {
       if (data.length < 2)
-        return res.status(400).json({ message: 'Data terlalu sedikit untuk regresi log-log.' });
+        return res.status(400).json({ message: 'Data terlalu sedikit untuk regresi log-log (minimal 2 data).' });
+      if (data.length <= 3) {
+        warning = (warning ? warning + ' ' : '') + `Perhatian: Hanya ${data.length} data ditemukan. Hasil regresi log-log mungkin kurang akurat. Disarankan menggunakan metode Capacity Factor Method untuk hasil yang lebih reliable.`;
+      }
 
       result = logLogRegression(data, desiredCapacity);
       // Compute R² in ln-space to match Excel: RSQ(LN(y), LN(x))
