@@ -413,3 +413,25 @@ model JdCalculation {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 }
+
+// ============================
+// INFRASTRUCTURE LIBRARY  (single table)
+// ============================
+
+model InfraLibrary {
+  id           Int      @id @default(autoincrement())
+  code         String   // LNGBV, LNGC, FSRU, SPB, TRUCK, ORU, ORF, LNG_PLANT, JETTY_LNGBV, JETTY_SPB
+  categoryName String
+  description  String?
+  variantKey   String
+  label        String
+  params       Json
+  // drawings: [{drawKey, title, imageUrl, fileName, mimeType, order}]
+  // imageUrl = "/uploads/library/<filename>" — served as static file
+  drawings     Json     @default("[]")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([code, variantKey])
+  @@index([code])
+}

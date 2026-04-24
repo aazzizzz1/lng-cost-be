@@ -1,0 +1,451 @@
+﻿generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           Int       @id @default(autoincrement())
+  username     String    @unique
+  email        String    @unique
+  password     String
+  role         String    @default("user")
+  refreshToken String?
+  createdAt    DateTime  @default(now())
+  projects     Project[]
+}
+
+model Project {
+  id                            Int                @id @default(autoincrement())
+  name                          String
+  kategori                      String
+  lokasi                        String
+  tahun                         Int
+  levelAACE                     Int                @default(0)
+  harga                         Float              @default(0)
+  satuan                        String?
+  volume                        Float?
+  infrastruktur                 String?
+  createdAt                     DateTime           @default(now())
+  inflasi                       Float?             @default(0)
+  approval                      Boolean            @default(false)
+  userId                        Int?
+  constructionCosts             ConstructionCost[]
+  referencedByConstructionCosts ConstructionCost[] @relation("ConstructionCostReferenceProject")
+  user                          User?              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  unitPrices                    UnitPrice[]
+}
+
+model ConstructionCost {
+  id                   Int      @id @default(autoincrement())
+  uraian               String
+  specification        String?
+  qty                  Float
+  satuan               String
+  hargaSatuan          Float
+  totalHarga           Float
+  aaceClass            Int
+  accuracyLow          Float
+  accuracyHigh         Float
+  tahun                Int
+  infrastruktur        String
+  volume               Float
+  satuanVolume         String
+  kelompok             String
+  kelompokDetail       String
+  lokasi               String
+  tipe                 String
+  createdAt            DateTime @default(now())
+  projectId            Int
+  workcode             String
+  referenceProjectId   Int?
+  referenceProjectName String?
+  project              Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  referenceProject     Project? @relation("ConstructionCostReferenceProject", fields: [referenceProjectId], references: [id])
+
+  @@index([projectId, workcode, volume])
+  @@index([referenceProjectId])
+}
+
+model UnitPrice {
+  id             Int      @id @default(autoincrement())
+  uraian         String
+  specification  String?
+  qty            Float
+  satuan         String
+  hargaSatuan    Float
+  totalHarga     Float
+  aaceClass      Int
+  accuracyLow    Float
+  accuracyHigh   Float
+  tahun          Int
+  infrastruktur  String
+  volume         Float
+  satuanVolume   String
+  kelompok       String
+  kelompokDetail String
+  proyek         String
+  lokasi         String
+  tipe           String
+  createdAt      DateTime @default(now())
+  workcode       String
+  projectId      Int?
+  project        Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, workcode, volume])
+}
+
+model cci {
+  id           Int    @id @default(autoincrement())
+  kodeProvinsi Int
+  provinsi     String
+  cci          Float
+  delivery     Float  @default(0)
+}
+
+model CalculatorTotalCost {
+  id             Int      @id @default(autoincrement())
+  infrastructure String
+  volume         Float
+  unit           String
+  totalCost      Float
+  year           Int
+  location       String
+  low            Float
+  high           Float
+  information    String
+  createdAt      DateTime @default(now())
+  kategori       String?
+}
+
+model Opex {
+  id             Int      @id @default(autoincrement())
+  infrastructure String
+  type           String
+  kategoriOpex   String
+  item           String
+  deskripsi      String?
+  hargaOpex      Float
+  volume         Float
+  satuanVolume   String
+  tahun          Int
+  lokasi         String
+  project        String
+  createdAt      DateTime @default(now())
+}
+
+model MooringRuleSetting {
+  id                 Int      @id @default(autoincrement())
+  jettyMaxDepth      Float    @default(25)
+  jettyMaxDistanceKm Float    @default(2)
+  cbmMinDepth        Float    @default(15)
+  cbmMaxDepth        Float    @default(70)
+  cbmExposurePolicy  String   @default("SHELTERED_SEMI")
+  spreadMaxDepth     Float    @default(1000)
+  towerYokeMaxDepth  Float    @default(35)
+  turretForPermanent Boolean  @default(true)
+  calmForVisiting    Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model Vessel {
+  id                  Int      @id @default(autoincrement())
+  name                String   @unique
+  capacityM3          Float
+  speedKnot           Float
+  rentPerDayUSD       Float
+  voyageTonPerDay     Float
+  ballastTonPerDay    Float
+  berthTonPerDay      Float
+  portCostLTP         Float
+  portCostDelay       Float
+  portCostPerLocation Float
+  createdAt           DateTime @default(now())
+}
+
+model DistanceRoute {
+  id            Int      @id @default(autoincrement())
+  origin        String
+  destination   String
+  nauticalMiles Float
+  createdAt     DateTime @default(now())
+
+  @@unique([origin, destination])
+}
+
+model OruCapex {
+  id          Int      @id @default(autoincrement())
+  plantName   String   @unique
+  fixCapexUSD Float
+  createdAt   DateTime @default(now())
+}
+
+model SupplyChainScenario {
+  id        Int              @id @default(autoincrement())
+  runKey    String           @unique
+  terminal  String
+  locations Json
+  params    Json
+  demand    Json
+  createdAt DateTime         @default(now())
+  runs      SupplyChainRun[]
+}
+
+model SupplyChainRun {
+  id         Int                  @id @default(autoincrement())
+  runKey     String               @unique
+  scenarioId Int?
+  terminal   String
+  locations  Json
+  params     Json
+  results    Json
+  topResult  Json?
+  reuseCount Int                  @default(0)
+  createdAt  DateTime             @default(now())
+  demand     Json?
+  scenario   SupplyChainScenario? @relation(fields: [scenarioId], references: [id])
+
+  @@index([scenarioId])
+}
+
+model Location {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  type      String
+  latitude  Float?
+  longitude Float?
+  createdAt DateTime @default(now())
+
+  @@index([type])
+}
+
+model RiskMatrix {
+  id        Int      @id @default(autoincrement())
+  riskCode  String   @unique
+  variable  String
+  values    Json
+  createdAt DateTime @default(now())
+}
+
+model JdCbDefault {
+  id       Int    @id @default(autoincrement())
+  shipType String @unique
+  cb       Float
+  source   String @default("BS 6349-4 Table 3 / PIANC")
+}
+
+model JdBerthingVelocity {
+  id       Int   @id @default(autoincrement())
+  deltaMin Float
+  deltaMax Float
+  favMin   Float
+  favMax   Float
+  modMin   Float
+  modMax   Float
+  unfMin   Float
+  unfMax   Float
+}
+
+model JdFenderCatalog {
+  id         Int     @id @default(autoincrement())
+  fenderId   String  @unique
+  type       String
+  energyKj   Float
+  reactionKn Float
+  deflPct    Float
+  heightMm   Int
+  widthMm    Int
+  costIdr    Float
+  notes      String?
+  referensi  String?
+}
+
+model JdPileCatalog {
+  id      Int   @id @default(autoincrement())
+  dMm     Float
+  tMm     Float
+  massKgM Float
+  aMm2    Float
+  auM2M   Float
+  abMm2   Float
+  welCm3  Float
+  mCapKnm Float
+  iCm4    Float
+  eiKnm2  Float
+  zKnSm   Float
+
+  @@index([dMm, tMm])
+}
+
+model JdQrhCatalog {
+  id           Int    @id @default(autoincrement())
+  classSwlKn   Float  @unique
+  swlTon       Float
+  proofFactor  Float  @default(1.5)
+  costIdr      Float
+  typeSupplier String
+  supplier     String
+  tahun        Int    @default(2024)
+}
+
+model JdUnitRate {
+  id         Int     @id @default(autoincrement())
+  rateId     String  @unique
+  item       String
+  rateIdr    Float
+  unit       String
+  keterangan String?
+  tahun      Int     @default(2024)
+}
+
+model JdSetting {
+  id    Int     @id @default(autoincrement())
+  key   String  @unique
+  value Float
+  unit  String?
+  notes String?
+}
+
+model JdCalculation {
+  id                 Int      @id @default(autoincrement())
+  projectId          Int?
+  shipType           String   @default("LNGBV")
+  tugAssist          Boolean  @default(true)
+  loa                Float
+  lpp                Float?
+  beam               Float
+  draft              Float
+  cargoCapacity      Float
+  displacement       Float?
+  freeboard          Float?
+  cbOverride         Float?
+  berthingCondition  String?
+  vbOverride         Float?
+  gAngle             Float?
+  rRadius            Float?
+  csOverride         Float?
+  ccOverride         Float?   @default(1)
+  nEff               Float?
+  waterDepth         Float
+  hs                 Float    @default(0.5)
+  windSpeedKnots     Float    @default(20)
+  currentSpeedKnots  Float    @default(1)
+  awOverride         Float?
+  acOverride         Float?
+  waveDriftMode      String   @default("Off")
+  exposureClass      String   @default("Moderate")
+  fWaveUser          Float?
+  nLines             Int      @default(4)
+  conceptType        String   @default("Jetty_Dolphins")
+  trestleLength      Float    @default(600)
+  nBreastingDolphins Int      @default(4)
+  nMooringDolphins   Int      @default(4)
+  nPilesPerBd        Int      @default(14)
+  nPilesPerMd        Int      @default(11)
+  leverArmH          Float    @default(12)
+  penetrationDepth   Float    @default(10)
+  nFendersPerBd      Int      @default(2)
+  projectDuration    Int      @default(12)
+  usdRate            Float    @default(16300)
+  jettyHeadLength    Float    @default(30)
+  jettyHeadWidth     Float    @default(15)
+  bdPileCapLength    Float    @default(7)
+  bdPileCapWidth     Float    @default(7)
+  bdPileCapHeight    Float    @default(1.5)
+  mdPileCapLength    Float    @default(6)
+  mdPileCapWidth     Float    @default(6)
+  mdPileCapHeight    Float    @default(1.5)
+  results            Json?
+  capexData          Json?
+  qtoData            Json?
+  summaryData        Json?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model LibraryCatalog {
+  id             Int              @id @default(autoincrement())
+  name           String           @unique
+  displayName    String
+  description    String?
+  icon           String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime
+  LibraryVariant LibraryVariant[]
+}
+
+model LibraryDrawing {
+  id             Int            @id @default(autoincrement())
+  variantId      Int
+  key            String
+  title          String
+  description    String?
+  imageUrl       String
+  imageData      Bytes?
+  mimeType       String         @default("image/jpeg")
+  fileSize       Int?
+  uploadedBy     Int?
+  isActive       Boolean        @default(true)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime
+  LibraryVariant LibraryVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([variantId, key])
+  @@index([variantId, isActive])
+}
+
+model LibraryParameter {
+  id                    Int                     @id @default(autoincrement())
+  variantId             Int
+  groupName             String
+  groupOrder            Int                     @default(0)
+  paramKey              String
+  paramLabel            String
+  baseValue             String
+  allowInterpolation    Boolean                 @default(false)
+  paramOrder            Int                     @default(0)
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime
+  LibraryVariant        LibraryVariant          @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  LibraryParameterValue LibraryParameterValue[]
+
+  @@unique([variantId, groupName, paramKey])
+  @@index([variantId, groupName])
+}
+
+model LibraryParameterValue {
+  id               Int              @id @default(autoincrement())
+  parameterId      Int
+  capacity         Float
+  value            String
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime
+  LibraryParameter LibraryParameter @relation(fields: [parameterId], references: [id], onDelete: Cascade)
+
+  @@unique([parameterId, capacity])
+  @@index([parameterId, capacity])
+}
+
+model LibraryVariant {
+  id               Int                @id @default(autoincrement())
+  catalogId        Int
+  key              String
+  label            String
+  capacity         Float
+  capacityUnit     String             @default("m3")
+  description      String?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime
+  LibraryDrawing   LibraryDrawing[]
+  LibraryParameter LibraryParameter[]
+  LibraryCatalog   LibraryCatalog     @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+
+  @@unique([catalogId, key])
+  @@index([catalogId, capacity])
+}
+
+

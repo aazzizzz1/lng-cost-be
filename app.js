@@ -17,11 +17,13 @@ const opexRoutes = require('./routes/opex.routes'); // NEW: OPEX routes
 const mooringRoutes = require('./routes/mooring.routes'); // NEW: Mooring settings routes
 const supplychainRoutes = require('./routes/supplychain.routes'); // NEW: Supply Chain routes
 const jettyDolphinRoutes = require('./routes/jettyDolphin.routes'); // NEW: Jetty & Dolphins routes
+const libraryRoutes = require('./routes/library.routes'); // NEW: Infrastructure Library routes
 
 const app = express();
-// NEW: trust proxy so secure cookies (SameSite=None; Secure) work behind reverse proxies
-// app.set('trust proxy', 1);
-app.enable('trust proxy');
+// Trust 1 proxy hop (load balancer / Nginx). Using numeric value avoids the
+// express-rate-limit ERR_ERL_PERMISSIVE_TRUST_PROXY error thrown when set to `true`.
+// app.set('trust proxy', 1);  ← equivalent, kept for reference
+app.set('trust proxy', 1);
 
 // NEW: optional proxy/header debug
 if (process.env.DEBUG_PROXY === 'true') {
@@ -54,7 +56,11 @@ app.use(express.json({
   },
 }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-app.use(helmet());
+app.use(helmet({
+  // Allow cross-origin image/resource loads (e.g. <img src> from a different-origin frontend).
+  // Without this Helmet defaults to 'same-origin' which blocks browser image rendering.
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
 app.use(morgan('dev'));
 
 // NEW: CORS should run before any rate-limiters and must allow credentials
@@ -82,6 +88,7 @@ const globalLimiter = rateLimit({
   max: 500, // relax global cap
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { trustProxy: false }, // we handle trust proxy ourselves above
   skip: (req) => req.method === 'OPTIONS' || req.path.startsWith('/api/auth'),
 });
 app.use(globalLimiter); // DDoS protection: rate limiting
@@ -117,6 +124,19 @@ app.use('/api/opex', opexRoutes); // NEW: OPEX routes
 app.use('/api/mooring', mooringRoutes); // NEW: Mooring settings routes
 app.use('/api/supplychain', supplychainRoutes); // NEW: Supply Chain LNG engine
 app.use('/api/jetty-dolphin', jettyDolphinRoutes); // NEW: Jetty & Dolphins engine
+app.use('/api/library', libraryRoutes); // NEW: Infrastructure Library
+
+// Serve uploaded library images as static files.
+// Helmet is configured globally with crossOriginResourcePolicy: 'cross-origin'
+// so <img> tags on different-origin frontends can load these files.
+// cors({ origin: true }) ensures the Access-Control-Allow-Origin header is
+// also present for fetch()-based requests (e.g. download, blob URL).
+const path = require('path');
+app.use(
+  '/uploads/library',
+  cors({ origin: true, credentials: false }),
+  express.static(path.join(__dirname, 'uploads', 'library'))
+);
 
 // NEW: friendly JSON parse / generic error handler (forces JSON response)
 app.use((err, req, res, next) => {
