@@ -205,7 +205,7 @@ exports.remove = async (req, res) => {
 
 // ============================
 // DRAWINGS  (stored as JSONB array in InfraLibrary.drawings)
-// imageUrl = "/uploads/library/<filename>" served as static file by Express
+// imageUrl = "/api/uploads/library/<filename>" served as static file by Express
 // ============================
 
 /**
@@ -284,7 +284,9 @@ exports.upsertDrawing = async (req, res) => {
 
     if (req.file) {
       if (idx !== -1 && drawings[idx].fileName) deleteFile(drawings[idx].fileName);
-      entry.imageUrl = `/uploads/library/${req.file.filename}`;
+      // Use /api/uploads/library so the path is reachable in production behind a
+      // reverse proxy (Apache) that forwards only /api/* to this Node.js process.
+      entry.imageUrl = `/api/uploads/library/${req.file.filename}`;
       entry.fileName = req.file.filename;
       entry.mimeType = req.file.mimetype;
     }

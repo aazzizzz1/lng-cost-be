@@ -131,12 +131,18 @@ app.use('/api/library', libraryRoutes); // NEW: Infrastructure Library
 // so <img> tags on different-origin frontends can load these files.
 // cors({ origin: true }) ensures the Access-Control-Allow-Origin header is
 // also present for fetch()-based requests (e.g. download, blob URL).
+//
+// In production behind Apache, the reverse proxy typically forwards only /api/*
+// to this Node.js process. Images are therefore also exposed under /api/uploads/library
+// so that Apache's existing ProxyPass rule covers them without any config change.
+// The legacy /uploads/library path is kept for backward compatibility (dev / direct access).
 const path = require('path');
-app.use(
-  '/uploads/library',
+const libraryStaticMiddleware = [
   cors({ origin: true, credentials: false }),
-  express.static(path.join(__dirname, 'uploads', 'library'))
-);
+  express.static(path.join(__dirname, 'uploads', 'library')),
+];
+app.use('/api/uploads/library', ...libraryStaticMiddleware); // production (via Apache /api proxy)
+app.use('/uploads/library', ...libraryStaticMiddleware);      // development / direct access
 
 // NEW: friendly JSON parse / generic error handler (forces JSON response)
 app.use((err, req, res, next) => {
