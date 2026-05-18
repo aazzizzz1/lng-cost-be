@@ -15,7 +15,12 @@ const {
   runNVesselProbabilityModelRisk,
   runHubSpokeNVesselModel,
   runHubSpokeNVesselModelRisk,
+  // NEW: helpers
+  runSensitivityAnalysis,
+  hitungBiayaPelabuhan,
 } = require('../services/supplychainEngine');
+const { getAllZones } = require('../services/weatherService');
+const { getDynamicOruCapex } = require('../services/spatialRouteService');
 
 async function run(req, res) {
   try {
@@ -36,6 +41,19 @@ async function run(req, res) {
     const routes = await prisma.distanceRoute.findMany();
     const oru = await prisma.oruCapex.findMany();
 
+    // Spatial distances: convert request array to Map for engine lookup
+    // Format in body: [{ origin, destination, nauticalMiles }]
+    let sdMap = null;
+    if (Array.isArray(req.body.spatialDistances) && req.body.spatialDistances.length) {
+      sdMap = new Map();
+      for (const { origin, destination, nauticalMiles } of req.body.spatialDistances) {
+        if (origin && destination && typeof nauticalMiles === 'number') {
+          sdMap.set(`${origin}|${destination}`, nauticalMiles);
+          sdMap.set(`${destination}|${origin}`, nauticalMiles);
+        }
+      }
+    }
+
     // compute
     const baseYear = req.body.base_year ?? 2022;
     const inflationFactor = Math.pow(1 + params.inflation_rate, params.analysis_year - baseYear);
@@ -48,6 +66,8 @@ async function run(req, res) {
       demandBBTUD: demand,
       params,
       inflationFactor,
+      geoMap: req.body.geoMap || null,
+      spatialDistances: sdMap,
     });
 
     const sorted = [...results].sort((a, b) => a['Total Cost USD/MMBTU'] - b['Total Cost USD/MMBTU']);
@@ -424,6 +444,33 @@ async function runUnified(req, res) {
     const hasRisk = risk && risk.selections;
     const riskDB = hasRisk ? buildRiskDB(risk, riskRows) : null;
 
+    // ======================
+    // 2b. Weather cache
+    // ======================
+    let weatherCacheByZone = req.body.weatherCacheByZone || null;
+    if (!weatherCacheByZone && req.body.bulan) {
+      try {
+        weatherCacheByZone = await getAllZones(req.body.bulan, params.analysis_year, req.body.weatherMode || 'max');
+      } catch (_) {
+        // non-fatal — engine falls back to static speed
+      }
+    }
+
+    // ======================
+    // 2c. Spatial waypoints map
+    // ======================
+    let spatialWaypointsMap = null;
+    if (Array.isArray(req.body.spatialWaypoints) && req.body.spatialWaypoints.length) {
+      spatialWaypointsMap = new Map();
+      for (const { origin, destination, distanceNm, waypoints } of req.body.spatialWaypoints) {
+        if (origin && destination) {
+          const entry = { distanceNm, waypoints };
+          spatialWaypointsMap.set(`${origin}|${destination}`, entry);
+          spatialWaypointsMap.set(`${destination}|${origin}`, entry);
+        }
+      }
+    }
+
     const paramsWithMethod = {
       ...params,
       method,
@@ -435,6 +482,7 @@ async function runUnified(req, res) {
     // Helper: save and respond
     async function saveAndRespond({ resultsObj, topResult, mode }) {
       const terminalLabel = terminals.length > 1 ? terminals.join(', ') : terminals[0];
+      const spatialRoutes = Array.isArray(req.body.spatialWaypoints) ? req.body.spatialWaypoints : [];
       await prisma.supplyChainRun.create({
         data: {
           runKey,
@@ -467,6 +515,10 @@ async function runUnified(req, res) {
           base_year: baseYear,
           geo: geoMap,
         },
+        spatial: spatialRoutes.length ? {
+          routeCount: spatialRoutes.length,
+          routes: spatialRoutes,
+        } : null,
         tables,
         riskSummary,
         topResult,
@@ -495,6 +547,7 @@ async function runUnified(req, res) {
             vessels, routes, oru, terminal,
             selectedLocations: locations, demandBBTUD: demand,
             params, inflationFactor, riskDB, geoMap,
+            weatherCacheByZone, spatialWaypointsMap,
           });
           const topResult = results.system?.[0] || null;
           return saveAndRespond({ resultsObj: results, topResult, mode: 'single' });
@@ -503,6 +556,7 @@ async function runUnified(req, res) {
             vessels, routes, oru, terminal,
             selectedLocations: locations, demandBBTUD: demand,
             params, inflationFactor, geoMap,
+            weatherCacheByZone, spatialWaypointsMap,
           });
           const topResult = results.system?.[0] || null;
           return saveAndRespond({ resultsObj: results, topResult, mode: 'single' });
@@ -514,6 +568,7 @@ async function runUnified(req, res) {
             vessels, routes, oru, terminal,
             selectedLocations: locations, demandBBTUD: demand,
             params, inflationFactor, riskDB, geoMap,
+            weatherCacheByZone, spatialWaypointsMap,
             numFeeders: numVessels,
             ...engineConfig,
           });
@@ -524,6 +579,7 @@ async function runUnified(req, res) {
             vessels, routes, oru, terminal,
             selectedLocations: locations, demandBBTUD: demand,
             params, inflationFactor, geoMap,
+            weatherCacheByZone, spatialWaypointsMap,
             numFeeders: numVessels,
             ...engineConfig,
           });
@@ -543,6 +599,7 @@ async function runUnified(req, res) {
           vessels, routes, oru, terminal,
           selectedLocations: locations, demandBBTUD: demand,
           params, inflationFactor, riskDB, geoMap,
+          weatherCacheByZone, spatialWaypointsMap,
         });
         const topResult = results[0] || null;
         return saveAndRespond({ resultsObj: results, topResult, mode: 'single' });
@@ -551,6 +608,7 @@ async function runUnified(req, res) {
           vessels, routes, oru, terminal,
           selectedLocations: locations, demandBBTUD: demand,
           params, inflationFactor, geoMap,
+          weatherCacheByZone, spatialWaypointsMap,
         });
         const topResult = results[0] || null;
         return saveAndRespond({ resultsObj: results, topResult, mode: 'single' });
@@ -562,6 +620,7 @@ async function runUnified(req, res) {
           vessels, routes, oru, terminal,
           selectedLocations: locations, demandBBTUD: demand,
           params, inflationFactor, riskDB, geoMap,
+          weatherCacheByZone, spatialWaypointsMap,
           numVessels,
           ...engineConfig,
         });
@@ -572,6 +631,7 @@ async function runUnified(req, res) {
           vessels, routes, oru, terminal,
           selectedLocations: locations, demandBBTUD: demand,
           params, inflationFactor, geoMap,
+          weatherCacheByZone, spatialWaypointsMap,
           numVessels,
           ...engineConfig,
         });
@@ -586,4 +646,44 @@ async function runUnified(req, res) {
   }
 }
 
-module.exports = { run, getByKey, runTwin, runUnified };
+async function runSensitivity(req, res) {
+  try {
+    const { locations, params, demand, terminal, base_year, testVars, variations } = req.body;
+
+    if (!terminal || !locations || !params || !demand) {
+      return res.status(400).json({ error: 'terminal, locations, params, demand wajib diisi' });
+    }
+
+    const baseYear = base_year ?? 2022;
+    const [vessels, routes, oru, locRows] = await Promise.all([
+      prisma.vessel.findMany(),
+      prisma.distanceRoute.findMany(),
+      prisma.oruCapex.findMany(),
+      prisma.location.findMany({ where: { name: { in: [terminal, ...(locations || [])] } } }),
+    ]);
+
+    const dbGeo = {};
+    for (const l of locRows) {
+      if (typeof l.latitude === 'number' && typeof l.longitude === 'number') {
+        dbGeo[l.name] = { latitude: l.latitude, longitude: l.longitude };
+      }
+    }
+    const geoMap = req.body.geo ? { ...dbGeo, ...req.body.geo } : dbGeo;
+    const inflationFactor = Math.pow(1 + params.inflation_rate, params.analysis_year - baseYear);
+
+    const baseInput = {
+      vessels, routes, oru, terminal,
+      selectedLocations: locations,
+      demandBBTUD: demand,
+      params, inflationFactor, geoMap,
+    };
+
+    const result = await runSensitivityAnalysis(baseInput, testVars, variations);
+    return res.json(result);
+  } catch (e) {
+    console.error('runSensitivity error:', e);
+    return res.status(500).json({ error: 'Sensitivity error', detail: e.message });
+  }
+}
+
+module.exports = { run, getByKey, runTwin, runUnified, runSensitivity };

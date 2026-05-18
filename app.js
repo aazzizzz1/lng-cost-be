@@ -18,6 +18,12 @@ const mooringRoutes = require('./routes/mooring.routes'); // NEW: Mooring settin
 const supplychainRoutes = require('./routes/supplychain.routes'); // NEW: Supply Chain routes
 const jettyDolphinRoutes = require('./routes/jettyDolphin.routes'); // NEW: Jetty & Dolphins routes
 const libraryRoutes = require('./routes/library.routes'); // NEW: Infrastructure Library routes
+const spatialRoutingRoutes = require('./routes/spatialRouting.routes'); // NEW: Spatial Routing & Bathymetry
+
+// Pre-warm IHO shapefile in the background so it's ready for the first request
+// (loading the 149 MB shapefile takes ~2 min; this avoids blocking route calls)
+const ihoService = require('./services/ihoService');
+ihoService.warmUp();
 
 const app = express();
 // Trust 1 proxy hop (load balancer / Nginx). Using numeric value avoids the
@@ -125,6 +131,7 @@ app.use('/api/mooring', mooringRoutes); // NEW: Mooring settings routes
 app.use('/api/supplychain', supplychainRoutes); // NEW: Supply Chain LNG engine
 app.use('/api/jetty-dolphin', jettyDolphinRoutes); // NEW: Jetty & Dolphins engine
 app.use('/api/library', libraryRoutes); // NEW: Infrastructure Library
+app.use('/api/spatial-routing', spatialRoutingRoutes); // NEW: Spatial Routing (BATNAS/GEBCO A* engine)
 
 // Serve uploaded library images as static files.
 // Helmet is configured globally with crossOriginResourcePolicy: 'cross-origin'

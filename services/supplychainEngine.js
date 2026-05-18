@@ -3,6 +3,10 @@
 // - Compute RTD, working volume, capacity feasibility, CAPEX (tank + ORU), OPEX (fuel/port/rent/ORU).
 // - Optional: shareTerminalORU splits terminal ORU by 50% when enabled.
 //
+
+// Holtrop & Mennen speed-loss model (imported from weatherService)
+const { calcSpeedLoss } = require('./weatherService');
+
 // Twin-vessel probability logic:
 // - For each ratio (e.g., 50:50, 60:40...), split selectedLocations into two sets by combination count.
 // - Run the single-vessel engine independently on each set.
@@ -134,10 +138,20 @@ function haversineNm(lat1, lon1, lat2, lon2) {
 }
 
 // NEW: ambil jarak NM dari DistanceRoute, atau hitung dari geoMap bila tidak ada
-function getDistanceNM(distanceMap, origin, destination, geoMap) {
+// spatialDistances (optional Map): "Origin|Dest" → distanceNm (from SpatialRouteCache)
+function getDistanceNM(distanceMap, origin, destination, geoMap, spatialDistances) {
+  // 1. Prefer spatial (bathymetry) distances when available
+  if (spatialDistances) {
+    const sk  = `${origin}|${destination}`;
+    const sk2 = `${destination}|${origin}`;
+    const sv  = spatialDistances.get(sk) ?? spatialDistances.get(sk2);
+    if (typeof sv === 'number') return sv;
+  }
+  // 2. Manual route table
   const key = `${origin} - ${destination}`;
   const v = distanceMap.get(key);
   if (typeof v === 'number') return v;
+  // 3. Haversine fallback from geoMap
   if (!geoMap) return null;
   const o = geoMap[origin];
   const d = geoMap[destination];
@@ -289,13 +303,63 @@ function limitRows(rows, resultLimit) {
   return rows.slice(0, Math.max(0, resultLimit));
 }
 
-// --- NO-RISK SINGLE VESSEL ENGINE ---
+// ─────────────────────────────────────────────────────────────────────────────
+// Port cost: Python hitung_biaya_pelabuhan(gt, loading_hours, analysis_year, inflation_rate)
+// Uses Indonesian port tariff base-year 2022 (Permenhub).
+// Returns { ltp, delay } in USD per voyage.
+// ─────────────────────────────────────────────────────────────────────────────
+function hitungBiayaPelabuhan(gt, loadingHours, analysisYear, inflationRate) {
+  const KURS = 14500; // IDR/USD
+  const jasaLabuh  = (1.120 * 85.36)  / KURS;
+  const jasaTambat = (1.120 * 92.84)  / KURS;
+  const biayaLtp2022 =
+    (gt * jasaLabuh) +
+    (gt * jasaTambat) +
+    ((1.120 * 67265) / KURS * 2) +
+    ((1.120 * 20.64) / KURS * gt * 2);
+
+  let tundaTetap;
+  if      (gt > 18000) tundaTetap = 2860000;
+  else if (gt > 8000)  tundaTetap = 1299100;
+  else if (gt > 3500)  tundaTetap = 771456;
+  else                 tundaTetap = 546260;
+
+  const biayaPenundaan2022 =
+    ((1.120 * tundaTetap) / KURS * loadingHours) +
+    (gt * ((1.120 * 10) / KURS) * loadingHours);
+
+  const selisihTahun  = Math.max(0, (analysisYear || 2022) - 2022);
+  const faktorInflasi = Math.pow(1 + (inflationRate || 0), selisihTahun);
+  return {
+    ltp:   biayaLtp2022    * faktorInflasi,
+    delay: biayaPenundaan2022 * faktorInflasi,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Holtrop & Mennen effective speed helper.
+// Falls back to vessel.speedKnot when weather or physical dimensions are absent.
+// weatherCacheByZone: { 'Laut_Banda': {wave, wind}, 'Laut_Flores': {wave, wind}, ... }
+// Uses the FIRST zone as representative weather for the whole route.
+// ─────────────────────────────────────────────────────────────────────────────
+function getEffectiveSpeed(vessel, weatherCacheByZone) {
+  if (!weatherCacheByZone || !vessel.lpp) return vessel.speedKnot;
+  const zones = Object.values(weatherCacheByZone);
+  if (!zones.length) return vessel.speedKnot;
+  const wx = zones[0] || { wave: 0, wind: 0 };
+  return calcSpeedLoss(vessel, wx.wave || 0, wx.wind || 0);
+}
+
+
 async function runSupplyChainModel(input) {
   const {
     vessels, routes, oru,
     terminal, selectedLocations, demandBBTUD,
     params, inflationFactor,
     geoMap,
+    spatialDistances, // optional Map: "Loc1|Loc2" → distanceNm from SpatialRouteCache
+    weatherCacheByZone,   // optional: { 'Laut_Banda': {wave,wind}, ... } — Holtrop & Mennen
+    spatialWaypointsMap,  // optional Map: "Loc1|Loc2" → { distanceNm } — spatial distance override
     numVessels = 1, // Python: cap_term divided by num_v
     isFeeder = false,
     resultLimit = 20,
@@ -303,6 +367,8 @@ async function runSupplyChainModel(input) {
 
   const { tankSize, tankPrice } = getTankConfig(params);
   const distanceMap = buildDistanceMap(routes);
+  const sdMap = spatialDistances instanceof Map ? spatialDistances : null;
+  const swMap = spatialWaypointsMap instanceof Map ? spatialWaypointsMap : null;
   const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD]));
   // Python: NO inflation on rent/port. Only tank CAPEX uses inflationFactor.
   const vesselAdj = vessels.slice().sort((a, b) => a.capacityM3 - b.capacityM3);
@@ -319,7 +385,8 @@ async function runSupplyChainModel(input) {
 
   for (const vessel of vesselAdj) {
     const kapasitas_kapal = vessel.capacityM3;
-    const speed = vessel.speedKnot;
+    // Use Holtrop & Mennen speed when weather data and physical dims available
+    const speed = getEffectiveSpeed(vessel, weatherCacheByZone);
 
     for (const route of allRoutes) {
       const fullRoute = [terminal, ...route, terminal];
@@ -330,7 +397,13 @@ async function runSupplyChainModel(input) {
       for (let i = 0; i < fullRoute.length - 1; i++) {
         const origin = fullRoute[i];
         const dest = fullRoute[i + 1];
-        const dist = getDistanceNM(distanceMap, origin, dest, geoMap);
+        // Prefer spatial waypoints distance, then sdMap, then DB table, then haversine
+        let dist;
+        if (swMap) {
+          const sw = swMap.get(`${origin}|${dest}`) || swMap.get(`${dest}|${origin}`);
+          if (sw && sw.distanceNm) dist = sw.distanceNm;
+        }
+        if (dist == null) dist = getDistanceNM(distanceMap, origin, dest, geoMap, sdMap);
         if (!dist) { totalDistance = null; break; }
         totalDistance += dist;
         sailingTime += dist / speed;
@@ -398,10 +471,19 @@ async function runSupplyChainModel(input) {
 
       const lng_fuel_cost = voyages_year * (fuel_voyage + fuel_ballast + fuel_berth) * (SCF_LNG / SCF_MGO) * params.harga_lng;
 
-      // Port cost: Python uses LTP + Delay, not portCostPerLocation
-      // pc = (vy*LTP*(1+0) + vy*Delay) + (len(locs)*(vy*LTP*(1+0) + vy*Delay))
-      const port_cost = (voyages_year * vessel.portCostLTP + voyages_year * vessel.portCostDelay) +
-        (route.length * (voyages_year * vessel.portCostLTP + voyages_year * vessel.portCostDelay));
+      // Port cost: dynamic when vessel has GT (Python hitung_biaya_pelabuhan),
+      // otherwise fall back to static DB fields.
+      let portLTP, portDelay;
+      if (vessel.gt) {
+        const pc = hitungBiayaPelabuhan(vessel.gt, params.loading_hour, params.analysis_year, params.inflation_rate);
+        portLTP  = pc.ltp;
+        portDelay = pc.delay;
+      } else {
+        portLTP  = vessel.portCostLTP;
+        portDelay = vessel.portCostDelay;
+      }
+      // Python: (1 + N_spokes) port calls per voyage × voyages_year
+      const port_cost = voyages_year * (1 + route.length) * (portLTP + portDelay);
 
       const rent_cost = vessel.rentPerDayUSD * 365;
 
@@ -454,6 +536,9 @@ async function runSupplyChainModelRisk(input) {
   const {
     vessels, routes, oru, terminal, selectedLocations, demandBBTUD,
     params, inflationFactor, riskDB, geoMap,
+    spatialDistances,
+    weatherCacheByZone,  // optional: Holtrop & Mennen speed
+    spatialWaypointsMap, // optional Map: spatial distance override
     numVessels = 1, // Python: cap_term divided by num_v
     isFeeder = false,
     resultLimit = 20,
@@ -461,6 +546,8 @@ async function runSupplyChainModelRisk(input) {
 
   const { tankSize, tankPrice } = getTankConfig(params);
   const distanceMap = buildDistanceMap(routes);
+  const sdMap = spatialDistances instanceof Map ? spatialDistances : null;
+  const swMap = spatialWaypointsMap instanceof Map ? spatialWaypointsMap : null;
   const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD]));
   // Python: NO inflation on rent/port. Only tank CAPEX uses inflationFactor.
   const vesselAdj = vessels.slice().sort((a, b) => a.capacityM3 - b.capacityM3);
@@ -482,7 +569,8 @@ async function runSupplyChainModelRisk(input) {
 
   for (const vessel of vesselAdj) {
     const kapasitas_kapal = vessel.capacityM3;
-    const speed = vessel.speedKnot;
+    // Use Holtrop & Mennen speed when weather data and physical dims available
+    const speed = getEffectiveSpeed(vessel, weatherCacheByZone);
 
     for (const route of allRoutes) {
       const fullRoute = [terminal, ...route, terminal];
@@ -492,7 +580,13 @@ async function runSupplyChainModelRisk(input) {
       for (let i = 0; i < fullRoute.length - 1; i++) {
         const origin = fullRoute[i];
         const dest = fullRoute[i + 1];
-        const dist = getDistanceNM(distanceMap, origin, dest, geoMap);
+        // Prefer spatial waypoints distance, then sdMap, then DB table, then haversine
+        let dist;
+        if (swMap) {
+          const sw = swMap.get(`${origin}|${dest}`) || swMap.get(`${dest}|${origin}`);
+          if (sw && sw.distanceNm) dist = sw.distanceNm;
+        }
+        if (dist == null) dist = getDistanceNM(distanceMap, origin, dest, geoMap, sdMap);
         if (!dist) { totalDistance = null; break; }
         totalDistance += dist;
         legs.push(dist);
@@ -590,11 +684,18 @@ async function runSupplyChainModelRisk(input) {
       const lng_fuel = fuel_total * (SCF_LNG / SCF_MGO);
       const lng_fuel_cost = voyages_year * lng_fuel * params.harga_lng;
 
-      // Port cost with risk
+      // Port cost with risk — dynamic when vessel has GT
       const impact_port_start = getRiskImpact(riskDB, 'P1_Biaya_Operasi', 'II.2');
       const impact_port_next = getRiskImpact(riskDB, 'P1_Biaya_Operasi', 'II.5');
-      const port_ltp = vessel.portCostLTP;
-      const port_delay = vessel.portCostDelay;
+      let port_ltp, port_delay;
+      if (vessel.gt) {
+        const pc = hitungBiayaPelabuhan(vessel.gt, params.loading_hour, params.analysis_year, params.inflation_rate);
+        port_ltp  = pc.ltp;
+        port_delay = pc.delay;
+      } else {
+        port_ltp  = vessel.portCostLTP;
+        port_delay = vessel.portCostDelay;
+      }
       const port_start_per_voyage = port_ltp * (1 + impact_port_start) + port_delay;
       const port_next_per_voyage = route.length * (port_ltp * (1 + impact_port_next) + port_delay);
       const port_cost = voyages_year * (port_start_per_voyage + port_next_per_voyage);
@@ -1136,6 +1237,8 @@ async function runHubSpokeTwoVesselModelRisk(input) {
     inflationFactor,
     riskDB,
     geoMap, // NEW: dipakai di perhitungan mother & feeder
+    spatialDistances,
+    spatialWaypointsMap,
     // twinCfg (ratios, enforceSameVessel, vesselNames, ...) diabaikan di sini, karena
     // algoritma Hub & Spoke N-dimensional tidak pakai rasio pembagian demand
   } = input;
@@ -1145,6 +1248,16 @@ async function runHubSpokeTwoVesselModelRisk(input) {
   }
 
   const { tankSize, tankPrice } = getTankConfig(params); // FIX: get tankSize/tankPrice here
+  // Merge spatialWaypointsMap distances into sdMap so all distance lookups benefit from real routes
+  const sdMap = (() => {
+    const base = spatialDistances instanceof Map ? new Map(spatialDistances) : new Map();
+    if (spatialWaypointsMap instanceof Map) {
+      for (const [k, v] of spatialWaypointsMap) {
+        if (v && typeof v.distanceNm === 'number') base.set(k, v.distanceNm);
+      }
+    }
+    return base.size ? base : null;
+  })();
   const numV = 2; // saat ini: 1 mother + 2 feeder (bisa di-generalize nanti)
   const LNG_EC = 24.04;
   const BASE_YEAR = 2022;
@@ -1169,8 +1282,8 @@ async function runHubSpokeTwoVesselModelRisk(input) {
     const rows = [];
     // CHANGED: jarak dari DB atau geoMap
     const baseDist =
-      getDistanceNM(distMap, terminal, hub, geoMap) ??
-      getDistanceNM(distMap, hub, terminal, geoMap);
+      getDistanceNM(distMap, terminal, hub, geoMap, sdMap) ??
+      getDistanceNM(distMap, hub, terminal, geoMap, sdMap);
     if (!baseDist) return rows;
 
     const dist = baseDist;
@@ -1325,7 +1438,7 @@ async function runHubSpokeTwoVesselModelRisk(input) {
       for (let i = 0; i < fr.length - 1; i++) {
         const origin = fr[i];
         const dest = fr[i + 1];
-        const d = getDistanceNM(distMap, origin, dest, geoMap);
+        const d = getDistanceNM(distMap, origin, dest, geoMap, sdMap);
         if (!d) {
           valid = false;
           break;
@@ -1631,6 +1744,8 @@ async function runHubSpokeSingleModelRisk(input) {
     vessels, routes, oru, terminal,
     selectedLocations: locs, demandBBTUD,
     params, inflationFactor, riskDB, geoMap,
+    spatialDistances,
+    spatialWaypointsMap,
   } = input;
 
   if (!Array.isArray(locs) || locs.length === 0) {
@@ -1638,6 +1753,16 @@ async function runHubSpokeSingleModelRisk(input) {
   }
 
   const { tankSize, tankPrice } = getTankConfig(params);
+  // Merge spatialWaypointsMap distances into sdMap so all distance lookups benefit from real routes
+  const sdMap = (() => {
+    const base = spatialDistances instanceof Map ? new Map(spatialDistances) : new Map();
+    if (spatialWaypointsMap instanceof Map) {
+      for (const [k, v] of spatialWaypointsMap) {
+        if (v && typeof v.distanceNm === 'number') base.set(k, v.distanceNm);
+      }
+    }
+    return base.size ? base : null;
+  })();
   const LNG_EC = 24.04;
   const BASE_YEAR = 2022;
   const Pyears = params.Penyaluran || 20;
@@ -1673,8 +1798,8 @@ async function runHubSpokeSingleModelRisk(input) {
   function calcMother(hub, totDemBBTUD) {
     const rows = [];
     const baseDist =
-      getDistanceNM(distMap, terminal, hub, geoMap) ??
-      getDistanceNM(distMap, hub, terminal, geoMap);
+      getDistanceNM(distMap, terminal, hub, geoMap, sdMap) ??
+      getDistanceNM(distMap, hub, terminal, geoMap, sdMap);
     if (!baseDist) return rows;
 
     const dist = baseDist;
@@ -1781,7 +1906,7 @@ async function runHubSpokeSingleModelRisk(input) {
       let valid = true;
 
       for (let i = 0; i < fr.length - 1; i++) {
-        const d = getDistanceNM(distMap, fr[i], fr[i + 1], geoMap);
+        const d = getDistanceNM(distMap, fr[i], fr[i + 1], geoMap, sdMap);
         if (!d) { valid = false; break; }
         tdist += d;
         legs.push(d);
@@ -1991,6 +2116,8 @@ async function runNVesselProbabilityModel(input) {
     vesselNames,
     shareTerminalORU = true,
     geoMap,
+    spatialDistances,
+    spatialWaypointsMap,
   } = input;
 
   const n = selectedLocations.length;
@@ -2026,7 +2153,7 @@ async function runNVesselProbabilityModel(input) {
         selectedLocations: subset,
         demandBBTUD: subsetDemand,
         params, inflationFactor,
-        geoMap,
+        geoMap, spatialDistances, spatialWaypointsMap,
         numVessels, // pass numVessels to divide terminal ORU properly
         resultLimit: topN,
       });
@@ -2163,6 +2290,8 @@ async function runNVesselProbabilityModelRisk(input) {
     vesselNames,
     shareTerminalORU = true,
     geoMap,
+    spatialDistances,
+    spatialWaypointsMap,
   } = input;
 
   const n = selectedLocations.length;
@@ -2195,6 +2324,7 @@ async function runNVesselProbabilityModelRisk(input) {
         selectedLocations: subset,
         demandBBTUD: subsetDemand,
         params, inflationFactor, riskDB, geoMap,
+        spatialDistances, spatialWaypointsMap,
         numVessels, // pass numVessels to divide terminal ORU properly
         resultLimit: topN,
       });
@@ -2357,6 +2487,55 @@ async function runHubSpokeNVesselModelRisk(input) {
   return runHubSpokeTwoVesselModelRisk({ ...input, numFeeders: 2 });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SENSITIVITY ANALYSIS (Tornado Chart)
+// Runs the base single-vessel engine with ±variations on each param.
+// Python: run_sensitivity_analysis()
+//
+// @param {object} baseInput  – same as runSupplyChainModel input
+// @param {string[]} testVars – param keys to vary, e.g. ['harga_lng','inflation_rate']
+// @param {number[]} variations – fractional changes e.g. [-0.2,-0.1,0,0.1,0.2]
+// @returns {{ baseResult, sensitivity: { varName: { pct: topCost } } }}
+// ─────────────────────────────────────────────────────────────────────────────
+async function runSensitivityAnalysis(baseInput, testVars, variations) {
+  const _vars = Array.isArray(testVars) && testVars.length
+    ? testVars
+    : ['harga_lng', 'inflation_rate', 'loading_hour', 'maintenance_days'];
+  const _vars2 = Array.isArray(variations) && variations.length
+    ? variations
+    : [-0.20, -0.10, 0, 0.10, 0.20];
+
+  // Run base case
+  const baseRows = await runSupplyChainModel(baseInput);
+  const baseCost = baseRows[0] ? baseRows[0]['Total Cost (USD/MMBTU)'] : null;
+
+  const sensitivity = {};
+
+  for (const v of _vars) {
+    sensitivity[v] = {};
+    for (const pct of _vars2) {
+      const variedParams = { ...baseInput.params };
+      const baseVal = variedParams[v];
+      if (typeof baseVal !== 'number') {
+        sensitivity[v][pct] = null;
+        continue;
+      }
+      variedParams[v] = baseVal * (1 + pct);
+
+      let variedInflationFactor = baseInput.inflationFactor;
+      if (v === 'inflation_rate') {
+        const baseYear = 2022;
+        variedInflationFactor = Math.pow(1 + variedParams.inflation_rate, (variedParams.analysis_year || 2030) - baseYear);
+      }
+
+      const rows = await runSupplyChainModel({ ...baseInput, params: variedParams, inflationFactor: variedInflationFactor, resultLimit: 1 });
+      sensitivity[v][pct] = rows[0] ? rows[0]['Total Cost (USD/MMBTU)'] : null;
+    }
+  }
+
+  return { baseCost, baseResult: baseRows[0] || null, sensitivity };
+}
+
 module.exports = {
   runSupplyChainModel,
   runTwoVesselProbabilityModel,
@@ -2374,4 +2553,7 @@ module.exports = {
   runNVesselProbabilityModelRisk,
   runHubSpokeNVesselModel,
   runHubSpokeNVesselModelRisk,
+  // NEW: helpers exposed for controllers
+  hitungBiayaPelabuhan,
+  runSensitivityAnalysis,
 };

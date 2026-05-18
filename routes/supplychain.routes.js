@@ -11,6 +11,9 @@ router.post('/scenario', validateSupplyChainInput, scenCtrl.upsertScenario);
 
 // Unified run: single or twin based on body.twin
 router.post('/run', validateSupplyChainInput, runCtrl.runUnified);
+ 
+// Sensitivity analysis (Tornado Chart)
+router.post('/sensitivity', runCtrl.runSensitivity);
 
 // Get cached run by key
 router.get('/run/:runKey', runCtrl.getByKey);

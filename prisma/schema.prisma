@@ -187,9 +187,19 @@ model Vessel {
   voyageTonPerDay     Float
   ballastTonPerDay    Float
   berthTonPerDay      Float
-  portCostLTP         Float
-  portCostDelay       Float
-  portCostPerLocation Float
+  portCostLTP         Float    @default(0)
+  portCostDelay       Float    @default(0)
+  portCostPerLocation Float    @default(0)
+  // Holtrop & Mennen physical dimensions
+  lpp                 Float?   // Length Between Perpendiculars (m)
+  breadth             Float?   // Beam (m)
+  draft               Float?   // Design draft T (m)
+  depth               Float?   // Ship depth D (m)
+  withBulb            Boolean  @default(true)
+  // Capacity & cost metadata
+  gt                  Float?   // Gross Tonnage (for port tariff calculation)
+  dwt                 Float?   // Deadweight Tonnage
+  capexUSD            Float?   // Vessel acquisition CAPEX (USD)
   createdAt           DateTime @default(now())
 }
 
@@ -434,4 +444,62 @@ model InfraLibrary {
 
   @@unique([code, variantKey])
   @@index([code])
+}
+
+// ============================
+// SPATIAL ROUTING MODULE
+// ============================
+
+// Cached A* computed sea-route between two berthing points
+model SpatialRouteCache {
+  id              Int      @id @default(autoincrement())
+  routeKey        String   @unique  // SHA256(origin|destination)
+  origin          String
+  destination     String
+  // waypoints: [[lat, lon], ...] of the smoothed sea-path
+  waypoints       Json
+  distanceNm      Float
+  minDepth        Float    @default(0)
+  maxDepth        Float    @default(0)
+  // berthing points shifted off-shore from original coords
+  berthOrigin     Json?    // {lat, lon}
+  berthDest       Json?    // {lat, lon}
+  engineUsed      String   @default("haversine") // 'batnas' | 'gebco' | 'haversine'
+  safeDepth       Float    @default(-10)
+  weatherZones    Json?    // string[] of IHO zones crossed
+  createdAt       DateTime @default(now())
+
+  @@index([origin, destination])
+}
+
+// Per-location jetty / berthing infrastructure report
+model JettyBerthReport {
+  id           Int      @id @default(autoincrement())
+  locationName String   @unique
+  origLat      Float
+  origLon      Float
+  shoreLat     Float    @default(0)
+  shoreLon     Float    @default(0)
+  berthLat     Float
+  berthLon     Float
+  landKm       Float    @default(0)
+  jettyM       Float    @default(0)
+  berthDepth   Float    @default(0)
+  engineUsed   String   @default("gebco")
+  updatedAt    DateTime @updatedAt
+}
+
+// Cached weather forecast per zone/month/year
+model WeatherZoneCache {
+  id        Int      @id @default(autoincrement())
+  zone      String
+  month     Int
+  year      Int
+  waveMax   Float    @default(1.5)
+  waveMean  Float    @default(0.8)
+  windMax   Float    @default(20.0)
+  windMean  Float    @default(12.0)
+  updatedAt DateTime @updatedAt
+
+  @@unique([zone, month, year])
 }
