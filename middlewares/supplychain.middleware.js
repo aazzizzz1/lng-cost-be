@@ -119,6 +119,9 @@ function validateSupplyChainInput(req, res, next) {
     risk: b.risk || undefined,
     geo,
     vessels: normVessels,
+    bulan: (typeof b.bulan === 'number' && b.bulan >= 1 && b.bulan <= 12) ? b.bulan : null,
+    weatherMode: (b.weatherMode === 'mean' ? 'mean' : 'max'),
+    maxJettyM: (typeof b.maxJettyM === 'number' ? b.maxJettyM : 0),
   });
   req.runKey = crypto.createHash('sha256').update(canonical).digest('hex');
 

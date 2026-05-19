@@ -6,6 +6,8 @@
 
 // Holtrop & Mennen speed-loss model (imported from weatherService)
 const { calcSpeedLoss } = require('./weatherService');
+// Spatial route service: dynamic per-segment voyage hours (bathymetry-aware)
+const { computeDynamicVoyageHours } = require('./spatialRouteService');
 
 // Twin-vessel probability logic:
 // - For each ratio (e.g., 50:50, 60:40...), split selectedLocations into two sets by combination count.
@@ -350,6 +352,47 @@ function getEffectiveSpeed(vessel, weatherCacheByZone) {
   return calcSpeedLoss(vessel, wx.wave || 0, wx.wind || 0);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Pre-compute per-leg voyage hours (WITHOUT risk multiplier) for every unique
+// vessel × origin × destination triple when spatial waypoints are available.
+// Returns Map: "vesselName|origin|dest" → hours
+// Falls back gracefully when waypoints missing.
+// ─────────────────────────────────────────────────────────────────────────────
+async function buildLegHoursCache(vessels, locations, swMap, weatherCacheByZone) {
+  const cache = new Map();
+  if (!swMap) return cache;
+  for (const vessel of vessels) {
+    for (const o of locations) {
+      for (const d of locations) {
+        if (o === d) continue;
+        const fwdKey = `${vessel.name}|${o}|${d}`;
+        if (cache.has(fwdKey)) continue; // already computed (symmetric)
+        const sw = swMap.get(`${o}|${d}`) || swMap.get(`${d}|${o}`);
+        if (sw && Array.isArray(sw.waypoints) && sw.waypoints.length >= 2) {
+          try {
+            const hours = await computeDynamicVoyageHours(sw.waypoints, vessel, weatherCacheByZone);
+            if (typeof hours === 'number' && hours > 0) {
+              cache.set(fwdKey, hours);
+              cache.set(`${vessel.name}|${d}|${o}`, hours); // symmetric: same weather zones
+            }
+          } catch (_) { /* fall through to dist/speed */ }
+        }
+      }
+    }
+  }
+  return cache;
+}
+
+// Get sailing hours for one leg (without risk multiplier).
+// Uses pre-computed spatial cache when available, otherwise dist / effective_speed.
+function getLegHours(legHoursCache, vesselName, origin, dest, distNm, vessel, weatherCacheByZone) {
+  const h = legHoursCache.get(`${vesselName}|${origin}|${dest}`) ??
+            legHoursCache.get(`${vesselName}|${dest}|${origin}`);
+  if (typeof h === 'number') return h;
+  const spd = getEffectiveSpeed(vessel, weatherCacheByZone);
+  return distNm / (spd > 0 ? spd : vessel.speedKnot);
+}
+
 
 async function runSupplyChainModel(input) {
   const {
@@ -383,16 +426,18 @@ async function runSupplyChainModel(input) {
 
   const Batas_Maksimum_Utilisasi_LNGC = ((365 - params.maintenance_days) / 365) * 100;
 
+  // Pre-compute per-leg voyage hours using spatial waypoints when available
+  const allLocations = [terminal, ...selectedLocations];
+  const legHoursCache = await buildLegHoursCache(vesselAdj, allLocations, swMap, weatherCacheByZone);
+
   for (const vessel of vesselAdj) {
     const kapasitas_kapal = vessel.capacityM3;
-    // Use Holtrop & Mennen speed when weather data and physical dims available
-    const speed = getEffectiveSpeed(vessel, weatherCacheByZone);
 
     for (const route of allRoutes) {
       const fullRoute = [terminal, ...route, terminal];
       let totalDistance = 0;
       let sailingTime = 0;
-      const legs = [];
+      const legs = []; // each entry: { dist, hours }
 
       for (let i = 0; i < fullRoute.length - 1; i++) {
         const origin = fullRoute[i];
@@ -406,8 +451,9 @@ async function runSupplyChainModel(input) {
         if (dist == null) dist = getDistanceNM(distanceMap, origin, dest, geoMap, sdMap);
         if (!dist) { totalDistance = null; break; }
         totalDistance += dist;
-        sailingTime += dist / speed;
-        legs.push(dist);
+        const legH = getLegHours(legHoursCache, vessel.name, origin, dest, dist, vessel, weatherCacheByZone);
+        sailingTime += legH;
+        legs.push({ dist, hours: legH });
       }
       if (totalDistance == null) continue;
 
@@ -461,8 +507,7 @@ async function runSupplyChainModel(input) {
       let fuel_voyage = 0;
       let fuel_ballast = 0;
       for (let i = 0; i < n_leg; i++) {
-        const dist = legs[i];
-        const time_leg = dist / speed;
+        const time_leg = legs[i].hours; // dynamic voyage hours per leg
         fuel_voyage += (time_leg / 24) * vessel.voyageTonPerDay;
         if (i === n_leg - 1) fuel_ballast = (time_leg / 24) * vessel.ballastTonPerDay;
       }
@@ -504,7 +549,7 @@ async function runSupplyChainModel(input) {
         'Demand LNG/day (m3)': demand_m3_day,
         'Nominal Capacity (m3)': nominal_capacity,
         'Kapasitas Kapal (m3)': kapasitas_kapal,
-        'Speed (knot)': speed,
+        'Speed (knot)': sailingTime > 0 ? totalDistance / sailingTime : vessel.speedKnot,
         'buffer day': buffer_day,
         'days_stock': days_stock,
         'voyages_year': voyages_year,
@@ -567,15 +612,17 @@ async function runSupplyChainModelRisk(input) {
   const impact_lt_II2 = getRiskImpact(riskDB, 'P2_Durasi', 'II.2');
   const impact_lt_II5 = getRiskImpact(riskDB, 'P2_Durasi', 'II.5');
 
+  // Pre-compute per-leg voyage hours using spatial waypoints when available
+  const allLocations_risk = [terminal, ...selectedLocations];
+  const legHoursCache_risk = await buildLegHoursCache(vesselAdj, allLocations_risk, swMap, weatherCacheByZone);
+
   for (const vessel of vesselAdj) {
     const kapasitas_kapal = vessel.capacityM3;
-    // Use Holtrop & Mennen speed when weather data and physical dims available
-    const speed = getEffectiveSpeed(vessel, weatherCacheByZone);
 
     for (const route of allRoutes) {
       const fullRoute = [terminal, ...route, terminal];
       let totalDistance = 0;
-      const legs = [];
+      const legs = []; // each entry: { dist, hours } (hours WITHOUT risk multiplier)
 
       for (let i = 0; i < fullRoute.length - 1; i++) {
         const origin = fullRoute[i];
@@ -589,14 +636,15 @@ async function runSupplyChainModelRisk(input) {
         if (dist == null) dist = getDistanceNM(distanceMap, origin, dest, geoMap, sdMap);
         if (!dist) { totalDistance = null; break; }
         totalDistance += dist;
-        legs.push(dist);
+        const legH = getLegHours(legHoursCache_risk, vessel.name, origin, dest, dist, vessel, weatherCacheByZone);
+        legs.push({ dist, hours: legH });
       }
       if (totalDistance == null) continue;
 
       // Sailing time with risk
       let sailingTime = 0;
-      for (const d of legs) {
-        sailingTime += (d / speed) * (1 + im_s);
+      for (const leg of legs) {
+        sailingTime += leg.hours * (1 + im_s);
       }
 
       // Loading time with risk
@@ -671,8 +719,7 @@ async function runSupplyChainModelRisk(input) {
       let sailing_time_voyage = 0;
       let sailing_time_ballast = 0;
       for (let i = 0; i < n_leg; i++) {
-        const dist = legs[i];
-        const time_leg = (dist / speed) * (1 + im_s);
+        const time_leg = legs[i].hours * (1 + im_s); // apply risk multiplier
         sailing_time_voyage += time_leg;
         if (i === n_leg - 1) sailing_time_ballast = time_leg;
       }
@@ -716,7 +763,7 @@ async function runSupplyChainModelRisk(input) {
         'Demand LNG/day (m3)': demand_m3_day,
         'Nominal Capacity (m3)': nominal_capacity,
         'Kapasitas Kapal (m3)': kapasitas_kapal,
-        'Speed (knot)': speed,
+        'Speed (knot)': sailingTime > 0 ? totalDistance / sailingTime : vessel.speedKnot,
         'buffer day': buffer_day,
         'days_stock': days_stock,
         'voyages_year': voyages_year,
@@ -752,6 +799,9 @@ async function runTwoVesselProbabilityModel(input) {
     vesselNames,
     shareTerminalORU = true,
     geoMap,
+    spatialDistances,
+    weatherCacheByZone,
+    spatialWaypointsMap,
   } = input;
 
   const total = [];
@@ -780,12 +830,14 @@ async function runTwoVesselProbabilityModel(input) {
         vessels, routes, oru, terminal,
         selectedLocations: loc_k1, demandBBTUD: demand_k1,
         params, inflationFactor, geoMap,
+        spatialDistances, weatherCacheByZone, spatialWaypointsMap,
         numVessels: 2,
       });
       const df2 = await runSupplyChainModel({
         vessels, routes, oru, terminal,
         selectedLocations: loc_k2, demandBBTUD: demand_k2,
         params, inflationFactor, geoMap,
+        spatialDistances, weatherCacheByZone, spatialWaypointsMap,
         numVessels: 2,
       });
 
@@ -977,6 +1029,9 @@ async function runTwoVesselProbabilityModelRisk(input) {
     enforceSameVessel = true,
     vesselNames,
     geoMap,
+    spatialDistances,
+    weatherCacheByZone,
+    spatialWaypointsMap,
   } = input;
 
   const total = [];
@@ -1005,12 +1060,14 @@ async function runTwoVesselProbabilityModelRisk(input) {
         vessels, routes, oru, terminal,
         selectedLocations: loc_k1, demandBBTUD: demand_k1,
         params, inflationFactor, riskDB, geoMap,
+        spatialDistances, weatherCacheByZone, spatialWaypointsMap,
         numVessels: 2,
       });
       const df2 = await runSupplyChainModelRisk({
         vessels, routes, oru, terminal,
         selectedLocations: loc_k2, demandBBTUD: demand_k2,
         params, inflationFactor, riskDB, geoMap,
+        spatialDistances, weatherCacheByZone, spatialWaypointsMap,
         numVessels: 2,
       });
 
@@ -1239,6 +1296,7 @@ async function runHubSpokeTwoVesselModelRisk(input) {
     geoMap, // NEW: dipakai di perhitungan mother & feeder
     spatialDistances,
     spatialWaypointsMap,
+    weatherCacheByZone,
     // twinCfg (ratios, enforceSameVessel, vesselNames, ...) diabaikan di sini, karena
     // algoritma Hub & Spoke N-dimensional tidak pakai rasio pembagian demand
   } = input;
@@ -1274,6 +1332,11 @@ async function runHubSpokeTwoVesselModelRisk(input) {
   // Python: NO inflation on rent/port. Only tank CAPEX uses inflationFactor.
   const kSorted = vessels.slice().sort((a, b) => a.capacityM3 - b.capacityM3);
 
+  // Pre-compute per-leg voyage hours for all vessel × location pairs
+  const swMap2v = spatialWaypointsMap instanceof Map ? spatialWaypointsMap : null;
+  const hs2AllLocs = [terminal, ...locs];
+  const twoVesselLegHoursCache = await buildLegHoursCache(kSorted, hs2AllLocs, swMap2v, weatherCacheByZone);
+
   const gr = (p, ii) => getRiskImpact(riskDB, p, ii) || 0.0;
   const im_s = gr('P2_Durasi', 'II.3');
 
@@ -1304,8 +1367,8 @@ async function runHubSpokeTwoVesselModelRisk(input) {
     const impact_lt_II5 = gr('P2_Durasi', 'II.5');
 
     for (const k of kSorted) {
-      const speed = k.speedKnot;
-      const st = (dist * 2 / speed) * (1 + im_s); // jam
+      const rawH = getLegHours(twoVesselLegHoursCache, k.name, terminal, hub, dist, k, weatherCacheByZone);
+      const st = rawH * 2 * (1 + im_s); // jam
       const lt =
         params.loading_hour * (1 + impact_lt_II2) +
         params.loading_hour * (1 + impact_lt_II5); // jam
@@ -1342,8 +1405,8 @@ async function runHubSpokeTwoVesselModelRisk(input) {
 
       const t_cap = cap_hub + cap_term;
 
-      const fv = (dist * 2 / speed) * (1 + im_s) / 24.0 * k.voyageTonPerDay;
-      const fb = (dist / speed) * (1 + im_s) / 24.0 * k.ballastTonPerDay;
+      const fv = rawH * 2 * (1 + im_s) / 24.0 * k.voyageTonPerDay;
+      const fb = rawH * (1 + im_s) / 24.0 * k.ballastTonPerDay;
       const fbt = (lt / 24.0) * k.berthTonPerDay;
 
       const lng_c =
@@ -1380,7 +1443,7 @@ async function runHubSpokeTwoVesselModelRisk(input) {
         'Demand LNG/day (m3)': dem_m3,
         'Nominal Capacity (m3)': nom_cap,
         'Kapasitas Kapal (m3)': k.capacityM3,
-        'Speed (knot)': speed,
+        'Speed (knot)': rawH > 0 ? dist / rawH : k.speedKnot,
         'buffer day': buf,
         'days_stock': ds,
         'voyages_year': vy,
@@ -1449,13 +1512,17 @@ async function runHubSpokeTwoVesselModelRisk(input) {
       if (!valid) continue;
 
       for (const k of kSorted) {
-        const speed = k.speedKnot;
         // Python: lt with risk = loading*(1+risk_II2) + nLocs*loading*(1+risk_II5)
         const lt = params.loading_hour * (1 + impact_lt_II2) +
           ruteLocs.length * params.loading_hour * (1 + impact_lt_II5);
-        // Python: st with risk = sum((d/speed)*(1+im_s))
+        // Dynamic voyage hours per leg, accumulated with risk
+        const legHours2v = [];
         let st = 0;
-        for (const d of legs) st += (d / speed) * (1 + im_s);
+        for (let i = 0; i < legs.length; i++) {
+          const h = getLegHours(twoVesselLegHoursCache, k.name, fr[i], fr[i + 1], legs[i], k, weatherCacheByZone);
+          legHours2v.push(h);
+          st += h * (1 + im_s);
+        }
         const rtd = (st + lt) / 24.0;
 
         const buf = roundUpDecimal((params.maintenance_days / 365.0) * rtd);
@@ -1494,8 +1561,7 @@ async function runHubSpokeTwoVesselModelRisk(input) {
         let fv = 0.0;
         let fb = 0.0;
         for (let i = 0; i < legs.length; i++) {
-          const d = legs[i];
-          const t_leg = (d / speed) * (1 + im_s);
+          const t_leg = legHours2v[i] * (1 + im_s);
           fv += (t_leg / 24.0) * k.voyageTonPerDay;
           if (i === legs.length - 1) {
             fb += (t_leg / 24.0) * k.ballastTonPerDay;
@@ -1536,7 +1602,7 @@ async function runHubSpokeTwoVesselModelRisk(input) {
           'Demand LNG/day (m3)': dem_m3,
           'Nominal Capacity (m3)': nom_cap,
           'Kapasitas Kapal (m3)': k.capacityM3,
-          'Speed (knot)': speed,
+          'Speed (knot)': st > 0 ? tdist / st : k.speedKnot,
           'buffer day': buf,
           'days_stock': ds,
           'voyages_year': vy,
@@ -1746,6 +1812,7 @@ async function runHubSpokeSingleModelRisk(input) {
     params, inflationFactor, riskDB, geoMap,
     spatialDistances,
     spatialWaypointsMap,
+    weatherCacheByZone,
   } = input;
 
   if (!Array.isArray(locs) || locs.length === 0) {
@@ -1777,6 +1844,11 @@ async function runHubSpokeSingleModelRisk(input) {
   const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD]));
   const kSorted = vessels.slice().sort((a, b) => a.capacityM3 - b.capacityM3);
 
+  // Pre-compute per-leg voyage hours for all vessel × location pairs
+  const swMap = spatialWaypointsMap instanceof Map ? spatialWaypointsMap : null;
+  const hsAllLocs = [terminal, ...locs];
+  const hubLegHoursCache = await buildLegHoursCache(kSorted, hsAllLocs, swMap, weatherCacheByZone);
+
   const gr = (p, ii) => getRiskImpact(riskDB, p, ii) || 0.0;
   const im_s = gr('P2_Durasi', 'II.3');
   const impact_lt_II2 = gr('P2_Durasi', 'II.2');
@@ -1807,8 +1879,8 @@ async function runHubSpokeSingleModelRisk(input) {
     let countShips = 0;
 
     for (const k of kSorted) {
-      const speed = k.speedKnot;
-      const st = (dist * 2 / speed) * (1 + im_s);
+      const rawH = getLegHours(hubLegHoursCache, k.name, terminal, hub, dist, k, weatherCacheByZone);
+      const st = rawH * 2 * (1 + im_s); // round trip sailing time (hours)
       const lt = params.loading_hour * (1 + impact_lt_II2) +
         params.loading_hour * (1 + impact_lt_II5);
       const rtd = (st + lt) / 24.0;
@@ -1842,8 +1914,8 @@ async function runHubSpokeSingleModelRisk(input) {
       const cap_term = k.capacityM3 < 20000 ? oruTerm * (1 + impact_capex_end) : 0;
       const t_cap = cap_hub + cap_term;
 
-      const fv = (dist * 2 / speed) * (1 + im_s) / 24.0 * k.voyageTonPerDay;
-      const fb = (dist / speed) * (1 + im_s) / 24.0 * k.ballastTonPerDay;
+      const fv = rawH * 2 * (1 + im_s) / 24.0 * k.voyageTonPerDay;
+      const fb = rawH * (1 + im_s) / 24.0 * k.ballastTonPerDay;
       const fbt = (lt / 24.0) * k.berthTonPerDay;
       const lng_c = vy * (fv + fb + fbt) * (params.scf_lng / params.scf_mgo) * params.harga_lng;
 
@@ -1867,7 +1939,7 @@ async function runHubSpokeSingleModelRisk(input) {
         'Demand LNG/day (m3)': dem_m3,
         'Nominal Capacity (m3)': nom_cap,
         'Kapasitas Kapal (m3)': k.capacityM3,
-        'Speed (knot)': speed,
+        'Speed (knot)': rawH > 0 ? dist / rawH : k.speedKnot,
         'buffer day': buf,
         'days_stock': ds,
         'voyages_year': vy,
@@ -1915,11 +1987,15 @@ async function runHubSpokeSingleModelRisk(input) {
 
       let countShips = 0;
       for (const k of kSorted) {
-        const speed = k.speedKnot;
         const lt = params.loading_hour * (1 + impact_lt_II2) +
           ruteLocs.length * params.loading_hour * (1 + impact_lt_II5);
+        const legHours = [];
         let stTotal = 0;
-        for (const d of legs) stTotal += (d / speed) * (1 + im_s);
+        for (let i = 0; i < legs.length; i++) {
+          const h = getLegHours(hubLegHoursCache, k.name, fr[i], fr[i + 1], legs[i], k, weatherCacheByZone);
+          legHours.push(h);
+          stTotal += h * (1 + im_s);
+        }
         const rtd = (stTotal + lt) / 24.0;
 
         const buf = roundUpDecimal((params.maintenance_days / 365.0) * rtd);
@@ -1958,8 +2034,7 @@ async function runHubSpokeSingleModelRisk(input) {
         let fv = 0.0;
         let fb = 0.0;
         for (let i = 0; i < legs.length; i++) {
-          const d = legs[i];
-          const t_leg = (d / speed) * (1 + im_s);
+          const t_leg = legHours[i] * (1 + im_s);
           fv += (t_leg / 24.0) * k.voyageTonPerDay;
           if (i === legs.length - 1) fb += (t_leg / 24.0) * k.ballastTonPerDay;
         }
@@ -1986,7 +2061,7 @@ async function runHubSpokeSingleModelRisk(input) {
           'Demand LNG/day (m3)': dem_m3,
           'Nominal Capacity (m3)': nom_cap,
           'Kapasitas Kapal (m3)': k.capacityM3,
-          'Speed (knot)': speed,
+          'Speed (knot)': stTotal > 0 ? tdist / stTotal : k.speedKnot,
           'buffer day': buf,
           'days_stock': ds,
           'voyages_year': vy,
@@ -2118,6 +2193,7 @@ async function runNVesselProbabilityModel(input) {
     geoMap,
     spatialDistances,
     spatialWaypointsMap,
+    weatherCacheByZone,
   } = input;
 
   const n = selectedLocations.length;
@@ -2153,7 +2229,7 @@ async function runNVesselProbabilityModel(input) {
         selectedLocations: subset,
         demandBBTUD: subsetDemand,
         params, inflationFactor,
-        geoMap, spatialDistances, spatialWaypointsMap,
+        geoMap, spatialDistances, spatialWaypointsMap, weatherCacheByZone,
         numVessels, // pass numVessels to divide terminal ORU properly
         resultLimit: topN,
       });
@@ -2292,6 +2368,7 @@ async function runNVesselProbabilityModelRisk(input) {
     geoMap,
     spatialDistances,
     spatialWaypointsMap,
+    weatherCacheByZone,
   } = input;
 
   const n = selectedLocations.length;
@@ -2324,7 +2401,7 @@ async function runNVesselProbabilityModelRisk(input) {
         selectedLocations: subset,
         demandBBTUD: subsetDemand,
         params, inflationFactor, riskDB, geoMap,
-        spatialDistances, spatialWaypointsMap,
+        spatialDistances, spatialWaypointsMap, weatherCacheByZone,
         numVessels, // pass numVessels to divide terminal ORU properly
         resultLimit: topN,
       });
