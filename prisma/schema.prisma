@@ -114,7 +114,7 @@ model UnitPrice {
 
 model cci {
   id           Int     @id @default(autoincrement())
-  kodeProvinsi Int
+  kodeProvinsi Int     @unique
   provinsi     String
   cci          Float
   delivery     Float   @default(0) // NEW: delivery factor/index
@@ -178,6 +178,7 @@ model MooringRuleSetting {
   updatedAt          DateTime @updatedAt
 }
 
+// SupplyChain Feature
 model Vessel {
   id                  Int      @id @default(autoincrement())
   name                String   @unique
@@ -213,10 +214,14 @@ model DistanceRoute {
 }
 
 model OruCapex {
-  id          Int      @id @default(autoincrement())
-  plantName   String   @unique
-  fixCapexUSD Float
-  createdAt   DateTime @default(now())
+  id               Int      @id @default(autoincrement())
+  plantName        String   @unique
+  fixCapexUSD      Float
+  province         String?  // Provinsi lokasi plant (untuk IKK lookup)
+  capacityValue    Float?   // Kapasitas desain plant (nilai numerik)
+  unit             String?  @default("MMSCFD") // Satuan kapasitas: "MMSCFD" atau "BBTUD"
+  year             Int      @default(2022) // Tahun referensi data
+  createdAt        DateTime @default(now())
 }
 
 model SupplyChainScenario {
@@ -253,6 +258,8 @@ model Location {
   type      String   // 'terminal' | 'plant'
   latitude  Float?
   longitude Float?
+  province  String?  // Provinsi lokasi
+  year      Int      @default(2022) // Tahun referensi data
   createdAt DateTime @default(now())
 
   @@index([type])

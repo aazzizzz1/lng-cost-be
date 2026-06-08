@@ -39,18 +39,21 @@ const VESSELS = [
 ];
 
 // ---------------------------------------------------------------------------
-// ORU CAPEX (Python oru_df_default)
-// ---------------------------------------------------------------------------
+// ORU CAPEX – semua entri adalah data referensi (nearest-neighbor AACE Six-Tenths)
+// capex_term_base = 3678949.0 — Baseline harga ORF/Terminal (Badak NGL Bontang)
+// digunakan sebagai referensi inflasi CAPEX terminal di semua scenario
 const ORU_PLANTS = [
-  { plantName: 'MPP Jeranjang (Lombok Peaker)', fixCapexUSD: 13501607 },
-  { plantName: 'PLTMG Kupang',                  fixCapexUSD: 14222216 },
-  { plantName: 'PLTMG Rangko (Flores)',          fixCapexUSD: 16384042 },
-  { plantName: 'PLTMG Sumbawa',                  fixCapexUSD: 13982013 },
-  { plantName: 'PLTMG Bima',                     fixCapexUSD: 14942825 },
-  { plantName: 'PLTMG Maumere',                  fixCapexUSD: 15136113 },
-  { plantName: 'PLTMG Alor',                     fixCapexUSD: 11263521 },
-  { plantName: 'PLTMG Waingapu',                 fixCapexUSD: 15136113 },
-  { plantName: 'Badak NGL Bontang',              fixCapexUSD: 3678949  },
+  { plantName: 'MPP Jeranjang (Lombok Peaker)', fixCapexUSD: 6956193.76957883,  province: 'Nusa Tenggara Barat', capacityValue: 3.6,   unit: 'BBTUD',  year: 2022 },
+  { plantName: 'PLTMG Kupang',                  fixCapexUSD: 7013640.21469643,  province: 'Nusa Tenggara Timur', capacityValue: 2.9,   unit: 'BBTUD',  year: 2022 },
+  { plantName: 'PLTMG Rangko (Flores)',          fixCapexUSD: 7185979.55004923,  province: 'Nusa Tenggara Timur', capacityValue: 1.65,  unit: 'BBTUD',  year: 2022 },
+  { plantName: 'PLTMG Sumbawa',                  fixCapexUSD: 6994491.39965723,  province: 'Nusa Tenggara Barat', capacityValue: 6.13,  unit: 'BBTUD',  year: 2022 },
+  { plantName: 'PLTMG Bima',                     fixCapexUSD: 7071086.65981403,  province: 'Nusa Tenggara Barat', capacityValue: 6.13,  unit: 'BBTUD',  year: 2022 },
+  { plantName: 'PLTMG Maumere',                  fixCapexUSD: 7043320.87800719,  province: 'Nusa Tenggara Timur', capacityValue: 2.9,   unit: 'BBTUD',  year: 2022 },
+  { plantName: 'PLTMG Alor',                     fixCapexUSD: 6851832.72761519,  province: 'Nusa Tenggara Timur', capacityValue: 1.3,   unit: 'BBTUD',  year: 2022 },
+  { plantName: 'PLTMG Waingapu',                 fixCapexUSD: 7043320.87800719,  province: 'Nusa Tenggara Timur', capacityValue: 1.3,   unit: 'BBTUD',  year: 2022 },
+  { plantName: 'Badak NGL Bontang',              fixCapexUSD: 3678948.68139263,  province: 'Kalimantan Timur',    capacityValue: null,  unit: null,     year: 2022 },
+  { plantName: 'ORU Papua Low (2024)',           fixCapexUSD: 23582442.21,       province: 'Papua',               capacityValue: 4.89,  unit: 'MMSCFD', year: 2024 },
+  { plantName: 'ORU Papua High (2024)',          fixCapexUSD: 26430984.51,       province: 'Papua',               capacityValue: 16.39, unit: 'MMSCFD', year: 2024 },
 ];
 
 // ---------------------------------------------------------------------------
@@ -101,15 +104,18 @@ const ROUTES = [
 // Based on actual geographic positions of each plant/terminal
 // ---------------------------------------------------------------------------
 const LOCATIONS = [
-  { name: 'Badak NGL Bontang',              type: 'terminal', latitude: 0.1167,   longitude: 117.5000 },
-  { name: 'MPP Jeranjang (Lombok Peaker)',  type: 'plant',    latitude: -8.6541,  longitude: 116.1197 },
-  { name: 'PLTMG Kupang',                   type: 'plant',    latitude: -10.1718, longitude: 123.6075 },
-  { name: 'PLTMG Rangko (Flores)',           type: 'plant',    latitude: -8.5500,  longitude: 119.8700 },
-  { name: 'PLTMG Sumbawa',                   type: 'plant',    latitude: -8.4900,  longitude: 117.4200 },
-  { name: 'PLTMG Bima',                      type: 'plant',    latitude: -8.4600,  longitude: 118.7200 },
-  { name: 'PLTMG Maumere',                   type: 'plant',    latitude: -8.6200,  longitude: 122.2100 },
-  { name: 'PLTMG Alor',                      type: 'plant',    latitude: -8.2230,  longitude: 124.5150 },
-  { name: 'PLTMG Waingapu',                  type: 'plant',    latitude: -9.6600,  longitude: 120.2600 },
+  { name: 'Badak NGL Bontang',              type: 'terminal', latitude: 0.096989,   longitude: 117.477606, province: 'Kalimantan Timur',   year: 2022 },
+  { name: 'MPP Jeranjang (Lombok Peaker)',  type: 'plant',    latitude: -8.659828,  longitude: 116.073925, province: 'Nusa Tenggara Barat', year: 2022 },
+  { name: 'PLTMG Kupang',                   type: 'plant',    latitude: -10.353614, longitude: 123.458081, province: 'Nusa Tenggara Timur', year: 2022 },
+  { name: 'PLTMG Rangko (Flores)',           type: 'plant',    latitude: -8.460847,  longitude: 119.944175, province: 'Nusa Tenggara Timur', year: 2022 },
+  { name: 'PLTMG Sumbawa',                   type: 'plant',    latitude: -8.447617,  longitude: 117.336522, province: 'Nusa Tenggara Barat', year: 2022 },
+  { name: 'PLTMG Bima',                      type: 'plant',    latitude: -8.408975,  longitude: 118.699328, province: 'Nusa Tenggara Barat', year: 2022 },
+  { name: 'PLTMG Maumere',                   type: 'plant',    latitude: -8.619886,  longitude: 122.339192, province: 'Nusa Tenggara Timur', year: 2022 },
+  { name: 'PLTMG Alor',                      type: 'plant',    latitude: -8.242778,  longitude: 124.529975, province: 'Nusa Tenggara Timur', year: 2022 },
+  { name: 'PLTMG Waingapu',                  type: 'plant',    latitude: -9.476673,  longitude: 120.153197, province: 'Nusa Tenggara Timur', year: 2022 },
+  // Referensi Papua 2024
+  { name: 'ORU Papua Low (2024)',   type: 'plant', latitude: -4.0,     longitude: 136.0,    province: 'Papua',               year: 2024 },
+  { name: 'ORU Papua High (2024)',  type: 'plant', latitude: -4.0,     longitude: 136.0,    province: 'Papua',               year: 2024 },
 ];
 
 async function main() {
@@ -150,17 +156,23 @@ async function main() {
   }
   console.log(`✅ ${vesselCount} vessels upserted`);
 
-  // ── ORU Capex ─────────────────────────────────────────────────────────────
+  // ── ORU Capex ──────────────────────────────────────────────────────────────
   let oruCount = 0;
   for (const o of ORU_PLANTS) {
     await prisma.oruCapex.upsert({
       where: { plantName: o.plantName },
-      update: { fixCapexUSD: o.fixCapexUSD },
+      update: {
+        fixCapexUSD:    o.fixCapexUSD,
+        province:       o.province,
+        capacityValue:  o.capacityValue,
+        unit:           o.unit,
+        year:           o.year,
+      },
       create: o,
     });
     oruCount++;
   }
-  console.log(`✅ ${oruCount} ORU plants upserted`);
+  console.log(`✅ ${oruCount} ORU records upserted`);
 
   // ── Distance Routes ────────────────────────────────────────────────────────
   let routeCount = 0;
@@ -182,7 +194,13 @@ async function main() {
   for (const l of LOCATIONS) {
     await prisma.location.upsert({
       where: { name: l.name },
-      update: { type: l.type, latitude: l.latitude, longitude: l.longitude },
+      update: {
+        type:      l.type,
+        latitude:  l.latitude,
+        longitude: l.longitude,
+        province:  l.province,
+        year:      l.year,
+      },
       create: l,
     });
     locCount++;

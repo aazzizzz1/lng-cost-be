@@ -313,7 +313,10 @@ async function main() {
   //   console.log('✅ Locations seeded');
   // }
 
-  // NEW: seed RiskMatrix (R1–R32) - upsert to ensure values match Excel exactly
+  // seed RiskMatrix (R1–R32) via dedicated module
+  await require('./seedRiskMatrix')(prisma);
+
+  // [archived R1-R32 inline data kept below for reference — now handled by seedRiskMatrix.js]
   // const allRows = [
   //   {
   //     riskCode: 'R1',

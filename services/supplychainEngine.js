@@ -161,15 +161,9 @@ function getDistanceNM(distanceMap, origin, destination, geoMap, spatialDistance
   return haversineNm(o.latitude, o.longitude, d.latitude, d.longitude);
 }
 
-// NEW: Tank configuration helper (tidak hardcoded)
-function getTankConfig(params) {
-  return {
-    tankSize: (typeof params.ukuran_tangki_500m3 === 'number' && params.ukuran_tangki_500m3 > 0)
-      ? params.ukuran_tangki_500m3 : 500,
-    tankPrice: (typeof params.harga_tangki_500m3 === 'number' && params.harga_tangki_500m3 > 0)
-      ? params.harga_tangki_500m3 : 1030000,
-  };
-}
+// Tank defaults: internal constants (not user input per Python notebook)
+const TANK_SIZE_M3   = 500;      // m3 (fixed unit)
+const TANK_PRICE_USD = 1030000;  // USD per 500 m3 unit
 
 // Risk column map and II-stage map (needed by buildRiskDB)
 const COL_MAP = {
@@ -408,11 +402,13 @@ async function runSupplyChainModel(input) {
     resultLimit = 20,
   } = input;
 
-  const { tankSize, tankPrice } = getTankConfig(params);
+  const tankSize  = TANK_SIZE_M3;
+  const tankPrice = TANK_PRICE_USD;
   const distanceMap = buildDistanceMap(routes);
   const sdMap = spatialDistances instanceof Map ? spatialDistances : null;
   const swMap = spatialWaypointsMap instanceof Map ? spatialWaypointsMap : null;
-  const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD]));
+  const CAPEX_TERM_BASE = 3678949.0; // Baseline ORF/Terminal (Badak NGL Bontang)
+  const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD * inflationFactor]));
   // Python: NO inflation on rent/port. Only tank CAPEX uses inflationFactor.
   const vesselAdj = vessels.slice().sort((a, b) => a.capacityM3 - b.capacityM3);
 
@@ -491,11 +487,11 @@ async function runSupplyChainModel(input) {
         cap_locs += tank_capex + oru_capex;
       }
 
-      // Terminal ORU (Python: divided by num_v for non-feeder)
+      // Terminal ORU (Python: capex_term_base inflated, divided by num_v for non-feeder)
       let cap_term = 0;
       if (!isFeeder && kapasitas_kapal < 20000) {
-        const terminal_oru = oruMap.get(terminal) || 0;
-        cap_term = terminal_oru / numVessels;
+        const capex_term_inflated = CAPEX_TERM_BASE * inflationFactor;
+        cap_term = capex_term_inflated / numVessels;
       }
       const total_capex = cap_locs + cap_term;
 
@@ -508,8 +504,12 @@ async function runSupplyChainModel(input) {
       let fuel_ballast = 0;
       for (let i = 0; i < n_leg; i++) {
         const time_leg = legs[i].hours; // dynamic voyage hours per leg
-        fuel_voyage += (time_leg / 24) * vessel.voyageTonPerDay;
-        if (i === n_leg - 1) fuel_ballast = (time_leg / 24) * vessel.ballastTonPerDay;
+        // Python: last leg (return) = ballast fuel only; all other legs = voyage fuel
+        if (i === n_leg - 1) {
+          fuel_ballast = (time_leg / 24) * vessel.ballastTonPerDay;
+        } else {
+          fuel_voyage += (time_leg / 24) * vessel.voyageTonPerDay;
+        }
       }
 
       const fuel_berth = (totalLoadingTime / 24) * vessel.berthTonPerDay;
@@ -589,11 +589,13 @@ async function runSupplyChainModelRisk(input) {
     resultLimit = 20,
   } = input;
 
-  const { tankSize, tankPrice } = getTankConfig(params);
+  const tankSize  = TANK_SIZE_M3;
+  const tankPrice = TANK_PRICE_USD;
   const distanceMap = buildDistanceMap(routes);
   const sdMap = spatialDistances instanceof Map ? spatialDistances : null;
   const swMap = spatialWaypointsMap instanceof Map ? spatialWaypointsMap : null;
-  const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD]));
+  const CAPEX_TERM_BASE = 3678949.0; // Baseline ORF/Terminal (Badak NGL Bontang)
+  const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD * inflationFactor]));
   // Python: NO inflation on rent/port. Only tank CAPEX uses inflationFactor.
   const vesselAdj = vessels.slice().sort((a, b) => a.capacityM3 - b.capacityM3);
 
@@ -696,8 +698,8 @@ async function runSupplyChainModelRisk(input) {
 
       let capex_terminal_risked = 0.0;
       if (!isFeeder && kapasitas_kapal < 20000) {
-        const terminal_oru = oruMap.get(terminal) || 0;
-        capex_terminal_risked = (terminal_oru * (1 + impact_capex_end)) / numVessels;
+        const capex_term_inflated = CAPEX_TERM_BASE * inflationFactor;
+        capex_terminal_risked = (capex_term_inflated * (1 + impact_capex_end)) / numVessels;
         total_capex += capex_terminal_risked;
       }
 
@@ -715,17 +717,18 @@ async function runSupplyChainModelRisk(input) {
       opex_oru += capex_terminal_risked * 0.05 * (1 + impact_opex_end);
 
       // Fuel with risk
+      // Python: last leg (return to terminal) = ballast fuel only; all others = voyage fuel
       const n_leg = legs.length;
-      let sailing_time_voyage = 0;
-      let sailing_time_ballast = 0;
+      let fuel_voyage = 0;
+      let fuel_ballast = 0;
       for (let i = 0; i < n_leg; i++) {
         const time_leg = legs[i].hours * (1 + im_s); // apply risk multiplier
-        sailing_time_voyage += time_leg;
-        if (i === n_leg - 1) sailing_time_ballast = time_leg;
+        if (i === n_leg - 1) {
+          fuel_ballast = (time_leg / 24) * vessel.ballastTonPerDay;
+        } else {
+          fuel_voyage += (time_leg / 24) * vessel.voyageTonPerDay;
+        }
       }
-
-      const fuel_voyage = (sailing_time_voyage / 24) * vessel.voyageTonPerDay;
-      const fuel_ballast = (sailing_time_ballast / 24) * vessel.ballastTonPerDay;
       const fuel_berth = (totalLoadingTime / 24) * vessel.berthTonPerDay;
       const fuel_total = fuel_voyage + fuel_ballast + fuel_berth;
       const lng_fuel = fuel_total * (SCF_LNG / SCF_MGO);
@@ -743,8 +746,9 @@ async function runSupplyChainModelRisk(input) {
         port_ltp  = vessel.portCostLTP;
         port_delay = vessel.portCostDelay;
       }
-      const port_start_per_voyage = port_ltp * (1 + impact_port_start) + port_delay;
-      const port_next_per_voyage = route.length * (port_ltp * (1 + impact_port_next) + port_delay);
+      // Python: risk applies to full port cost (ltp + delay), not ltp alone
+      const port_start_per_voyage = (port_ltp + port_delay) * (1 + impact_port_start);
+      const port_next_per_voyage = route.length * (port_ltp + port_delay) * (1 + impact_port_next);
       const port_cost = voyages_year * (port_start_per_voyage + port_next_per_voyage);
 
       const rent_cost = vessel.rentPerDayUSD * 365;
@@ -1305,7 +1309,8 @@ async function runHubSpokeTwoVesselModelRisk(input) {
     return { mother: [], feeder1: [], feeder2: [], system: [] };
   }
 
-  const { tankSize, tankPrice } = getTankConfig(params); // FIX: get tankSize/tankPrice here
+  const tankSize  = TANK_SIZE_M3;
+  const tankPrice = TANK_PRICE_USD; // internal constants, not user input
   // Merge spatialWaypointsMap distances into sdMap so all distance lookups benefit from real routes
   const sdMap = (() => {
     const base = spatialDistances instanceof Map ? new Map(spatialDistances) : new Map();
@@ -1328,7 +1333,8 @@ async function runHubSpokeTwoVesselModelRisk(input) {
     distMap.set(`${r.destination} - ${r.origin}`, r.nauticalMiles);
   }
 
-  const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD]));
+  const CAPEX_TERM_BASE = 3678949.0; // Baseline ORF/Terminal (Badak NGL Bontang)
+  const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD * inflationFactor]));
   // Python: NO inflation on rent/port. Only tank CAPEX uses inflationFactor.
   const kSorted = vessels.slice().sort((a, b) => a.capacityM3 - b.capacityM3);
 
@@ -1399,13 +1405,14 @@ async function runHubSpokeTwoVesselModelRisk(input) {
       const oruHub = oruMap.get(hub) || 0;
       const cap_hub = tankCapexHub + oruHub * (1 + impact_capex_start);
 
-      const oruTerm = oruMap.get(terminal) || 0;
+      const capex_term_inflated_hs = CAPEX_TERM_BASE * inflationFactor;
       const cap_term =
-        k.capacityM3 < 20000 ? oruTerm * (1 + impact_capex_end) : 0;
+        k.capacityM3 < 20000 ? capex_term_inflated_hs * (1 + impact_capex_end) : 0;
 
       const t_cap = cap_hub + cap_term;
 
-      const fv = rawH * 2 * (1 + im_s) / 24.0 * k.voyageTonPerDay;
+      // Python: mother forward (terminal→hub) = voyage fuel; return (hub→terminal) = ballast fuel
+      const fv = rawH * (1 + im_s) / 24.0 * k.voyageTonPerDay;
       const fb = rawH * (1 + im_s) / 24.0 * k.ballastTonPerDay;
       const fbt = (lt / 24.0) * k.berthTonPerDay;
 
@@ -1415,13 +1422,18 @@ async function runHubSpokeTwoVesselModelRisk(input) {
         (params.scf_lng / params.scf_mgo) *
         params.harga_lng;
 
-      const port_ltp = k.portCostLTP;
-      const port_delay = k.portCostDelay;
-      const pc =
-        vy *
-          port_ltp *
-          (2 + gr('P1_Biaya_Operasi', 'II.2') + gr('P1_Biaya_Operasi', 'II.5')) +
-        vy * port_delay * 2;
+      // Dynamic port cost; Python: pc = vy*(ltp+delay)*(2+risk2+risk5)
+      let portLTP_m, portDelay_m;
+      if (k.gt) {
+        const pcDyn = hitungBiayaPelabuhan(k.gt, params.loading_hour, params.analysis_year, params.inflation_rate);
+        portLTP_m = pcDyn.ltp;
+        portDelay_m = pcDyn.delay;
+      } else {
+        portLTP_m = k.portCostLTP;
+        portDelay_m = k.portCostDelay;
+      }
+      const pc = vy * (portLTP_m + portDelay_m) *
+        (2 + gr('P1_Biaya_Operasi', 'II.2') + gr('P1_Biaya_Operasi', 'II.5'));
 
       const rc = k.rentPerDayUSD * 365.0;
 
@@ -1562,9 +1574,11 @@ async function runHubSpokeTwoVesselModelRisk(input) {
         let fb = 0.0;
         for (let i = 0; i < legs.length; i++) {
           const t_leg = legHours2v[i] * (1 + im_s);
-          fv += (t_leg / 24.0) * k.voyageTonPerDay;
+          // Python: last leg (return to hub) = ballast only
           if (i === legs.length - 1) {
-            fb += (t_leg / 24.0) * k.ballastTonPerDay;
+            fb = (t_leg / 24.0) * k.ballastTonPerDay;
+          } else {
+            fv += (t_leg / 24.0) * k.voyageTonPerDay;
           }
         }
         const fbt = (lt / 24.0) * k.berthTonPerDay;
@@ -1575,12 +1589,20 @@ async function runHubSpokeTwoVesselModelRisk(input) {
           (params.scf_lng / params.scf_mgo) *
           params.harga_lng;
 
-        const port_ltp = k.portCostLTP;
-        const port_delay = k.portCostDelay;
+        // Dynamic port cost; Python: risk applied to full (ltp+delay)
+        let portLTP_f2, portDelay_f2;
+        if (k.gt) {
+          const pcDyn = hitungBiayaPelabuhan(k.gt, params.loading_hour, params.analysis_year, params.inflation_rate);
+          portLTP_f2 = pcDyn.ltp;
+          portDelay_f2 = pcDyn.delay;
+        } else {
+          portLTP_f2 = k.portCostLTP;
+          portDelay_f2 = k.portCostDelay;
+        }
         const port_start_per_voyage =
-          port_ltp * (1 + impact_port_start) + port_delay;
+          (portLTP_f2 + portDelay_f2) * (1 + impact_port_start);
         const port_next_per_voyage =
-          ruteLocs.length * (port_ltp * (1 + impact_port_next) + port_delay);
+          ruteLocs.length * (portLTP_f2 + portDelay_f2) * (1 + impact_port_next);
         const pc = vy * (port_start_per_voyage + port_next_per_voyage);
 
         const rc = k.rentPerDayUSD * 365.0;
@@ -1819,7 +1841,8 @@ async function runHubSpokeSingleModelRisk(input) {
     return { mother: [], feeder1: [], system: [] };
   }
 
-  const { tankSize, tankPrice } = getTankConfig(params);
+  const tankSize  = TANK_SIZE_M3;
+  const tankPrice = TANK_PRICE_USD; // internal constants, not user input
   // Merge spatialWaypointsMap distances into sdMap so all distance lookups benefit from real routes
   const sdMap = (() => {
     const base = spatialDistances instanceof Map ? new Map(spatialDistances) : new Map();
@@ -1841,7 +1864,8 @@ async function runHubSpokeSingleModelRisk(input) {
     distMap.set(`${r.destination} - ${r.origin}`, r.nauticalMiles);
   }
 
-  const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD]));
+  const CAPEX_TERM_BASE = 3678949.0; // Baseline ORF/Terminal (Badak NGL Bontang)
+  const oruMap = new Map(oru.map(o => [o.plantName.trim(), o.fixCapexUSD * inflationFactor]));
   const kSorted = vessels.slice().sort((a, b) => a.capacityM3 - b.capacityM3);
 
   // Pre-compute per-leg voyage hours for all vessel × location pairs
@@ -1910,18 +1934,28 @@ async function runHubSpokeSingleModelRisk(input) {
       const oruHub = oruMap.get(hub) || 0;
       const cap_hub = tankCapexHub + oruHub * (1 + impact_capex_start);
 
-      const oruTerm = oruMap.get(terminal) || 0;
-      const cap_term = k.capacityM3 < 20000 ? oruTerm * (1 + impact_capex_end) : 0;
+      const capex_term_inflated_rhs = CAPEX_TERM_BASE * inflationFactor;
+      const cap_term = k.capacityM3 < 20000 ? capex_term_inflated_rhs * (1 + impact_capex_end) : 0;
       const t_cap = cap_hub + cap_term;
 
-      const fv = rawH * 2 * (1 + im_s) / 24.0 * k.voyageTonPerDay;
+      // Python: mother forward (terminal→hub) = voyage fuel; return (hub→terminal) = ballast fuel
+      const fv = rawH * (1 + im_s) / 24.0 * k.voyageTonPerDay;
       const fb = rawH * (1 + im_s) / 24.0 * k.ballastTonPerDay;
       const fbt = (lt / 24.0) * k.berthTonPerDay;
       const lng_c = vy * (fv + fb + fbt) * (params.scf_lng / params.scf_mgo) * params.harga_lng;
 
-      const pc =
-        vy * k.portCostLTP * (2 + gr('P1_Biaya_Operasi', 'II.2') + gr('P1_Biaya_Operasi', 'II.5')) +
-        vy * k.portCostDelay * 2;
+      // Dynamic port cost (same as milk-run); Python: pc = vy*(ltp+delay)*(2+risk2+risk5)
+      let portLTP_m, portDelay_m;
+      if (k.gt) {
+        const pcDyn = hitungBiayaPelabuhan(k.gt, params.loading_hour, params.analysis_year, params.inflation_rate);
+        portLTP_m = pcDyn.ltp;
+        portDelay_m = pcDyn.delay;
+      } else {
+        portLTP_m = k.portCostLTP;
+        portDelay_m = k.portCostDelay;
+      }
+      const pc = vy * (portLTP_m + portDelay_m) *
+        (2 + gr('P1_Biaya_Operasi', 'II.2') + gr('P1_Biaya_Operasi', 'II.5'));
       const rc = k.rentPerDayUSD * 365.0;
 
       const op_hub = cap_hub * 0.05 * (1 + impact_opex_start);
@@ -2035,15 +2069,29 @@ async function runHubSpokeSingleModelRisk(input) {
         let fb = 0.0;
         for (let i = 0; i < legs.length; i++) {
           const t_leg = legHours[i] * (1 + im_s);
-          fv += (t_leg / 24.0) * k.voyageTonPerDay;
-          if (i === legs.length - 1) fb += (t_leg / 24.0) * k.ballastTonPerDay;
+          // Python: last leg (return to hub) = ballast only
+          if (i === legs.length - 1) {
+            fb = (t_leg / 24.0) * k.ballastTonPerDay;
+          } else {
+            fv += (t_leg / 24.0) * k.voyageTonPerDay;
+          }
         }
         const fbt = (lt / 24.0) * k.berthTonPerDay;
 
         const lng_c = vy * (fv + fb + fbt) * (params.scf_lng / params.scf_mgo) * params.harga_lng;
 
-        const port_start_per_voyage = k.portCostLTP * (1 + impact_port_start) + k.portCostDelay;
-        const port_next_per_voyage = ruteLocs.length * (k.portCostLTP * (1 + impact_port_next) + k.portCostDelay);
+        // Dynamic port cost; Python: risk applied to full (ltp+delay)
+        let portLTP_f, portDelay_f;
+        if (k.gt) {
+          const pcDyn = hitungBiayaPelabuhan(k.gt, params.loading_hour, params.analysis_year, params.inflation_rate);
+          portLTP_f = pcDyn.ltp;
+          portDelay_f = pcDyn.delay;
+        } else {
+          portLTP_f = k.portCostLTP;
+          portDelay_f = k.portCostDelay;
+        }
+        const port_start_per_voyage = (portLTP_f + portDelay_f) * (1 + impact_port_start);
+        const port_next_per_voyage = ruteLocs.length * (portLTP_f + portDelay_f) * (1 + impact_port_next);
         const pc = vy * (port_start_per_voyage + port_next_per_voyage);
         const rc = k.rentPerDayUSD * 365.0;
 

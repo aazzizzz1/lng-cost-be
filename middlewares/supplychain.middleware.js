@@ -9,8 +9,12 @@ function stableStringify(obj) {
 
 function validateSupplyChainInput(req, res, next) {
   const b = req.body || {};
-  // minimal required structure
-  const requiredParams = ['harga_bbm','harga_lng','scf_lng','scf_mgo','loading_hour','maintenance_days','unpumpable_pct','bog_pct','filling_pct','gross_storage_pct','analysis_year','inflation_rate'];
+  // minimal required structure (Penyaluran & heating_value wajib diisi)
+  const requiredParams = [
+    'harga_bbm','harga_lng','scf_lng','scf_mgo','loading_hour','maintenance_days',
+    'unpumpable_pct','bog_pct','filling_pct','gross_storage_pct',
+    'analysis_year','inflation_rate','Penyaluran','heating_value',
+  ];
 
   // NEW: dukung terminal string atau array
   let terminals = [];
@@ -122,6 +126,8 @@ function validateSupplyChainInput(req, res, next) {
     bulan: (typeof b.bulan === 'number' && b.bulan >= 1 && b.bulan <= 12) ? b.bulan : null,
     weatherMode: (b.weatherMode === 'mean' ? 'mean' : 'max'),
     maxJettyM: (typeof b.maxJettyM === 'number' ? b.maxJettyM : 0),
+    // bathyEngine: pilih sumber data batimetri (hanya salah satu, bukan kombinasi)
+    bathyEngine: (b.bathyEngine === 'batnas' ? 'batnas' : 'gebco'),
   });
   req.runKey = crypto.createHash('sha256').update(canonical).digest('hex');
 
@@ -132,6 +138,7 @@ function validateSupplyChainInput(req, res, next) {
   req.body.locations = normLocations;
   req.body.numVessels = numVessels;
   req.body.vessels = normVessels; // attach normalized vessels
+  req.body.bathyEngine = (b.bathyEngine === 'batnas' ? 'batnas' : 'gebco');
 
   // vesselConfig (pengganti twin)
   if (b.vesselConfig) {

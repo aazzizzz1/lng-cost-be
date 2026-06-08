@@ -20,7 +20,12 @@ const {
   hitungBiayaPelabuhan,
 } = require('../services/supplychainEngine');
 const { getAllZones } = require('../services/weatherService');
-const { getDynamicOruCapex } = require('../services/spatialRouteService');
+const {
+  getDynamicOruCapex,
+  computeWeatherLegReport,
+  makeRouteKey,
+  UKC_CLEARANCE,
+} = require('../services/spatialRouteService');
 
 async function run(req, res) {
   try {
@@ -73,16 +78,10 @@ async function run(req, res) {
     const sorted = [...results].sort((a, b) => a['Total Cost USD/MMBTU'] - b['Total Cost USD/MMBTU']);
     const topResult = sorted[0] || null;
 
-    await prisma.supplyChainRun.create({
-      data: {
-        runKey,
-        terminal,
-        locations,
-        params,
-        demand,
-        results,
-        topResult,
-      },
+    await prisma.supplyChainRun.upsert({
+      where: { runKey },
+      update: { terminal, locations, params, demand, results, topResult },
+      create: { runKey, terminal, locations, params, demand, results, topResult },
     });
 
     return res.json({ runKey, cached: false, results, topResult });
@@ -145,16 +144,10 @@ async function runTwin(req, res) {
 
     const topResult = total[0] || null;
 
-    await prisma.supplyChainRun.create({
-      data: {
-        runKey,
-        terminal,
-        locations,
-        params,
-        demand,
-        results: { kapal_1, kapal_2, total },
-        topResult,
-      },
+    await prisma.supplyChainRun.upsert({
+      where: { runKey },
+      update: { terminal, locations, params, demand, results: { kapal_1, kapal_2, total }, topResult },
+      create: { runKey, terminal, locations, params, demand, results: { kapal_1, kapal_2, total }, topResult },
     });
 
     return res.json({ runKey, cached: false, twin: true, results: { kapal_1, kapal_2, total }, topResult });
@@ -271,9 +264,9 @@ function normalizeResultsForResponse({ method, numVessels, results }) {
  *     "analysis_year": 2024,
  *     "inflation_rate": 0.05,
  *     "Penyaluran": 20,
- *     // OPTIONAL: setting tambahan untuk CAPEX storage
- *     "harga_tangki_500m3": 1030000,
- *     "ukuran_tangki_500m3": 500
+ *     "heating_value": 1050
+ *     // NOTE: ukuran_tangki_500m3 dan harga_tangki_500m3 sudah dihapus dari input —
+ *     //       nilai ini sekarang hardcoded (500 m3, USD 1,030,000) sesuai referensi Python
  *   },
  *
  *   // Demand gas (BBTUD) per lokasi
@@ -402,7 +395,7 @@ async function runUnified(req, res) {
     // ======================
     // 2. Load master data
     // ======================
-    const [rawVessels, routes, oru, locRows, riskRows] = await Promise.all([
+    const [rawVessels, routes, oruRaw, locRows, riskRows] = await Promise.all([
       prisma.vessel.findMany(),
       prisma.distanceRoute.findMany(),
       prisma.oruCapex.findMany(),
@@ -439,13 +432,60 @@ async function runUnified(req, res) {
     }
     const geoMap = rawGeo ? { ...dbGeo, ...rawGeo } : dbGeo;
 
+    // Auto-detect province for demand locations from Location table.
+    // Merges explicitly-provided oruProvince (frontend) with province field
+    // stored in the Location table, so frontend does not need to send it.
+    const resolvedOruProvince = { ...(req.body.oruProvince || {}) };
+    for (const loc of locRows) {
+      if (loc.province && !resolvedOruProvince[loc.name]) {
+        resolvedOruProvince[loc.name] = loc.province;
+      }
+    }
+
     const inflationFactor = Math.pow(1 + params.inflation_rate, params.analysis_year - baseYear);
     const terminal = terminals[0];
     const hasRisk = risk && risk.selections;
     const riskDB = hasRisk ? buildRiskDB(risk, riskRows) : null;
 
     // ======================
-    // 2b. Weather cache
+    // 2d. Dynamic ORU CAPEX override
+    // For each demand location, province is auto-resolved from Location table
+    // (or from req.body.oruProvince if explicitly provided). Calls getDynamicOruCapex
+    // (capacity scaling + IKK adjustment) and injects into oru.
+    // ======================
+    let oru = oruRaw;
+    const oruProvince = resolvedOruProvince;
+    const heatingValue = params.heating_value || 1050;
+    if (Object.keys(oruProvince).length > 0 && inflationFactor > 0) {
+      const overrideResults = await Promise.allSettled(
+        Object.entries(demand || {}).map(async ([locName, bbtud]) => {
+          const province = oruProvince[locName];
+          if (!province) return null;
+          const detail = await getDynamicOruCapex(
+            bbtud, province, params.analysis_year, params.inflation_rate, heatingValue
+          );
+          // Engine multiplies fixCapexUSD * inflationFactor; divide here so result = finalCapexUsd
+          return { plantName: locName, fixCapexUSD: detail.finalCapexUsd / inflationFactor };
+        })
+      );
+      const overrideMap = new Map(
+        overrideResults
+          .filter(r => r.status === 'fulfilled' && r.value)
+          .map(r => [r.value.plantName, r.value])
+      );
+      if (overrideMap.size > 0) {
+        const newOru = oru.map(o =>
+          overrideMap.has(o.plantName) ? { ...o, fixCapexUSD: overrideMap.get(o.plantName).fixCapexUSD } : o
+        );
+        for (const [name, entry] of overrideMap) {
+          if (!newOru.some(o => o.plantName === name)) newOru.push(entry);
+        }
+        oru = newOru;
+      }
+    }
+
+    // ======================
+    // 2c. Weather cache
     // ======================
     let weatherCacheByZone = req.body.weatherCacheByZone || null;
     if (!weatherCacheByZone && req.body.bulan) {
@@ -483,8 +523,114 @@ async function runUnified(req, res) {
     async function saveAndRespond({ resultsObj, topResult, mode }) {
       const terminalLabel = terminals.length > 1 ? terminals.join(', ') : terminals[0];
       const spatialRoutes = Array.isArray(req.body.spatialWaypoints) ? req.body.spatialWaypoints : [];
-      await prisma.supplyChainRun.create({
-        data: {
+
+      // ── Build Report ────────────────────────────────────────────────────────
+      const report = {};
+
+      // 1. ORU CAPEX breakdown per demand location
+      // Use resolvedOruProvince (already merged with Location table provinces)
+      const heatingValue  = params.heating_value || 1050;
+      const oruCapexItems = [];
+      for (const [locName, bbtud] of Object.entries(demand || {})) {
+        const mmscfd   = parseFloat((bbtud * 1000 / heatingValue).toFixed(4));
+        const province = resolvedOruProvince[locName] || null;
+        if (province) {
+          try {
+            const detail = await getDynamicOruCapex(bbtud, province, params.analysis_year, params.inflation_rate, heatingValue);
+            oruCapexItems.push({ locationName: locName, province, demandBbtud: bbtud, demandMmscfd: mmscfd, ...detail });
+          } catch (_) {
+            oruCapexItems.push({ locationName: locName, province, demandBbtud: bbtud, demandMmscfd: mmscfd });
+          }
+        } else {
+          oruCapexItems.push({ locationName: locName, province: null, demandBbtud: bbtud, demandMmscfd: mmscfd });
+        }
+      }
+      if (oruCapexItems.length) report.oruCapex = oruCapexItems;
+
+      // 2. Jetty / coastal infrastructure for all locations
+      const allLocationNames = [...new Set([...terminals, ...(Array.isArray(locations) ? locations : [])])];
+      try {
+        const jettyRows = await prisma.jettyBerthReport.findMany({
+          where: { locationName: { in: allLocationNames } },
+        });
+        if (jettyRows.length) {
+          const topDraft = topResult?.['Draft (m)'] ?? null;
+          const UKC = UKC_CLEARANCE;
+          report.jetty = jettyRows.map(row => ({
+            locationName:  row.locationName,
+            landKm:        row.landKm,
+            jettyM:        row.jettyM,
+            berthDepth:    row.berthDepth,
+            requiredDepth: topDraft != null ? parseFloat((-(topDraft + UKC)).toFixed(2)) : null,
+            engineUsed:    row.engineUsed,
+          }));
+        }
+      } catch (_) { /* non-fatal */ }
+
+      // 3. Sea passage profiles from SpatialRouteCache
+      if (spatialRoutes.length) {
+        const topDraft = topResult?.['Draft (m)'] ?? null;
+        const UKC = UKC_CLEARANCE;
+        const seaPassage = [];
+        for (const leg of spatialRoutes) {
+          const { origin, destination, distanceNm } = leg;
+          let minDepth = null, maxDepth = null, ihoZones = null;
+          try {
+            const cacheKey = makeRouteKey(origin, destination);
+            const cached = await prisma.spatialRouteCache.findUnique({ where: { routeKey: cacheKey } });
+            if (cached) {
+              minDepth = cached.minDepth;
+              maxDepth = cached.maxDepth;
+              ihoZones = Array.isArray(cached.weatherZones) ? cached.weatherZones : null;
+            }
+          } catch (_) { }
+          const requiredDepth = topDraft != null ? parseFloat((-(topDraft + UKC)).toFixed(2)) : null;
+          const safe = (minDepth != null && requiredDepth != null) ? (minDepth <= requiredDepth) : null;
+          seaPassage.push({ origin, destination, distanceNm, requiredDepth, minDepth, maxDepth, safe, ihoZones });
+        }
+        report.seaPassage = seaPassage;
+      }
+
+      // 4. Weather zones and per-segment speed effects
+      if (weatherCacheByZone && req.body.bulan) {
+        const zoneData = {};
+        for (const [zone, wx] of Object.entries(weatherCacheByZone)) {
+          zoneData[zone] = { waveMax: wx.wave, windMax: wx.wind };
+        }
+        const legsWithWaypoints = spatialRoutes.filter(
+          leg => Array.isArray(leg.waypoints) && leg.waypoints.length >= 2,
+        );
+        let segmentEffects = [];
+        if (legsWithWaypoints.length && topResult) {
+          const topVesselName = topResult['Nama Kapal'];
+          const topVessel = vessels.find(v => v.name === topVesselName);
+          if (topVessel) {
+            try {
+              const effects = await computeWeatherLegReport(legsWithWaypoints, topVessel, weatherCacheByZone);
+              segmentEffects = effects.filter(s => s.zonesAffected && s.zonesAffected.length > 0);
+            } catch (_) { }
+          }
+        }
+        report.weather = {
+          bulan:          req.body.bulan,
+          year:           params.analysis_year,
+          zones:          zoneData,
+          segmentEffects,
+        };
+      }
+      // ── End Report ──────────────────────────────────────────────────────────
+
+      await prisma.supplyChainRun.upsert({
+        where: { runKey },
+        update: {
+          terminal: terminalLabel,
+          locations,
+          params: paramsWithMethod,
+          demand,
+          results: resultsObj,
+          topResult,
+        },
+        create: {
           runKey,
           terminal: terminalLabel,
           locations,
@@ -519,6 +665,7 @@ async function runUnified(req, res) {
           routeCount: spatialRoutes.length,
           routes: spatialRoutes,
         } : null,
+        report: Object.keys(report).length ? report : undefined,
         tables,
         riskSummary,
         topResult,

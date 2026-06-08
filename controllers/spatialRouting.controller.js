@@ -28,7 +28,7 @@ const ihoSvc        = require('../services/ihoService');
 //         draft?, waveHeight?, forceRecompute? }
 // ─────────────────────────────────────────────────────────────────────────────
 exports.computeRoute = async (req, res) => {
-  const { origin, destination, draft, waveHeight, forceRecompute } = req.body;
+  const { origin, destination, draft, waveHeight, forceRecompute, bathyEngine } = req.body;
   if (!origin?.lat || !origin?.lon || !destination?.lat || !destination?.lon) {
     return res.status(400).json({ error: 'origin and destination with lat/lon required' });
   }
@@ -37,6 +37,7 @@ exports.computeRoute = async (req, res) => {
       draft:         draft        || undefined,
       waveHeight:    waveHeight   || 0,
       forceRecompute: !!forceRecompute,
+      bathyEngine:   bathyEngine === 'batnas' ? 'batnas' : 'gebco',
     });
     res.json(result);
   } catch (e) {
@@ -46,39 +47,78 @@ exports.computeRoute = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /multi-route
-// Body: { places: [{name, lat, lon}], draft?, waveHeight? }
-// Computes all pairwise routes (for route graph pre-warming).
+// Body: { places: [{name, lat, lon}], draft?, waveHeight?, bathyEngine?,
+//         includeJetty? (default true), includeDepthProfile? (default true) }
+// Returns:
+//   results[]  – per-pair: distanceNm, routeKey, engineUsed, fromCache,
+//                          depthProfile: {minDepth, maxDepth}
+//   jettyReports{} – keyed by location name:
+//                    { landKm, jettyM, berthDepth, berthLat, berthLon, engineUsed }
+//   errors[]   – any failures
 // ─────────────────────────────────────────────────────────────────────────────
 exports.computeMultiRoute = async (req, res) => {
-  const { places, draft, waveHeight } = req.body;
+  const {
+    places, draft, waveHeight, bathyEngine,
+    includeJetty = true,
+    includeDepthProfile = true,
+  } = req.body;
   if (!Array.isArray(places) || places.length < 2) {
     return res.status(400).json({ error: 'places[] with at least 2 entries required' });
   }
+  const routeOpts = {
+    draft: draft || undefined,
+    waveHeight: waveHeight || 0,
+    bathyEngine: bathyEngine === 'batnas' ? 'batnas' : 'gebco',
+  };
   const results = [];
   const errors  = [];
 
+  // ── Pairwise route computation ──
   for (let i = 0; i < places.length; i++) {
     for (let j = i + 1; j < places.length; j++) {
       try {
-        const r = await spatialSvc.computeRoute(places[i], places[j], {
-          draft: draft || undefined,
-          waveHeight: waveHeight || 0,
-        });
-        results.push({
+        const r = await spatialSvc.computeRoute(places[i], places[j], routeOpts);
+        const entry = {
           origin:      places[i].name,
           destination: places[j].name,
           distanceNm:  r.distanceNm,
           routeKey:    r.routeKey,
           engineUsed:  r.engineUsed,
           fromCache:   r.fromCache,
-        });
+        };
+        if (includeDepthProfile && r.depthProfile) {
+          entry.depthProfile = r.depthProfile;
+        }
+        results.push(entry);
       } catch (e) {
         errors.push({ pair: `${places[i].name} – ${places[j].name}`, error: e.message });
       }
     }
   }
 
-  res.json({ results, errors });
+  // ── Jetty / berth reports (one per unique place) ──
+  const jettyReports = {};
+  if (includeJetty) {
+    await Promise.allSettled(
+      places.map(async (pl) => {
+        try {
+          const rpt = await spatialSvc.computeJettyReport(pl.name, pl.lat, pl.lon, routeOpts);
+          jettyReports[pl.name] = {
+            landKm:     rpt.landKm,
+            jettyM:     rpt.jettyM,
+            berthDepth: rpt.berthDepth,
+            berthLat:   rpt.berthLat,
+            berthLon:   rpt.berthLon,
+            engineUsed: rpt.engineUsed,
+          };
+        } catch (e) {
+          jettyReports[pl.name] = { error: e.message };
+        }
+      }),
+    );
+  }
+
+  res.json({ results, jettyReports: includeJetty ? jettyReports : undefined, errors });
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -86,7 +126,7 @@ exports.computeMultiRoute = async (req, res) => {
 // Body: { locationName, lat, lon, draft?, waveHeight?, maxJettyM? }
 // ─────────────────────────────────────────────────────────────────────────────
 exports.computeJetty = async (req, res) => {
-  const { locationName, lat, lon, draft, waveHeight, maxJettyM } = req.body;
+  const { locationName, lat, lon, draft, waveHeight, maxJettyM, bathyEngine } = req.body;
   if (!locationName || lat == null || lon == null) {
     return res.status(400).json({ error: 'locationName, lat, lon required' });
   }
@@ -95,6 +135,7 @@ exports.computeJetty = async (req, res) => {
       draft:      draft     || undefined,
       waveHeight: waveHeight || 0,
       maxJettyM:  maxJettyM  || 0,
+      bathyEngine: bathyEngine === 'batnas' ? 'batnas' : 'gebco',
     });
     res.json(report);
   } catch (e) {
@@ -179,21 +220,28 @@ exports.clearCache = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /oru-capex
-// Body: { demandMmscfd, province, analysisYear, inflationRate }
+// Body: { demandBbtud, province, analysisYear, inflationRate, heatingValue? }
+//       (demandMmscfd also accepted for backward compat – converted to BBTUD)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.getOruCapex = async (req, res) => {
-  const { demandMmscfd, province, analysisYear, inflationRate } = req.body;
-  if (demandMmscfd == null || !province) {
-    return res.status(400).json({ error: 'demandMmscfd and province required' });
+  const { demandBbtud, demandMmscfd, province, analysisYear, inflationRate, heatingValue } = req.body;
+  const hv = parseFloat(heatingValue) || 1050;
+  // Accept demandBbtud directly, or convert from demandMmscfd
+  const bbtud = demandBbtud != null
+    ? parseFloat(demandBbtud)
+    : (demandMmscfd != null ? (parseFloat(demandMmscfd) * hv) / 1000.0 : null);
+  if (bbtud == null || !province) {
+    return res.status(400).json({ error: 'demandBbtud (or demandMmscfd) and province required' });
   }
   try {
-    const capex = await spatialSvc.getDynamicOruCapex(
-      parseFloat(demandMmscfd),
+    const detail = await spatialSvc.getDynamicOruCapex(
+      bbtud,
       province,
       parseInt(analysisYear) || new Date().getFullYear(),
       parseFloat(inflationRate) || 0.03,
+      hv,
     );
-    res.json({ capex, demandMmscfd, province });
+    res.json({ capex: detail.finalCapexUsd, demandBbtud: bbtud, province, ...detail });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
