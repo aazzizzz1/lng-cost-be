@@ -1398,7 +1398,7 @@ async function runHubSpokeTwoVesselModelRisk(input) {
 
       const sel_st = roundUp(
         (dem_m3 * rtd + buf * dem_m3) * params.gross_storage_pct,
-        100
+        500
       );
 
       const tankCapexHub = (sel_st / tankSize) * tankPrice * inflationFactor; // FIXED
@@ -1927,7 +1927,7 @@ async function runHubSpokeSingleModelRisk(input) {
 
       const sel_st = roundUp(
         (dem_m3 * rtd + buf * dem_m3) * params.gross_storage_pct,
-        100
+        500
       );
 
       const tankCapexHub = (sel_st / tankSize) * tankPrice * inflationFactor;
