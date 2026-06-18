@@ -22,66 +22,66 @@ const { computeDynamicVoyageHours } = require('./spatialRouteService');
  * dipetakan ke fungsi-fungsi JS berikut:
  *
  * 1) Konversi Demand (Formula 1: Dem_m3)
- *    - Python:  Demm3 = DemBBTUD * 1000 / LNGec
- *    - JS:      di runSupplyChainModel / runSupplyChainModelRisk
- *               demand_m3_day = sum( (demandBBTUD[l] / 24.04) * 1000 )
+ * - Python:  Demm3 = DemBBTUD * 1000 / LNGec
+ * - JS:      di runSupplyChainModel / runSupplyChainModelRisk
+ * demand_m3_day = sum( (demandBBTUD[l] / 24.04) * 1000 )
  *
  * 2) RTD & Penjadwalan (Formula 2: Tsailing, Tport, RTD)
- *    - Python:  Tsailing = Σ(D_i / Vkapal) * (1 + Risk P2_II.3)
- *               Tport   = Loading + Unloading * (Risiko II.2, II.5)
- *               RTD     = (Tsailing + Tport) / 24
- *    - JS:
- *      • runSupplyChainModel: sailingTime, totalLoadingTime → RTD (no-risk)
- *      • runSupplyChainModelRisk: sailing_time_voyage, fuel_berth_start/next
- *        memakai getRiskImpact(P2_Durasi, II.2 / II.3 / II.5)
+ * - Python:  Tsailing = Σ(D_i / Vkapal) * (1 + Risk P2_II.3)
+ * Tport   = Loading + Unloading * (Risiko II.2, II.5)
+ * RTD     = (Tsailing + Tport) / 24
+ * - JS:
+ * • runSupplyChainModel: sailingTime, totalLoadingTime → RTD (no-risk)
+ * • runSupplyChainModelRisk: sailing_time_voyage, fuel_berth_start/next
+ * memakai getRiskImpact(P2_Durasi, II.2 / II.3 / II.5)
  *
  * 3) Kapasitas & Utilitas Kapal (Formula 3: Buffer, Wvol, Nomcap, Util)
- *    - Python:  Buffer, Wvol, Nomcap, Voyages/year, Util
- *    - JS:      di kedua engine single:
- *               buffer_day, working_volume_lngc, nominal_capacity,
- *               days_stock, voyages_year, Utilitasi_Factor_LNGC,
- *               Batas_Maksimum_Utilisasi_LNGC
+ * - Python:  Buffer, Wvol, Nomcap, Voyages/year, Util
+ * - JS:      di kedua engine single:
+ * buffer_day, working_volume_lngc, nominal_capacity,
+ * days_stock, voyages_year, Utilitasi_Factor_LNGC,
+ * Batas_Maksimum_Utilisasi_LNGC
  *
  * 4) CAPEX (Formula 4: Storage, CAPEXloc, CAPEXterm)
- *    - Python:  Storage dibulatkan ke 100/500 m3, GF, inflasi, Risk P3
- *    - JS:
- *      • runSupplyChainModel: CAPEX tanpa risiko (tank + ORU)
- *      • runSupplyChainModelRisk:
- *          - impact_capex_start (II.6, II.7, II.8, P3_Biaya_Investasi)
- *          - impact_capex_end   (II.1, P3_Biaya_Investasi)
- *        → capex_loc_map, capex_terminal_risked, total_capex
+ * - Python:  Storage dibulatkan ke 100/500 m3, GF, inflasi, Risk P3
+ * - JS:
+ * • runSupplyChainModel: CAPEX tanpa risiko (tank + ORU)
+ * • runSupplyChainModelRisk:
+ * - impact_capex_start (II.6, II.7, II.8, P3_Biaya_Investasi)
+ * - impact_capex_end   (II.1, P3_Biaya_Investasi)
+ * → capex_loc_map, capex_terminal_risked, total_capex
  *
  * 5) OPEX (Formula 5: Cfuel, Cport, Crent, OPEXfac)
- *    - Python:  fuel voyage/ballast/berth, port LTP+Delay, 5% CAPEX * Risk P1
- *    - JS:
- *      • No-risk: fuel_voyage, fuel_ballast, fuel_berth, lng_fuel_cost,
- *                 port_cost (portCostPerLocation), rent_cost, opex_oru = 5% CAPEX
- *      • Risk:    risk-based time & cost:
- *          - P2_Durasi → impact_sailing, impact_berth_start/next
- *          - P1_BOP    → impact_port_start/next, impact_opex_start/end
+ * - Python:  fuel voyage/ballast/berth, port LTP+Delay, 5% CAPEX * Risk P1
+ * - JS:
+ * • No-risk: fuel_voyage, fuel_ballast, fuel_berth, lng_fuel_cost,
+ * port_cost (portCostPerLocation), rent_cost, opex_oru = 5% CAPEX
+ * • Risk:    risk-based time & cost:
+ * - P2_Durasi → impact_sailing, impact_berth_start/next
+ * - P1_BOP    → impact_port_start/next, impact_opex_start/end
  *
  * 6) System Cost (Formula 6: SystemCost USD/MMBTU)
- *    - Python:  kombinasi N-kapal (partition + cross-join) → System CAPEX/OPEX/System Cost
- *    - JS:
- *      • Untuk 1 kapal: runSupplyChainModel / runSupplyChainModelRisk
- *        langsung menghasilkan 'Total CAPEX (USD)', 'Total OPEX (USD/year)',
- *        dan 'Total Cost USD/MMBTU' per skenario.
- *      • Untuk 2 kapal (N=2): runTwoVesselProbabilityModel / Risk:
- *        - membagi lokasi → 2 cluster (ratios 50:50, 60:40, ...)
- *        - memanggil engine single-kapal untuk setiap cluster
- *        - menjumlahkan CAPEX/OPEX/Cost per pairing → 'total' (system table)
- *      • Untuk Hub & Spoke: runHubSpoke*Model* akan menjadi tempat porting
- *        langsung dari blok "CABANG 2: HUB & SPOKE" di Python.
+ * - Python:  kombinasi N-kapal (partition + cross-join) → System CAPEX/OPEX/System Cost
+ * - JS:
+ * • Untuk 1 kapal: runSupplyChainModel / runSupplyChainModelRisk
+ * langsung menghasilkan 'Total CAPEX (USD)', 'Total OPEX (USD/year)',
+ * dan 'Total Cost USD/MMBTU' per skenario.
+ * • Untuk 2 kapal (N=2): runTwoVesselProbabilityModel / Risk:
+ * - membagi lokasi → 2 cluster (ratios 50:50, 60:40, ...)
+ * - memanggil engine single-kapal untuk setiap cluster
+ * - menjumlahkan CAPEX/OPEX/Cost per pairing → 'total' (system table)
+ * • Untuk Hub & Spoke: runHubSpoke*Model* akan menjadi tempat porting
+ * langsung dari blok "CABANG 2: HUB & SPOKE" di Python.
  *
  * 7) Risk DB (risk_df / mapping_ii_to_p)
- *    - Python: risk_df + get_risk_value_from_db + build_risk_dictionary
- *    - JS:     Prisma model RiskMatrix + buildRiskDB + getRiskImpact
- *              (COL_MAP dan II_MAP adalah padanan kolom Python “II.x P*_...”)
+ * - Python: risk_df + get_risk_value_from_db + build_risk_dictionary
+ * - JS:     Prisma model RiskMatrix + buildRiskDB + getRiskImpact
+ * (COL_MAP dan II_MAP adalah padanan kolom Python “II.x P*_...”)
  *
  * Catatan:
  * - Struktur tabel output di Postman sudah mengikuti header di notebook:
- *   Milk & Run 1 kapal → 1 tabel, lengkap (Top 20).
- *   Twin → 3 tabel (kapal_1, kapal_2, system) / mother+feeder+system untuk Hub & Spoke.
+ * Milk & Run 1 kapal → 1 tabel, lengkap (Top 20).
+ * Twin → 3 tabel (kapal_1, kapal_2, system) / mother+feeder+system untuk Hub & Spoke.
  */
 
 function roundUp(x, base) {
@@ -1201,7 +1201,7 @@ async function runTwoVesselProbabilityModelRisk(input) {
     'Total CAPEX (USD)': t['CAPEX Kapal 1'],
     'Total CAPEX USD/MMBTU': t['CAPEX USD/MMBTU Kapal 1'],
     'Total OPEX (USD/year)': t['OPEX Kapal 1'],
-    'Total OPEX (USD/MMBTU)': t['OPEX USD/MMBTU Kapal 1'],
+    'Total OPEX (USD/MMBTU)': t['Total OPEX (USD/MMBTU) Kapal 1'],
     'Total Cost (USD/MMBTU)': t['Cost Kapal 1'],
     'Spokes': t['Spokes Kapal 1'],
   }));
@@ -1230,13 +1230,14 @@ async function runTwoVesselProbabilityModelRisk(input) {
     'port_cost': t['port_cost Kapal 2'],
     'rent_cost': t['rent_cost Kapal 2'],
     'Total CAPEX (USD)': t['CAPEX Kapal 2'],
-    'Total CAPEX USD/MMBTU': t['CAPEX USD/MMBTU Kapal 2'],
+    'Total CAPEX USD/MMBTU': t['Total CAPEX USD/MMBTU Kapal 2'],
     'Total OPEX (USD/year)': t['OPEX Kapal 2'],
-    'Total OPEX (USD/MMBTU)': t['OPEX USD/MMBTU Kapal 2'],
+    'Total OPEX (USD/MMBTU)': t['Total OPEX (USD/MMBTU) Kapal 2'],
     'Total Cost (USD/MMBTU)': t['Cost Kapal 2'],
     'Spokes': t['Spokes Kapal 2'],
   }));
 
+  // System table (simplified gabungan)
   const system = topTotal.map(t => ({
     'No. Skenario': t['No. Skenario'],
     'Probability': t['Probability'],
@@ -1824,8 +1825,8 @@ async function runHubSpokeSingleModel(input) {
  * Hub & Spoke, 1 feeder, WITH RISK
  * Python CABANG 2: HUB & SPOKE with num_v=1
  * For each hub (each demand location):
- *   - Mother: terminal -> hub -> terminal
- *   - Feeder: hub -> all remaining spokes -> hub
+ * - Mother: terminal -> hub -> terminal
+ * - Feeder: hub -> all remaining spokes -> hub
  */
 async function runHubSpokeSingleModelRisk(input) {
   const {
@@ -2224,8 +2225,6 @@ async function runHubSpokeTwoVesselModel(input) {
   return runHubSpokeTwoVesselModelRisk({ ...input, riskDB: emptyRiskDB });
 }
 
-// ...existing runHubSpokeTwoVesselModelRisk...
-
 /**
  * N-Vessel Probability Model (Milk-Run, NO-RISK)
  * Membagi lokasi menjadi N subset dan menjalankan engine single untuk setiap subset
@@ -2582,14 +2581,17 @@ async function runHubSpokeNVesselModel(input) {
 
 /**
  * Hub & Spoke N-Vessel Model (WITH RISK)
+ * PERBAIKAN 5: MENGIMPLEMENTASIKAN N-FEEDER SECARA UTUH
  */
 async function runHubSpokeNVesselModelRisk(input) {
   const {
     vessels, routes, oru, terminal,
     selectedLocations: locs, demandBBTUD,
     params, inflationFactor, riskDB, geoMap,
+    spatialDistances, spatialWaypointsMap, weatherCacheByZone,
     numFeeders = 2,
     enforceSameVessel = true,
+    vesselNames,
   } = input;
 
   if (!Array.isArray(locs) || locs.length === 0) {
@@ -2598,18 +2600,151 @@ async function runHubSpokeNVesselModelRisk(input) {
     return emptyResult;
   }
 
-  // Route to appropriate implementation based on numFeeders
-  if (numFeeders <= 1) {
-    return runHubSpokeSingleModelRisk(input);
-  }
-  if (numFeeders <= 2) {
-    return runHubSpokeTwoVesselModelRisk(input);
+  // Jika cuma 1 atau 2, lempar ke fungsi yang sudah ada (efisiensi kecepatan A*)
+  if (numFeeders === 1) return runHubSpokeSingleModelRisk(input);
+  if (numFeeders === 2) return runHubSpokeTwoVesselModelRisk(input);
+
+  const total = [];
+  const totCluster = locs.reduce((s, l) => s + (demandBBTUD[l] || 0), 0);
+  let globalScenarioId = 0;
+  const Pyears = params.Penyaluran || 20;
+
+  for (const hub of locs) {
+    const spk_all = locs.filter(x => x !== hub);
+    if (numFeeders > spk_all.length) continue;
+
+    // Kalkulasi Kapal Induk (Mother Vessel)
+    const motherRows = await runSupplyChainModelRisk({
+      vessels, routes, oru, terminal,
+      selectedLocations: [hub], demandBBTUD: { [hub]: totCluster }, // demand total
+      params, inflationFactor, riskDB, geoMap,
+      spatialDistances, weatherCacheByZone, spatialWaypointsMap,
+      numVessels: 1, isFeeder: false
+    });
+    
+    if (!motherRows.length) continue;
+
+    // Partisi Spoke ke beberapa Feeder secara rekursif
+    const partitions = generatePartitions(spk_all, numFeeders);
+
+    for (const partition of partitions) {
+      if (partition.some(subset => subset.length === 0)) continue;
+
+      const subResults = [];
+      let allValid = true;
+
+      for (let i = 0; i < numFeeders; i++) {
+        const subset = partition[i];
+        const subsetDemand = Object.fromEntries(subset.map(k => [k, demandBBTUD[k]]));
+        const topN = numFeeders <= 3 ? 20 : 10;
+        
+        // Kalkulasi Kapal Feeder (berangkat dari HUB)
+        const df = await runSupplyChainModelRisk({
+          vessels, routes, oru, terminal: hub, 
+          selectedLocations: subset, demandBBTUD: subsetDemand,
+          params, inflationFactor, riskDB, geoMap,
+          spatialDistances, spatialWaypointsMap, weatherCacheByZone,
+          numVessels: numFeeders, isFeeder: true,
+          resultLimit: topN,
+        });
+
+        if (!df.length) { allValid = false; break; }
+        subResults.push(df);
+      }
+
+      if (!allValid) continue;
+
+      // Cross-join feeder
+      const crossJoin = (arrays) => {
+        if (arrays.length === 0) return [[]];
+        const [first, ...rest] = arrays;
+        const restCombos = crossJoin(rest);
+        const result = [];
+        for (const item of first) {
+          for (const combo of restCombos) result.push([item, ...combo]);
+        }
+        return result;
+      };
+
+      const allFeederCombos = crossJoin(subResults);
+
+      for (const feederCombo of allFeederCombos) {
+        // Twin constraint check for feeders
+        if (enforceSameVessel) {
+          const firstVessel = feederCombo[0]['Nama Kapal'];
+          const firstCapacity = feederCombo[0]['Kapasitas Kapal (m3)'];
+          const allSame = feederCombo.every(k => k['Nama Kapal'] === firstVessel && k['Kapasitas Kapal (m3)'] === firstCapacity);
+          if (!allSame) continue;
+        }
+
+        // Cek Nama Kapal jika diatur spesifik
+        if (Array.isArray(vesselNames) && vesselNames.length === numFeeders) {
+          let match = true;
+          for (let i = 0; i < numFeeders; i++) {
+            if (feederCombo[i]['Nama Kapal'] !== vesselNames[i]) {
+              match = false; break;
+            }
+          }
+          if (!match) continue;
+        }
+
+        for (const rm of motherRows) {
+          globalScenarioId += 1;
+
+          let c_usd = rm['Total CAPEX (USD)'];
+          let o_usd_year = rm['Total OPEX (USD/year)'];
+          for (const f of feederCombo) {
+            c_usd += f['Total CAPEX (USD)'];
+            o_usd_year += f['Total OPEX (USD/year)'];
+          }
+          
+          // Formula Sistem Gabungan (Mother + Semua Feeder)
+          const sys_cost = (c_usd + (o_usd_year * Pyears)) / (totCluster * 1000.0 * 365.0 * Pyears);
+
+          const row = {
+            'No. Skenario': globalScenarioId,
+            'Skenario Hub': hub,
+            'Probability': partition.map(p => p.length).join(':'),
+            'System CAPEX (USD)': c_usd,
+            'System OPEX (USD/year)': o_usd_year,
+            'System Cost (USD/MMBTU)': sys_cost,
+          };
+
+          for (const [k, v] of Object.entries(rm)) row[`M_${k}`] = v;
+          for (let fi = 0; fi < numFeeders; fi++) {
+            for (const [k, v] of Object.entries(feederCombo[fi])) row[`F${fi + 1}_${k}`] = v;
+            row[`F${fi + 1}_Spokes`] = partition[fi].join(', ');
+          }
+          total.push({ row, feederCombo, rm, partition });
+        }
+      }
+    }
   }
 
-  // TODO: Implement full N-feeder logic (similar pattern to runNVesselProbabilityModelRisk)
-  // This is a placeholder - full implementation would follow same partition pattern
-  console.warn(`Hub & Spoke ${numFeeders}-feeder belum diimplementasi penuh, fallback ke 2-feeder`);
-  return runHubSpokeTwoVesselModelRisk({ ...input, numFeeders: 2 });
+  total.sort((a, b) => a.row['System Cost (USD/MMBTU)'] - b.row['System Cost (USD/MMBTU)']);
+  const top20 = total.slice(0, 20);
+
+  // Re-number scenarios sequentially
+  top20.forEach((t, idx) => { t.row['No. Skenario'] = idx + 1; });
+
+  const result = { mother: [], system: [] };
+  for (let i = 1; i <= numFeeders; i++) result[`feeder${i}`] = [];
+
+  for (const { row, feederCombo, rm } of top20) {
+    result.system.push(row);
+    
+    const mRow = { 'No. Skenario': row['No. Skenario'], 'Skenario Hub': row['Skenario Hub'] };
+    for (const [k, v] of Object.entries(rm)) mRow[k] = v;
+    result.mother.push(mRow);
+
+    for (let i = 0; i < numFeeders; i++) {
+      const fRow = { 'No. Skenario': row['No. Skenario'], 'Skenario Hub': row['Skenario Hub'] };
+      for (const [k, v] of Object.entries(feederCombo[i])) fRow[k] = v;
+      fRow['Spokes'] = row[`F${i + 1}_Spokes`];
+      result[`feeder${i + 1}`].push(fRow);
+    }
+  }
+  return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2673,12 +2808,10 @@ module.exports = {
   runHubSpokeSingleModelRisk,
   runHubSpokeTwoVesselModel,
   runHubSpokeTwoVesselModelRisk,
-  // NEW: N-vessel engines
   runNVesselProbabilityModel,
   runNVesselProbabilityModelRisk,
   runHubSpokeNVesselModel,
   runHubSpokeNVesselModelRisk,
-  // NEW: helpers exposed for controllers
   hitungBiayaPelabuhan,
   runSensitivityAnalysis,
 };

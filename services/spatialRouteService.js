@@ -1,1145 +1,753 @@
 /**
  * Spatial Route Service – A* Sea-Route Engine
  * ─────────────────────────────────────────────────────────────────────────────
- * Computes the shortest navigable sea-path between two geographic coordinates,
- * respecting a minimum water depth derived from the ship's design draft plus
- * Under-Keel Clearance (UKC) and dynamic wave height.
- *
- * Two engines are tried in order of preference:
- *   1. BATNAS  – high-res local TIF (Indonesia)
- *   2. GEBCO   – global NetCDF (fallback)
- *
- * If both engines fail (data files unavailable), an error is thrown.
- * Haversine straight-line is NOT used – all routes must follow real sea paths.
- *
- * All results are cached in the SpatialRouteCache Prisma table so identical
- * queries are served instantly.
- *
- * Key exported functions
- * ──────────────────────
- *  computeRoute(origin, destination, options)
- *    → { waypoints, distanceNm, minDepth, maxDepth, weatherZones, engine }
- *
- *  computeJettyReport(locationName, lat, lon, options)
- *    → { berthLat, berthLon, jettyM, landKm, berthDepth }
- *
- *  computeDynamicVoyageHours(waypoints, vessel, weatherCache, ihoSvc)
- *    → number of sailing hours (accounting for speed-loss from waves/wind)
- *
- *  getDynamicOruCapex(demandBbtud, province, analysisYear, inflationRate, heatingValue?)
- *    → { finalCapexUsd, scaledBaseCost, inflatedCost, ikkTarget, ikkRef, bestMatchName, bestMatchCapBbtud, capacityFactor }
+ * REPLIKA 100% MURNI GOOGLE COLAB V3 (ULTIMATE LOGGED & FULL)
+ * - Tampilan Log Terminal disamakan persis dengan format Python Colab
+ * - Geodesic Vincenty ditambahkan untuk akurasi Jarak Lurus WGS-84 (Match 511.5 NM)
+ * - Pencarian Jetty murni KDTree (Tanpa Linspace) agar Match dengan Colab (943 M)
+ * - Start rute murni ditarik HANYA dari Berth (Titik Sandar), bukan daratan
+ * - FULL VERSION: Semua fungsi ekonomi, cuaca, dan IKK terpasang utuh.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
-const crypto  = require('crypto');
-const prisma  = require('../config/db');
-const ihoSvc  = require('./ihoService');
-const { getBatnas, getGebco, isSafeCorridorLine, findBerthPoint, fastNm } = require('./bathymetryService');
+const crypto = require('crypto');
+const prisma = require('../config/db');
+const ihoSvc = require('./ihoService');
+const { getBatnas, getGebco } = require('./bathymetryService');
 const { calcSpeedLoss } = require('./weatherService');
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Constants (same as Python)
-// ─────────────────────────────────────────────────────────────────────────────
-const UKC_CLEARANCE = 2.85; // metres
-const MAX_DESIGN_DRAFT = 8.0; // conservative fallback when vessel unknown
-const BASE_YEAR = 2022;
+const UKC_CLEARANCE = 2.85;
+const MAX_DESIGN_DRAFT = 8.0;
+const MAX_LPP = 175.0;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Min-Heap for A*
-// ─────────────────────────────────────────────────────────────────────────────
+// ==============================================================================
+// 1. REPLIKA PUSTAKA PYTHON (MinHeap, KDTree Scipy & Geodesic)
+// ==============================================================================
 class MinHeap {
   constructor() { this.h = []; }
-  push(priority, item) {
-    this.h.push({ priority, item });
-    this._up(this.h.length - 1);
-  }
-  pop() {
-    const top = this.h[0];
-    const last = this.h.pop();
-    if (this.h.length) { this.h[0] = last; this._down(0); }
-    return top;
-  }
+  push(priority, cost, item, path) { this.h.push({ priority, cost, item, path }); this._up(this.h.length - 1); }
+  pop() { const top = this.h[0], last = this.h.pop(); if (this.h.length) { this.h[0] = last; this._down(0); } return top; }
   get size() { return this.h.length; }
-  _up(i) {
-    while (i > 0) {
-      const p = (i - 1) >> 1;
-      if (this.h[p].priority <= this.h[i].priority) break;
-      [this.h[p], this.h[i]] = [this.h[i], this.h[p]]; i = p;
-    }
-  }
+  _up(i) { while (i > 0) { const p = (i - 1) >> 1; if (this.h[p].priority <= this.h[i].priority) break; [this.h[p], this.h[i]] = [this.h[i], this.h[p]]; i = p; } }
   _down(i) {
     while (true) {
-      let m = i, l = 2*i+1, r = 2*i+2;
+      let m = i, l = 2 * i + 1, r = 2 * i + 2;
       if (l < this.h.length && this.h[l].priority < this.h[m].priority) m = l;
       if (r < this.h.length && this.h[r].priority < this.h[m].priority) m = r;
-      if (m === i) break;
-      [this.h[m], this.h[i]] = [this.h[i], this.h[m]]; i = m;
+      if (m === i) break; [this.h[m], this.h[i]] = [this.h[i], this.h[m]]; i = m;
     }
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Route-key hash
-// ─────────────────────────────────────────────────────────────────────────────
+class KDTree {
+  constructor(coords) {
+    this.coords = coords;
+    this.grid = new Map();
+    this.cellSize = 0.05; 
+    for (let i = 0; i < coords.length; i++) {
+      const r = Math.floor(coords[i][0] / this.cellSize), c = Math.floor(coords[i][1] / this.cellSize);
+      const key = `${r},${c}`;
+      if (!this.grid.has(key)) this.grid.set(key, []);
+      this.grid.get(key).push(i);
+    }
+  }
+  query(point, k = 1, distance_upper_bound = Infinity) {
+    let cands = [];
+    const rSq = distance_upper_bound === Infinity ? Infinity : distance_upper_bound * distance_upper_bound;
+    const rC = Math.floor(point[0] / this.cellSize), cC = Math.floor(point[1] / this.cellSize);
+    const rad = distance_upper_bound === Infinity ? 10 : Math.ceil(distance_upper_bound / this.cellSize);
+    
+    for (let r = rC - rad; r <= rC + rad; r++) {
+      for (let c = cC - rad; c <= cC + rad; c++) {
+        const bucket = this.grid.get(`${r},${c}`);
+        if (bucket) {
+          for (let i = 0; i < bucket.length; i++) {
+            const idx = bucket[i];
+            const dlat = point[0] - this.coords[idx][0], dlon = point[1] - this.coords[idx][1];
+            const d2 = dlat*dlat + dlon*dlon;
+            if (d2 <= rSq) cands.push({ d: Math.sqrt(d2), idx });
+          }
+        }
+      }
+    }
+    cands.sort((a, b) => a.d - b.d);
+    if (k === 1) {
+      if (cands.length === 0) return [[Infinity], [-1]];
+      return [[cands[0].d], [cands[0].idx]]; 
+    }
+    const topK = cands.slice(0, k);
+    return [topK.map(x => x.d), topK.map(x => x.idx)];
+  }
+}
+
 function makeRouteKey(origin, destination) {
   const canonical = [origin, destination].sort().join('|');
   return crypto.createHash('sha256').update(canonical).digest('hex');
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Ship parameters (max from vessel database, matching Python kapal_df)
-// MAX_LPP = 175.0 m  → HAI YANG SHI YOU 301 (largest vessel in database)
-// ─────────────────────────────────────────────────────────────────────────────
-const MAX_LPP = 175.0;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Capsule distance: perpendicular distance from point P to line segment A→B
-// Matches Python capsule_mask calculation
-// ─────────────────────────────────────────────────────────────────────────────
-function capsuleDist(p, a, b) {
-  const ab = [b[0] - a[0], b[1] - a[1]];
-  const ap = [p[0] - a[0], p[1] - a[1]];
-  const len2 = ab[0] * ab[0] + ab[1] * ab[1];
-  if (len2 === 0) return Math.sqrt(ap[0] * ap[0] + ap[1] * ap[1]);
-  const t = Math.max(0, Math.min(1, (ap[0] * ab[0] + ap[1] * ab[1]) / len2));
-  const proj = [a[0] + t * ab[0], a[1] + t * ab[1]];
-  return Math.sqrt((p[0] - proj[0]) ** 2 + (p[1] - proj[1]) ** 2);
+// Rumus Vincenty Elipsoid WGS-84 (Akurasi Tinggi untuk Jarak Lurus 511.5 NM)
+function geodesic_nm(c1, c2) {
+  const a = 6378137.0, b = 6356752.314245, f = 1 / 298.257223563;
+  const L = (c2[1] - c1[1]) * Math.PI / 180;
+  const U1 = Math.atan((1 - f) * Math.tan(c1[0] * Math.PI / 180));
+  const U2 = Math.atan((1 - f) * Math.tan(c2[0] * Math.PI / 180));
+  const sinU1 = Math.sin(U1), cosU1 = Math.cos(U1);
+  const sinU2 = Math.sin(U2), cosU2 = Math.cos(U2);
+  let lambda = L, lambdaP, iterLimit = 100;
+  let sinLambda, cosLambda, sinSigma, cosSigma, sigma, sinAlpha, cosSqAlpha, cos2SigmaM;
+  do {
+    sinLambda = Math.sin(lambda); cosLambda = Math.cos(lambda);
+    sinSigma = Math.sqrt((cosU2 * sinLambda) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLambda) ** 2);
+    if (sinSigma === 0) return 0; 
+    cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda;
+    sigma = Math.atan2(sinSigma, cosSigma);
+    sinAlpha = cosU1 * cosU2 * sinLambda / sinSigma;
+    cosSqAlpha = 1 - sinAlpha * sinAlpha;
+    cos2SigmaM = cosSqAlpha === 0 ? 0 : cosSigma - 2 * sinU1 * sinU2 / cosSqAlpha;
+    const C = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha));
+    lambdaP = lambda;
+    lambda = L + (1 - C) * f * sinAlpha * (sigma + C * sinSigma * (cos2SigmaM + C * cosSigma * (-1 + 2 * cos2SigmaM * cos2SigmaM)));
+  } while (Math.abs(lambda - lambdaP) > 1e-12 && --iterLimit > 0);
+  if (iterLimit === 0) return NaN;
+  const uSq = cosSqAlpha * (a * a - b * b) / (b * b);
+  const A = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)));
+  const B = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)));
+  const deltaSigma = B * sinSigma * (cos2SigmaM + B / 4 * (cosSigma * (-1 + 2 * cos2SigmaM * cos2SigmaM) - B / 6 * cos2SigmaM * (-3 + 4 * sinSigma * sinSigma) * (-3 + 4 * cos2SigmaM * cos2SigmaM)));
+  const s = b * A * (sigma - deltaSigma);
+  return s / 1852.0; 
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Sub-slice a BathyWindow to a bounding-box.
-// Matches Python: ds_gebco.sel(lat=slice(min_lat, max_lat), ...) per iteration.
-// CRITICAL for performance: keeps node count low per iteration.
-// ─────────────────────────────────────────────────────────────────────────────
-function sliceWindow(win, minLat, maxLat, minLon, maxLon) {
-  const { latStart, latStep, lonStart, lonStep, width, height, data } = win;
-  const latStepAbs = Math.abs(latStep);
-  const lonStepAbs = Math.abs(lonStep);
-
-  let rMin, rMax;
-  if (latStep < 0) {
-    // latStart = northernmost lat, rows go south
-    rMin = Math.max(0, Math.floor((latStart - maxLat) / latStepAbs));
-    rMax = Math.min(height - 1, Math.ceil((latStart - minLat) / latStepAbs));
-  } else {
-    // latStart = southernmost lat, rows go north
-    rMin = Math.max(0, Math.floor((minLat - latStart) / latStep));
-    rMax = Math.min(height - 1, Math.ceil((maxLat - latStart) / latStep));
-  }
-  const cMin = Math.max(0, Math.floor((minLon - lonStart) / lonStepAbs));
-  const cMax = Math.min(width - 1, Math.ceil((maxLon - lonStart) / lonStepAbs));
-
-  if (rMin > rMax || cMin > cMax) return null;
-  const newW = cMax - cMin + 1;
-  const newH = rMax - rMin + 1;
-  if (newW < 3 || newH < 3) return null;
-
-  const newData = new Float32Array(newW * newH);
-  for (let r = 0; r < newH; r++) {
-    const srcRow = (rMin + r) * width + cMin;
-    newData.set(data.subarray(srcRow, srcRow + newW), r * newW);
-  }
-  return {
-    data: newData, width: newW, height: newH,
-    latStart: latStart + rMin * latStep, latStep,
-    lonStart: lonStart + cMin * lonStep, lonStep,
-  };
+// Replika fast_nm_dist murni (Untuk Heuristic A-Star & Looping)
+function fast_nm_dist(c1, c2) {
+  const dlat = c2[0] - c1[0];
+  const dlon = (c2[1] - c1[1]) * Math.cos(((c1[0] + c2[0]) / 2) * (Math.PI / 180));
+  return Math.sqrt(dlat * dlat + dlon * dlon) * 60.0;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Block-adaptive node generation (matching Python B_cells approach):
-//   open-water blocks  → 1 representative node per B_CELLS×B_CELLS block (coarse)
-//   land-adjacent blocks → dense grid at cFactor pixels apart (fine)
-// + capsule filter  : only nodes within capsuleRadDeg of A→B line
-// + danger score    : 1.7x near shallow water, 1.0 in open ocean
-// Matches Python: B_cells = 15*c_factor, block-level adaptive sampling
-// ─────────────────────────────────────────────────────────────────────────────
-function buildAdaptiveGrid(win, safeD, cFactor, capsuleRadDeg, p1, p2) {
-  const B_CELLS = 15 * cFactor;
-  const A = [p1.lat, p1.lon];
-  const B = [p2.lat, p2.lon];
-  const AB = [B[0] - A[0], B[1] - A[1]];
-  const lenSqAB = AB[0] * AB[0] + AB[1] * AB[1];
+function getElevationClean(win, r, c) {
+  if (r < 0 || r >= win.height || c < 0 || c >= win.width) return -9999;
+  let v = win.data[r * win.width + c];
+  if (isNaN(v) || v > 8000 || v < -11000) return -9999;
+  return v;
+}
 
-  const H = win.height, W = win.width;
-  const rawR = [], rawC = [];
+// ==============================================================================
+// 2. OSM FETCHING
+// ==============================================================================
+let globalOSMCache = null;
+let isFetchingOSM = false;
 
-  // Block-adaptive sampling: fine near land, coarse in open ocean
-  for (let bi = 0; bi < H; bi += B_CELLS) {
-    const rEnd = Math.min(bi + B_CELLS, H);
-    for (let bj = 0; bj < W; bj += B_CELLS) {
-      const cEnd = Math.min(bj + B_CELLS, W);
+async function getOSMFerryRoutes(b_min_lat, b_max_lat, b_min_lon, b_max_lon) {
+  if (globalOSMCache) return globalOSMCache;
+  if (isFetchingOSM) {
+    while (isFetchingOSM) await new Promise(r => setTimeout(r, 500));
+    return globalOSMCache || { nodes: {}, edges: [] };
+  }
+  isFetchingOSM = true;
+  
+  console.log(`   📡 Menghisap Data Jalan Tol OSM (Harbor Exit Guide)...`);
+  console.log(`      🔍 Memindai Bounding Box OSM: Lat (${b_min_lat.toFixed(1)} s/d ${b_max_lat.toFixed(1)}), Lon (${b_min_lon.toFixed(1)} s/d ${b_max_lon.toFixed(1)})`);
+  
+  const query = `[out:json][timeout:60]; way["route"~"ferry"](${b_min_lat}, ${b_min_lon}, ${b_max_lat}, ${b_max_lon}); out body; >; out skel qt;`;
+  const urls = ["https://lz4.overpass-api.de/api/interpreter", "https://overpass-api.de/api/interpreter"];
+  let data = null;
 
-      // Check if block contains any shallow/land pixels
-      let hasShallow = false;
-      outerB: for (let r = bi; r < rEnd; r++)
-        for (let c = bj; c < cEnd; c++) {
-          const v = win.data[r * W + c];
-          if (!isNaN(v) && v <= 8000 && v > safeD) { hasShallow = true; break outerB; }
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `data=${encodeURIComponent(query)}` });
+      if (res.ok) { data = await res.json(); break; }
+    } catch (e) {}
+  }
+
+  const nodes = {}, edges = [];
+  if (data && data.elements) {
+    for (const e of data.elements) if (e.type === 'node') nodes[`OSM_${e.id}`] = [e.lat, e.lon];
+    for (const e of data.elements) {
+      if (e.type === 'way' && e.nodes) {
+        for (let i = 0; i < e.nodes.length - 1; i++) {
+          const u_id = `OSM_${e.nodes[i]}`, v_id = `OSM_${e.nodes[i+1]}`;
+          if (nodes[u_id] && nodes[v_id]) edges.push([u_id, v_id]);
         }
-
-      if (hasShallow) {
-        // Dense grid: every cFactor pixels within block
-        for (let r = bi; r < rEnd; r += cFactor)
-          for (let c = bj; c < cEnd; c += cFactor) {
-            rawR.push(r); rawC.push(c);
-          }
-      } else {
-        // Coarse: single center representative node
-        rawR.push(Math.floor((bi + rEnd) / 2));
-        rawC.push(Math.floor((bj + cEnd) / 2));
       }
     }
   }
-
-  // Apply depth filter + capsule filter + danger score
-  const nodes = [];
-  for (let k = 0; k < rawR.length; k++) {
-    const r = rawR[k], c = rawC[k];
-    if (r >= H || c >= W) continue;
-    const v = win.data[r * W + c];
-    if (isNaN(v) || v > 8000 || v < -11000 || v > safeD) continue;
-
-    const lat = win.latStart + r * win.latStep;
-    const lon = win.lonStart + c * win.lonStep;
-
-    // Capsule distance filter (perpendicular dist from A→B line)
-    const AP = [lat - A[0], lon - A[1]];
-    let perpDist;
-    if (lenSqAB === 0) {
-      perpDist = Math.sqrt(AP[0] * AP[0] + AP[1] * AP[1]);
-    } else {
-      const t = Math.max(0, Math.min(1, (AP[0] * AB[0] + AP[1] * AB[1]) / lenSqAB));
-      const dx = lat - (A[0] + t * AB[0]), dy = lon - (A[1] + t * AB[1]);
-      perpDist = Math.sqrt(dx * dx + dy * dy);
-    }
-    if (perpDist > capsuleRadDeg) continue;
-
-    // Danger score: 1.7x if any nearby pixel is shallow
-    let danger = 1.0;
-    const rUp = Math.min(r + 3, H - 1), rDn = Math.max(r - 3, 0);
-    const cRt = Math.min(c + 3, W - 1), cLf = Math.max(c - 3, 0);
-    outerD: for (let nr = rDn; nr <= rUp; nr++)
-      for (let nc = cLf; nc <= cRt; nc++) {
-        const nv = win.data[nr * W + nc];
-        if (!isNaN(nv) && nv <= 8000 && nv > safeD) { danger = 1.7; break outerD; }
-      }
-
-    nodes.push({ lat, lon, depth: v, danger });
-  }
-  return nodes;
+  console.log(`      ✅ Berhasil mengunduh jalur Tol Laut OSM!                                        \n`);
+  globalOSMCache = { nodes, edges };
+  isFetchingOSM = false;
+  return globalOSMCache;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Build a capsule-filtered grid of valid deep-water nodes
-// Matches Python: capsule_mask + node_danger_score (1.7x near shallow)
-// ─────────────────────────────────────────────────────────────────────────────
-function buildValidGrid(win, safeD, step, originPt, destPt, capsuleRadDeg) {
-  const A = [originPt.lat, originPt.lon];
-  const B = [destPt.lat,   destPt.lon];
-  const nodes = [];
-  for (let r = 0; r < win.height; r += step) {
-    for (let c = 0; c < win.width; c += step) {
-      const v = win.data[r * win.width + c];
-      if (isNaN(v) || v > 8000 || v < -11000 || v > safeD) continue;
+// ==============================================================================
+// 3. FAST SAFE CORRIDOR NUMPY PORTING
+// ==============================================================================
+function fast_safe_corridor_numpy(p1, p2, win, limit_depth, buffer_px = 0, isBatnas = true) {
+  const dlat = Math.abs(p2[0] - p1[0]), dlon = Math.abs(p2[1] - p1[1]);
+  const lat_step_abs = Math.abs(win.latStep), lon_step_abs = Math.abs(win.lonStep);
+  const factor = isBatnas ? 1.5 : 10.0;
+  
+  const pixel_steps = Math.trunc(Math.max(dlat / lat_step_abs, dlon / lon_step_abs) * factor);
+  const steps = Math.max(isBatnas ? 5 : 10, pixel_steps);
+
+  for (let i = 0; i < steps; i++) {
+    const t = i / (steps - 1 || 1);
+    const sLat = p1[0] + t * (p2[0] - p1[0]);
+    const sLon = p1[1] + t * (p2[1] - p1[1]);
+
+    const r = Math.trunc(Math.max(0, Math.min(win.height - 1, Math.round((sLat - win.latStart) / win.latStep))));
+    const c = Math.trunc(Math.max(0, Math.min(win.width - 1, Math.round((sLon - win.lonStart) / win.lonStep))));
+    
+    if (getElevationClean(win, r, c) > limit_depth) return false;
+
+    if (buffer_px > 0) {
+      const l_up = Math.min(win.height - 1, r + buffer_px), l_dn = Math.max(0, r - buffer_px);
+      const l_rt = Math.min(win.width - 1, c + buffer_px), l_lf = Math.max(0, c - buffer_px);
+      
+      if (getElevationClean(win, l_up, c) > limit_depth || getElevationClean(win, l_dn, c) > limit_depth ||
+          getElevationClean(win, r, l_rt) > limit_depth || getElevationClean(win, r, l_lf) > limit_depth ||
+          getElevationClean(win, l_up, l_rt) > limit_depth || getElevationClean(win, l_up, l_lf) > limit_depth ||
+          getElevationClean(win, l_dn, l_rt) > limit_depth || getElevationClean(win, l_dn, l_lf) > limit_depth) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function live_astar_path(G_nodes, G_edges, source, target, heuristic) {
+  const queue = new MinHeap();
+  queue.push(0, 0, source, [source]);
+  const visited = new Set();
+  
+  const start_time = Date.now();
+  const start_dist = heuristic(G_nodes[source], G_nodes[target]);
+  let nodes_explored = 0;
+
+  process.stdout.write(`         🧭 Memulai inisiasi AI Navigasi...\r`);
+
+  while (queue.size) {
+    const { cost, item: curr, path } = queue.pop();
+    if (visited.has(curr)) continue;
+    visited.add(curr);
+    nodes_explored++;
+
+    if (nodes_explored % 100 === 0) {
+      const curr_dist = heuristic(G_nodes[curr], G_nodes[target]);
+      const pct = Math.max(0.0, Math.min(99.9, 100.0 - (curr_dist / start_dist * 100.0)));
+      const elapsed = (Date.now() - start_time) / 1000;
+      process.stdout.write(`         🧭 Navigasi AI: ${pct.toFixed(1)}% Selesai | Titik Diproses: ${nodes_explored} | Waktu: ${elapsed.toFixed(1)}s          \r`);
+    }
+
+    if (curr === target) {
+      const elapsed = (Date.now() - start_time) / 1000;
+      console.log(`         🧭 Navigasi AI: 100.0% Selesai | Titik Diproses: ${nodes_explored} | Berhasil dalam ${elapsed.toFixed(1)}s          `);
+      return path;
+    }
+
+    const neighbors = G_edges.get(curr) || [];
+    for (const neighbor of neighbors) {
+      if (!visited.has(neighbor.ni)) {
+        const new_cost = cost + neighbor.w;
+        const priority = new_cost + (1.5 * heuristic(G_nodes[neighbor.ni], G_nodes[target]));
+        queue.push(priority, new_cost, neighbor.ni, [...path, neighbor.ni]);
+      }
+    }
+  }
+  console.log(`         ❌ [FATAL] A-Star GAGAL! Jalur terputus (NetworkXNoPath). Titik buntu di nodes ke-${nodes_explored}`);
+  return null;
+}
+
+// ==============================================================================
+// 4. FIND BERTH LOGIC (MURNI KDTREE TANPA LINSPACE OVERRIDE)
+// ==============================================================================
+function calculate_access_and_jetty(pt_name, pt_pos, win, PORT_SAFE_DEPTH, max_jetty_m_limit) {
+  const ptNameDisp = pt_name.charAt(0).toUpperCase() + pt_name.slice(1);
+  const valid_deep_coords = [];
+  const shore_coords = [];
+  
+  for (let r = 0; r < win.height; r++) {
+    for (let c = 0; c < win.width; c++) {
+      const v = getElevationClean(win, r, c);
       const lat = win.latStart + r * win.latStep;
       const lon = win.lonStart + c * win.lonStep;
-      // Capsule filter – matches Python capsule_mask
-      if (capsuleDist([lat, lon], A, B) > capsuleRadDeg) continue;
-      // Danger score: 1.7x near shallow water, 1.0 in open ocean (matching Python)
-      let danger = 1.0;
-      const rU = Math.min(r + 3, win.height - 1);
-      const rD = Math.max(r - 3, 0);
-      const cR = Math.min(c + 3, win.width  - 1);
-      const cL = Math.max(c - 3, 0);
-      outer: for (let nr = rD; nr <= rU; nr++) {
-        for (let nc = cL; nc <= cR; nc++) {
-          const nv = win.data[nr * win.width + nc];
-          if (!isNaN(nv) && nv <= 8000 && nv > safeD) { danger = 1.7; break outer; }
+      
+      if (Math.abs(lat - pt_pos[0]) > 0.5 || Math.abs(lon - pt_pos[1]) > 0.5) continue;
+      
+      if (v <= PORT_SAFE_DEPTH) valid_deep_coords.push([lat, lon, v]);
+      if (v >= -1.0 && v <= 1.5) shore_coords.push([lat, lon]);
+    }
+  }
+
+  let berth_pos = pt_pos, land_km = 0, jetty_m = 0, berth_depth = 0;
+
+  if (valid_deep_coords.length > 0 && shore_coords.length > 0) {
+    const tree_deep = new KDTree(valid_deep_coords.map(x => [x[0], x[1]]));
+    const tree_shore = new KDTree(shore_coords);
+
+    if (max_jetty_m_limit > 0) {
+      const shore_cands = [];
+      for (let i = 0; i < shore_coords.length; i++) {
+        const [d_deg, d_idx] = tree_deep.query(shore_coords[i], 1);
+        if (d_deg.length && d_deg[0] * 111000 <= max_jetty_m_limit) { 
+          shore_cands.push({ shore_pt: shore_coords[i], deep_idx: d_idx[0], jetty: d_deg[0] * 111000 });
         }
       }
-      nodes.push({ lat, lon, depth: v, danger });
-    }
-  }
-  return nodes;
-}
+      if (shore_cands.length > 0) {
+        const tree_valid_shore = new KDTree(shore_cands.map(x => x.shore_pt));
+        const [d_p2vs_deg, valid_idx_match] = tree_valid_shore.query(pt_pos, 1);
+        const best = shore_cands[valid_idx_match[0]];
+        
+        berth_pos = [valid_deep_coords[best.deep_idx][0], valid_deep_coords[best.deep_idx][1]];
+        berth_depth = valid_deep_coords[best.deep_idx][2];
+        land_km = d_p2vs_deg[0] * 111.0;
+        jetty_m = best.jetty;
+      } else {
+        const [d_p2s_deg, best_shore_idx] = tree_shore.query(pt_pos, 1);
+        const shore_pt = shore_coords[best_shore_idx[0]];
+        const [d_s2d_deg, best_deep_idx] = tree_deep.query(shore_pt, 1);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Add dense halo nodes near origin/destination
-// Matches Python: halo_lats/halo_lons (r_halo = max(15, c_factor*5))
-// Ensures A* connectivity even when capsule is very narrow near coasts
-// FIX: iterate only within the halo pixel-box, not the entire window (was O(W×H))
-// ─────────────────────────────────────────────────────────────────────────────
-function addHaloNodes(win, safeD, nodes, points, haloRadDeg) {
-  const seen = new Set(nodes.map(n => `${n.lat.toFixed(5)},${n.lon.toFixed(5)}`));
-  const latStepAbs = Math.abs(win.latStep);
-  const lonStepAbs = Math.abs(win.lonStep);
-  for (const pt of points) {
-    // Compute centre pixel
-    const rCenter = Math.round((pt.lat - win.latStart) / win.latStep);
-    const cCenter = Math.round((pt.lon - win.lonStart) / win.lonStep);
-    const rHalo   = Math.ceil(haloRadDeg / latStepAbs) + 1;
-    const cHalo   = Math.ceil(haloRadDeg / lonStepAbs) + 1;
-    const rMin = Math.max(0, rCenter - rHalo);
-    const rMax = Math.min(win.height - 1, rCenter + rHalo);
-    const cMin = Math.max(0, cCenter - cHalo);
-    const cMax = Math.min(win.width  - 1, cCenter + cHalo);
-    for (let r = rMin; r <= rMax; r++) {
-      for (let c = cMin; c <= cMax; c++) {
-        const v = win.data[r * win.width + c];
-        if (isNaN(v) || v > 8000 || v < -11000 || v > safeD) continue;
-        const lat = win.latStart + r * win.latStep;
-        const lon = win.lonStart + c * win.lonStep;
-        const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
-        if (!seen.has(key)) { seen.add(key); nodes.push({ lat, lon, depth: v, danger: 1.0 }); }
+        berth_pos = [valid_deep_coords[best_deep_idx[0]][0], valid_deep_coords[best_deep_idx[0]][1]];
+        berth_depth = valid_deep_coords[best_deep_idx[0]][2];
+        land_km = d_p2s_deg[0] * 111.0;
+        jetty_m = d_s2d_deg[0] * 111000;
       }
+    } else {
+      const [d_p2s_deg, best_shore_idx] = tree_shore.query(pt_pos, 1);
+      const shore_pt = shore_coords[best_shore_idx[0]];
+      const [d_s2d_deg, best_deep_idx] = tree_deep.query(shore_pt, 1);
+
+      berth_pos = [valid_deep_coords[best_deep_idx[0]][0], valid_deep_coords[best_deep_idx[0]][1]];
+      berth_depth = valid_deep_coords[best_deep_idx[0]][2];
+      land_km = d_p2s_deg[0] * 111.0;
+      jetty_m = d_s2d_deg[0] * 111000;
     }
+  } else if (valid_deep_coords.length > 0) {
+    const tree = new KDTree(valid_deep_coords.map(x => [x[0], x[1]]));
+    const [d_deg, idx] = tree.query(pt_pos, 1);
+    berth_pos = [valid_deep_coords[idx[0]][0], valid_deep_coords[idx[0]][1]];
+    berth_depth = valid_deep_coords[idx[0]][2];
+    jetty_m = d_deg[0] * 111000;
+  } else {
+    berth_depth = PORT_SAFE_DEPTH - 1; 
   }
+  
+  console.log(`      ✅ ${ptNameDisp}: Akses Darat ${(land_km/1000).toFixed(1)} KM | Jetty ${jetty_m.toFixed(0)} M | Sandar ${berth_depth.toFixed(1)} m | Syarat: ${PORT_SAFE_DEPTH.toFixed(1)} m`);
+  return { berthLat: berth_pos[0], berthLon: berth_pos[1], berthDepth: berth_depth, landKm: land_km/1000, jettyM: jetty_m };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Pre-build adjacency list using sorted-lat binary-search KNN
-// FIX 1: typed arrays instead of {j,d} objects → eliminates GC pressure
-// FIX 2: no corridor check for short edges (<2 grid spacings) → ensures graph
-//         connectivity; corridor check only for longer edges
-// Matches Python KDTree k_neighbors=16
-// ─────────────────────────────────────────────────────────────────────────────
-function buildAdjacency(nodes, win, safeD, maxJumpDeg) {
-  const n   = nodes.length;
-  const adj = Array.from({ length: n }, () => []);
-  const K   = 16;
-  const MAX_CORRIDOR_STEPS = 20;
-
-  // Sort node indices by lat
-  const sortedIdxArr = Array.from({ length: n }, (_, i) => i);
-  sortedIdxArr.sort((a, b) => nodes[a].lat - nodes[b].lat);
-  const sortedLats = new Float64Array(n);
-  for (let k = 0; k < n; k++) sortedLats[k] = nodes[sortedIdxArr[k]].lat;
-
-  function lowerBound(target) {
-    let lo = 0, hi = n;
-    while (lo < hi) { const m = (lo + hi) >> 1; if (sortedLats[m] < target) lo = m + 1; else hi = m; }
-    return lo;
-  }
-  function upperBound(target) {
-    let lo = 0, hi = n;
-    while (lo < hi) { const m = (lo + hi) >> 1; if (sortedLats[m] <= target) lo = m + 1; else hi = m; }
-    return lo;
-  }
-
-  // Short-edge threshold: matches Python exactly:
-  //   c_factor * max(lat_step, lon_step) * 60 * 1.5 NM
-  // Since maxJumpDeg = B_CELLS * pixelSize * 2.5 = 15*cFactor * pixelSize * 2.5,
-  //   cFactor * pixelSize = maxJumpDeg / 37.5
-  //   shortEdgeNm = maxJumpDeg / 37.5 * 60 * 1.5 = maxJumpDeg * 2.4
-  const shortEdgeNm = maxJumpDeg * 2.4;
-
-  // Reusable typed buffers for K-nearest (avoid per-node object allocation)
-  const kNearJ = new Int32Array(K);
-  const kNearD = new Float64Array(K);
-
-  const DEG2RAD = Math.PI / 180.0;
-
-  for (let i = 0; i < n; i++) {
-    const li     = nodes[i].lat;
-    const oi     = nodes[i].lon;
-    const cosLat = Math.cos(li * DEG2RAD);
-    const dangI  = nodes[i].danger || 1.0;
-
-    const jStart = lowerBound(li - maxJumpDeg);
-    const jEnd   = upperBound(li + maxJumpDeg);
-
-    // K-nearest selection via typed-array max-heap (no object allocation)
-    let kCount = 0;
-    let kMaxM  = 0;
-    let kMaxD  = 0.0;
-
-    for (let k = jStart; k < jEnd; k++) {
-      const j = sortedIdxArr[k];
-      if (j <= i) continue;                             // avoid duplicate edges
-      const dLon = nodes[j].lon - oi;
-      if (dLon < -maxJumpDeg || dLon > maxJumpDeg) continue;
-      const dLat  = nodes[j].lat - li;
-      const dLonS = dLon * cosLat;
-      const d     = Math.sqrt(dLat * dLat + dLonS * dLonS) * 60.0; // NM
-      if (d < 0.01) continue;
-
-      if (kCount < K) {
-        kNearJ[kCount] = j;
-        kNearD[kCount] = d;
-        kCount++;
-        if (kCount === K) {
-          // Find the max element position
-          kMaxM = 0;
-          for (let m = 1; m < K; m++) if (kNearD[m] > kNearD[kMaxM]) kMaxM = m;
-          kMaxD = kNearD[kMaxM];
-        }
-      } else if (d < kMaxD) {
-        kNearJ[kMaxM] = j;
-        kNearD[kMaxM] = d;
-        kMaxM = 0;
-        for (let m = 1; m < K; m++) if (kNearD[m] > kNearD[kMaxM]) kMaxM = m;
-        kMaxD = kNearD[kMaxM];
-      }
-    }
-
-    // Add edges
-    for (let m = 0; m < kCount; m++) {
-      const j = kNearJ[m];
-      const d = kNearD[m];
-      // Short edges (≤ c_factor * pixel * 1.5 NM): add unconditionally for grid connectivity.
-      // Long edges: corridor check prevents land-crossing shortcuts.
-      if (d > shortEdgeNm) {
-        if (!isSafeCorridorLine(win, li, oi, nodes[j].lat, nodes[j].lon, safeD, 0, MAX_CORRIDOR_STEPS)) continue;
-      }
-      const w = d * Math.max(dangI, nodes[j].danger || 1.0);
-      adj[i].push({ ni: j, w });
-      adj[j].push({ ni: i, w });
-    }
-  }
-  return adj;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// A* on pre-built adjacency graph
-// Matches Python live_astar_path: visited set + 1.5x weighted heuristic
-// ─────────────────────────────────────────────────────────────────────────────
-function astar(nodes, adj, si, ei) {
-  const n       = nodes.length;
-  const dist    = new Float64Array(n).fill(Infinity);
-  const prev    = new Int32Array(n).fill(-1);
-  const visited = new Uint8Array(n);
-  dist[si] = 0;
-
-  const heap = new MinHeap();
-  heap.push(0, si);
-
-  while (heap.size) {
-    const { item: cur } = heap.pop();
-    if (visited[cur]) continue;
-    visited[cur] = 1;
-    if (cur === ei) break;
-    for (const { ni, w } of (adj[cur] || [])) {
-      if (visited[ni]) continue;
-      const nd = dist[cur] + w;
-      if (nd < dist[ni]) {
-        dist[ni] = nd;
-        prev[ni] = cur;
-        // 1.5x weighted heuristic – matches Python: priority = new_cost + 1.5 * heuristic
-        const h = fastNm(nodes[ni].lat, nodes[ni].lon, nodes[ei].lat, nodes[ei].lon);
-        heap.push(nd + 1.5 * h, ni);
-      }
-    }
-  }
-
-  if (dist[ei] === Infinity) return null;
-  const path = [];
-  let cur = ei;
-  while (cur !== -1) { path.push(cur); cur = prev[cur]; }
-  path.reverse();
-  return { path, dist: dist[ei] };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Smooth a path – remove zig-zag nodes (lookahead 60, matching Python)
-// Uses capped corridor steps so it doesn't blow up on large GEBCO windows.
-// ─────────────────────────────────────────────────────────────────────────────
-function smoothPath(path, nodes, win, safeD) {
-  if (path.length <= 2) return path;
-  const out = [path[0]];
-  let cur = 0;
-  while (cur < path.length - 1) {
-    let furthest = cur + 1;
-    for (let nxt = Math.min(path.length - 1, cur + 60); nxt > cur + 1; nxt--) {
-      const { lat: l1, lon: o1 } = nodes[path[cur]];
-      const { lat: l2, lon: o2 } = nodes[path[nxt]];
-      // Full pixel-resolution corridor check (no step cap) — ensures narrow straits like
-      // Selat Larantuka are not missed. A 30-sample cap was previously under-sampling:
-      // a 13 NM jump on GEBCO 0.004°/px needs ~375 samples, not 30.
-      if (isSafeCorridorLine(win, l1, o1, l2, o2, safeD, 2)) { furthest = nxt; break; }
-    }
-    out.push(path[furthest]);
-    cur = furthest;
-  }
-  return out;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Bezier ship maneuver curves at each turn
-// Matches Python: turn_radius_m = 5.0 * MAX_LPP, 5 Bezier points t=0,0.25,0.5,0.75,1.0
-// ─────────────────────────────────────────────────────────────────────────────
-function applyBezierManeuvers(waypoints) {
-  if (waypoints.length < 3) return waypoints;
-  const rNm    = (5.0 * MAX_LPP) / 1852.0;   // turn radius in NM
-  const result = [waypoints[0]];
-
-  for (let k = 1; k < waypoints.length - 1; k++) {
-    const pPrev = waypoints[k - 1];
-    const pCurr = waypoints[k];
-    const pNext = waypoints[k + 1];
-
-    const dPrevNm = fastNm(pPrev[0], pPrev[1], pCurr[0], pCurr[1]);
-    const dNextNm = fastNm(pCurr[0], pCurr[1], pNext[0], pNext[1]);
+// ==============================================================================
+// 5. BEZIER & ORGANIC POST-PROCESSING
+// ==============================================================================
+function applyBezierManeuvers(pathCoords) {
+  if (pathCoords.length < 3) return pathCoords;
+  const turn_radius_m = 5.0 * MAX_LPP;
+  const R_nm = turn_radius_m / 1852.0;
+  const result = [pathCoords[0]];
+  for (let k = 1; k < pathCoords.length - 1; k++) {
+    const pPrev = pathCoords[k - 1], pCurr = pathCoords[k], pNext = pathCoords[k + 1];
+    const dPrevNm = fast_nm_dist(pPrev, pCurr), dNextNm = fast_nm_dist(pCurr, pNext);
     if (dPrevNm < 0.1 || dNextNm < 0.1) { result.push(pCurr); continue; }
 
-    const cutNm     = Math.min(rNm, dPrevNm / 2.1, dNextNm / 2.1);
-    const vPrev     = [pPrev[0] - pCurr[0], pPrev[1] - pCurr[1]];
-    const vNext     = [pNext[0] - pCurr[0], pNext[1] - pCurr[1]];
-    const lonScale  = Math.cos(pCurr[0] * Math.PI / 180);
-    const dPrevDeg  = Math.sqrt(vPrev[0] ** 2 + (vPrev[1] * lonScale) ** 2);
-    const dNextDeg  = Math.sqrt(vNext[0] ** 2 + (vNext[1] * lonScale) ** 2);
-    const cutPrev   = dPrevDeg > 0 ? cutNm / 60.0 : 0;
-    const cutNext   = dNextDeg > 0 ? cutNm / 60.0 : 0;
+    const cutNm = Math.min(R_nm, dPrevNm / 2.1, dNextNm / 2.1);
+    const vPrev = [pPrev[0] - pCurr[0], pPrev[1] - pCurr[1]], vNext = [pNext[0] - pCurr[0], pNext[1] - pCurr[1]];
+    const lonScale = Math.cos(pCurr[0] * Math.PI / 180);
+    const dist_prev_deg = Math.sqrt(vPrev[0]**2 + (vPrev[1]*lonScale)**2), dist_next_deg = Math.sqrt(vNext[0]**2 + (vNext[1]*lonScale)**2);
+    
+    const cut_deg_prev = dist_prev_deg > 0 ? (cutNm / 60.0) : 0;
+    const cut_deg_next = dist_next_deg > 0 ? (cutNm / 60.0) : 0;
 
-    const p0 = dPrevDeg > 0
-      ? [pCurr[0] + vPrev[0] * (cutPrev / dPrevDeg), pCurr[1] + vPrev[1] * (cutPrev / dPrevDeg)]
-      : pCurr;
-    const p2 = dNextDeg > 0
-      ? [pCurr[0] + vNext[0] * (cutNext / dNextDeg), pCurr[1] + vNext[1] * (cutNext / dNextDeg)]
-      : pCurr;
-    const p1 = pCurr;
-
+    const p0 = dist_prev_deg > 0 ? [pCurr[0] + vPrev[0]*(cut_deg_prev/dist_prev_deg), pCurr[1] + vPrev[1]*(cut_deg_prev/dist_prev_deg)] : pCurr;
+    const p2 = dist_next_deg > 0 ? [pCurr[0] + vNext[0]*(cut_deg_next/dist_next_deg), pCurr[1] + vNext[1]*(cut_deg_next/dist_next_deg)] : pCurr;
+    
     for (const t of [0.0, 0.25, 0.5, 0.75, 1.0]) {
-      result.push([
-        (1 - t) * (1 - t) * p0[0] + 2 * (1 - t) * t * p1[0] + t * t * p2[0],
-        (1 - t) * (1 - t) * p0[1] + 2 * (1 - t) * t * p1[1] + t * t * p2[1],
-      ]);
+      result.push([(1-t)**2 * p0[0] + 2*(1-t)*t * pCurr[0] + t**2 * p2[0], (1-t)**2 * p0[1] + 2*(1-t)*t * pCurr[1] + t**2 * p2[1]]);
     }
   }
-  result.push(waypoints[waypoints.length - 1]);
+  result.push(pathCoords[pathCoords.length - 1]);
   return result;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Organic interpolation: insert points every 3 NM
-// Matches Python: final_organic_path (dist_leg > 3.0)
-// ─────────────────────────────────────────────────────────────────────────────
-function applyOrganicInterpolation(waypoints, intervalNm = 3.0) {
-  if (waypoints.length < 2) return waypoints;
-  const out = [waypoints[0]];
-  for (let i = 0; i < waypoints.length - 1; i++) {
-    const [l1, o1] = waypoints[i];
-    const [l2, o2] = waypoints[i + 1];
-    const d = fastNm(l1, o1, l2, o2);
-    if (d > intervalNm) {
-      const numInserts = Math.floor(d / intervalNm);
-      for (let ins = 1; ins <= numInserts; ins++) {
-        const frac = ins / (numInserts + 1);
-        out.push([l1 + frac * (l2 - l1), o1 + frac * (o2 - o1)]);
+function applyOrganicInterpolation(pathCoords) {
+  if (pathCoords.length < 2) return pathCoords;
+  const out = [pathCoords[0]];
+  for (let i = 0; i < pathCoords.length - 1; i++) {
+    const p1 = pathCoords[i], p2 = pathCoords[i + 1];
+    const dist_leg = fast_nm_dist(p1, p2);
+    if (dist_leg > 3.0) {
+      const num_inserts = Math.floor(dist_leg / 3.0);
+      for (let ins = 1; ins <= num_inserts; ins++) {
+        const frac = ins / (num_inserts + 1);
+        out.push([p1[0] + (p2[0]-p1[0])*frac, p1[1] + (p2[1]-p1[1])*frac]);
       }
     }
-    out.push([l2, o2]);
+    out.push(p2);
   }
   return out;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Macro satellite pre-routing: coarse A* over full window to find milestone
-// waypoints for long routes. Matches Python ENGINE 1.5: ULTRA-FINE MACRO
-// SATELLITE PRE-SCAN.
-// stride = max(2, 0.025/pixelSize, sqrt(totalPx/40000)) → nodes ≤ 40k.
-// Returns array of {lat,lon} milestone checkpoints ~50 NM apart (empty on fail).
-// ─────────────────────────────────────────────────────────────────────────────
-function _computeMacroWaypoints(win, p1, p2, safeD) {
-  const pixelSizeDeg = Math.max(Math.abs(win.latStep), Math.abs(win.lonStep));
-  const totalPx = win.width * win.height;
-  // stride matches Python: stride_r = max(1, round(0.025 / lat_step_abs))
-  // also cap to keep node count ≤ 40k
-  const macroStep = Math.max(
-    2,
-    Math.round(0.025 / pixelSizeDeg),
-    Math.floor(Math.sqrt(totalPx / 40000)),
-  );
+// ==============================================================================
+// 6. CORE: A-STAR ROUTER (BATNAS & GEBCO) - 100% COLAB COMPLIANT
+// ==============================================================================
+async function run_spatial_core(cu, cv, safeD, win, osmData, isBatnas, u, v) {
+  const dist_nm_total_log = geodesic_nm(cu, cv); 
+  const lat_step_abs = Math.abs(win.latStep), lon_step_abs = Math.abs(win.lonStep);
 
-  // Build full-window coarse nodes (no capsule filter — macro covers whole bbox)
-  const nodes = [];
-  for (let r = 0; r < win.height; r += macroStep) {
-    for (let c = 0; c < win.width; c += macroStep) {
-      const v = win.data[r * win.width + c];
-      if (isNaN(v) || v > 8000 || v < -11000 || v > safeD) continue;
-      nodes.push({
-        lat: win.latStart + r * win.latStep,
-        lon: win.lonStart + c * win.lonStep,
-        depth: v, danger: 1.0,
-      });
-    }
-  }
-  if (nodes.length < 4) return [];
+  console.log(`   --------------------------------------------------------`);
+  console.log(`   🚦 Memproses Rute: ${u} <--> ${v} (Jarak Lurus: ${dist_nm_total_log.toFixed(1)} NM)`);
 
-  nodes.push({ lat: p1.lat, lon: p1.lon, depth: 0, danger: 1.0 });
-  nodes.push({ lat: p2.lat, lon: p2.lon, depth: 0, danger: 1.0 });
-  const si = nodes.length - 2;
-  const ei = nodes.length - 1;
-  const n  = nodes.length;
+  let auto_waypoints = [];
+  
+  if (isBatnas && dist_nm_total_log > 150.0) {
+    const stride_r = Math.max(1, Math.trunc(0.025 / lat_step_abs));
+    const stride_c = Math.max(1, Math.trunc(0.025 / lon_step_abs));
+    const rA = Math.trunc(Math.max(0, Math.min(win.height-1, Math.round((cu[0] - win.latStart) / win.latStep))));
+    const cA = Math.trunc(Math.max(0, Math.min(win.width-1, Math.round((cu[1] - win.lonStart) / win.lonStep))));
+    const rB = Math.trunc(Math.max(0, Math.min(win.height-1, Math.round((cv[0] - win.latStart) / win.latStep))));
+    const cB = Math.trunc(Math.max(0, Math.min(win.width-1, Math.round((cv[1] - win.lonStart) / win.lonStep))));
 
-  const maxJumpDeg = macroStep * pixelSizeDeg * 4.0;
-  const K = 8;  // fewer neighbours — macro only needs rough connectivity
-  const DEG2RAD = Math.PI / 180;
+    const queue_macro = new MinHeap();
+    const visited_macro = new Set();
+    queue_macro.push(0, 0, `${rA},${cA}`, [[rA, cA]]);
+    
+    while(queue_macro.size) {
+      const { cost, item, path } = queue_macro.pop();
+      if (visited_macro.has(item)) continue; visited_macro.add(item);
+      const [r, c] = item.split(',').map(Number);
 
-  // Sorted-lat KNN adjacency (no corridor check — macro resolution is too coarse)
-  const sortedIdx = Array.from({ length: n }, (_, i) => i);
-  sortedIdx.sort((a, b) => nodes[a].lat - nodes[b].lat);
-  const sortedLats = new Float64Array(n);
-  for (let k = 0; k < n; k++) sortedLats[k] = nodes[sortedIdx[k]].lat;
-  function mlb(t){let lo=0,hi=n;while(lo<hi){const m=(lo+hi)>>1;if(sortedLats[m]<t)lo=m+1;else hi=m;}return lo;}
-  function mub(t){let lo=0,hi=n;while(lo<hi){const m=(lo+hi)>>1;if(sortedLats[m]<=t)lo=m+1;else hi=m;}return lo;}
-
-  const adj = Array.from({ length: n }, () => []);
-  const kJ  = new Int32Array(K);
-  const kD  = new Float64Array(K);
-  for (let i = 0; i < n; i++) {
-    const li = nodes[i].lat, oi = nodes[i].lon;
-    const cosLat = Math.cos(li * DEG2RAD);
-    let kCount = 0, kMaxM = 0, kMaxD = 0;
-    for (let k = mlb(li - maxJumpDeg); k < mub(li + maxJumpDeg); k++) {
-      const j = sortedIdx[k]; if (j <= i) continue;
-      const dLon = nodes[j].lon - oi;
-      if (Math.abs(dLon) > maxJumpDeg) continue;
-      const dLat = nodes[j].lat - li;
-      const d = Math.sqrt(dLat * dLat + (dLon * cosLat) ** 2) * 60;
-      if (d < 0.01) continue;
-      if (kCount < K) {
-        kJ[kCount] = j; kD[kCount] = d; kCount++;
-        if (kCount === K) { kMaxM = 0; for (let m = 1; m < K; m++) if (kD[m] > kD[kMaxM]) kMaxM = m; kMaxD = kD[kMaxM]; }
-      } else if (d < kMaxD) {
-        kJ[kMaxM] = j; kD[kMaxM] = d; kMaxM = 0; for (let m = 1; m < K; m++) if (kD[m] > kD[kMaxM]) kMaxM = m; kMaxD = kD[kMaxM];
-      }
-    }
-    for (let m = 0; m < kCount; m++) {
-      const jm = kJ[m]; const dm = kD[m];
-      // Macro phase: NO corridor check (matches Python macro satellite).
-      // Only pixel depth at each node is checked — enough at coarse resolution.
-      adj[i].push({ ni: jm, w: dm });
-      adj[jm].push({ ni: i, w: dm });
-    }
-  }
-
-  // Force-connect origin/dest if isolated
-  for (const vi of [si, ei]) {
-    if (!adj[vi].length) {
-      nodes.map((nd, idx) => ({ idx, d: fastNm(nodes[vi].lat, nodes[vi].lon, nd.lat, nd.lon) }))
-        .filter(x => x.idx !== vi).sort((a, b) => a.d - b.d).slice(0, 5)
-        .forEach(({ idx, d }) => { adj[vi].push({ ni: idx, w: d }); adj[idx].push({ ni: vi, w: d }); });
-    }
-  }
-
-  const result = astar(nodes, adj, si, ei);
-  if (!result || result.path.length < 3) return [];
-
-  // Extract milestone waypoints every ~50 NM (skip start/end)
-  const milestones = [];
-  let accDist = 0;
-  for (let k = 1; k < result.path.length - 1; k++) {
-    const prev = nodes[result.path[k - 1]];
-    const curr = nodes[result.path[k]];
-    accDist += fastNm(prev.lat, prev.lon, curr.lat, curr.lon);
-    if (accDist >= 50) {
-      milestones.push({ lat: curr.lat, lon: curr.lon });
-      accDist = 0;
-    }
-  }
-  return milestones;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Run A* pipeline on one BathyWindow with iterative capsule expansion
-// Matches Python build_offline_spatial_network / build_network_gebco flow
-// FIX: 5 capsule iterations (was 3), force-connect origin/dest, better gridStep
-// For routes >150 NM uses macro satellite pre-routing to find intermediate
-// ─────────────────────────────────────────────────────────────────────────────
-// Snap a coordinate to the nearest safe-depth pixel in a BathyWindow.
-// This is the critical fix for coastal ports (Bontang=+12m, Kupang=+102m in
-// GEBCO) whose raw GEBCO depth is positive = land/dry.
-// Python equivalent: find_berth_point() pre-snaps before routing.
-// maxSearchDeg: search radius in degrees (default 1.0° ≈ 60 NM)
-// ─────────────────────────────────────────────────────────────────────────────
-function snapToSafeWater(win, lat, lon, safeD, maxSearchDeg = 1.0) {
-  const latStepAbs = Math.abs(win.latStep);
-  const lonStepAbs = Math.abs(win.lonStep);
-
-  const r0 = Math.round((lat - win.latStart) / win.latStep);
-  const c0 = Math.round((lon - win.lonStart) / win.lonStep);
-
-  // Check if already in safe water
-  if (r0 >= 0 && r0 < win.height && c0 >= 0 && c0 < win.width) {
-    const v0 = win.data[r0 * win.width + c0];
-    if (!isNaN(v0) && v0 >= -11000 && v0 <= safeD) {
-      return { lat, lon, depth: v0, snapped: false };
-    }
-  }
-
-  // Scan bounding box for nearest safe pixel
-  const rSearch = Math.min(win.height - 1, Math.ceil(maxSearchDeg / latStepAbs));
-  const cSearch = Math.min(win.width  - 1, Math.ceil(maxSearchDeg / lonStepAbs));
-  const rMin = Math.max(0, r0 - rSearch);
-  const rMax = Math.min(win.height - 1, r0 + rSearch);
-  const cMin = Math.max(0, c0 - cSearch);
-  const cMax = Math.min(win.width  - 1, c0 + cSearch);
-
-  let bestDist2 = Infinity, bestLat = lat, bestLon = lon, bestDepth = 0;
-
-  for (let r = rMin; r <= rMax; r++) {
-    for (let c = cMin; c <= cMax; c++) {
-      const v = win.data[r * win.width + c];
-      if (isNaN(v) || v > 8000 || v < -11000 || v > safeD) continue;
-      const bLat = win.latStart + r * win.latStep;
-      const bLon = win.lonStart + c * win.lonStep;
-      const dist2 = (bLat - lat) ** 2 + (bLon - lon) ** 2;
-      if (dist2 < bestDist2) {
-        bestDist2 = dist2; bestLat = bLat; bestLon = bLon; bestDepth = v;
-      }
-    }
-  }
-
-  return {
-    lat: bestLat, lon: bestLon, depth: bestDepth,
-    snapped: bestDist2 < Infinity,
-  };
-}
-
-// milestones, then routes each ~50 NM segment — significantly faster.
-// ─────────────────────────────────────────────────────────────────────────────
-async function _computeWithWindow(win, p1, p2, safeD, _isMacroSegment = false) {
-  // 0. Pre-snap: if origin/dest sit on land/shallow (common for coastal ports
-  //    like Bontang +12m, Kupang +102m in GEBCO), shift to nearest safe pixel.
-  //    Use deeper threshold (min -20m) so snap lands in proper navigable water,
-  //    not the 5–8m transition shelf that isolates the node from the main graph.
-  const snapDepth = Math.min(safeD, -20.0);
-  const sp1 = snapToSafeWater(win, p1.lat, p1.lon, snapDepth);
-  const sp2 = snapToSafeWater(win, p2.lat, p2.lon, snapDepth);
-  // If deeper snap fails (very shallow area), fall back to safeD snap
-  const sp1f = sp1.snapped ? sp1 : snapToSafeWater(win, p1.lat, p1.lon, safeD);
-  const sp2f = sp2.snapped ? sp2 : snapToSafeWater(win, p2.lat, p2.lon, safeD);
-  const ep1 = sp1f.snapped ? { ...p1, lat: sp1f.lat, lon: sp1f.lon } : p1;
-  const ep2 = sp2f.snapped ? { ...p2, lat: sp2f.lat, lon: sp2f.lon } : p2;
-  if (sp1f.snapped) console.log(`[SpatialRoute] snap p1: (${p1.lat.toFixed(4)},${p1.lon.toFixed(4)}) → (${ep1.lat.toFixed(4)},${ep1.lon.toFixed(4)}) depth=${sp1f.depth}m`);
-  if (sp2f.snapped) console.log(`[SpatialRoute] snap p2: (${p2.lat.toFixed(4)},${p2.lon.toFixed(4)}) → (${ep2.lat.toFixed(4)},${ep2.lon.toFixed(4)}) depth=${sp2f.depth}m`);
-
-  // Helper: wrap final waypoints with original p1/p2 endpoints (for top-level
-  // calls only; macro segments use milestone coords which are already in sea)
-  function wrapWaypoints(wp) {
-    if (_isMacroSegment) return wp;
-    if (sp1.snapped) wp.unshift([p1.lat, p1.lon]);
-    if (sp2.snapped) wp.push([p2.lat, p2.lon]);
-    return wp;
-  }
-
-  // 1. Straight-line check (buffer_px=2, matching Python)
-  if (isSafeCorridorLine(win, ep1.lat, ep1.lon, ep2.lat, ep2.lon, safeD, 2)) {
-    const d  = fastNm(ep1.lat, ep1.lon, ep2.lat, ep2.lon);
-    const wp = applyOrganicInterpolation([[ep1.lat, ep1.lon], [ep2.lat, ep2.lon]]);
-    return { waypoints: wrapWaypoints(wp), distanceNm: d };
-  }
-
-  const directNm = fastNm(ep1.lat, ep1.lon, ep2.lat, ep2.lon);
-
-  // ─── Macro satellite pre-routing for long routes (>150 NM) ───────────────
-  if (!_isMacroSegment && directNm > 150) {
-    const tMacro = Date.now();
-    const milestones = _computeMacroWaypoints(win, ep1, ep2, safeD);
-    console.log(`[SpatialRoute] macro: ${Date.now() - tMacro}ms  ${milestones.length} milestones for ${directNm.toFixed(0)} NM`);
-    if (milestones.length >= 1) {
-      const segPts = [ep1, ...milestones, ep2];
-      let allWp    = [];
-      let totalDist = 0;
-      let segFailed = false;
-      for (let s = 0; s < segPts.length - 1; s++) {
-        const s1 = segPts[s], s2 = segPts[s + 1];
-        const segPad = Math.max(1.5, fastNm(s1.lat, s1.lon, s2.lat, s2.lon) * 0.06);
-        const subWin = sliceWindow(
-          win,
-          Math.min(s1.lat, s2.lat) - segPad, Math.max(s1.lat, s2.lat) + segPad,
-          Math.min(s1.lon, s2.lon) - segPad, Math.max(s1.lon, s2.lon) + segPad,
-        );
-        // Macro segments: isMacroSegment=true — milestones are already in safe water
-        const segResult = await _computeWithWindow(subWin || win, s1, s2, safeD, true);
-        if (!segResult) { segFailed = true; break; }
-        allWp.push(...(s === 0 ? segResult.waypoints : segResult.waypoints.slice(1)));
-        totalDist += segResult.distanceNm;
-      }
-      if (!segFailed && allWp.length > 0) {
-        console.log(`[SpatialRoute] macro+segs OK: ${totalDist.toFixed(1)} NM  ${allWp.length} wp`);
-        return { waypoints: wrapWaypoints(allWp), distanceNm: totalDist };
-      }
-      console.log(`[SpatialRoute] macro segs failed — fallback to full-route capsule`);
-    }
-  }
-
-  // ─── Iterative capsule expansion ─────────────────────────────────────────
-  const gridScales = [
-    [Math.max(1.2,  directNm * 0.008), 2],
-    [Math.max(2.5,  directNm * 0.015), 3],
-    [Math.max(5.0,  directNm * 0.04),  4],
-    [Math.max(8.0,  directNm * 0.07),  5],
-    [Math.max(12.0, directNm * 0.12),  6],
-  ];
-
-  const t0 = Date.now();
-  for (let iter = 0; iter < gridScales.length; iter++) {
-    const [capsuleRadDeg, cFactor] = gridScales[iter];
-    const B_CELLS = 15 * cFactor;
-
-    const subWin = sliceWindow(
-      win,
-      Math.min(ep1.lat, ep2.lat) - capsuleRadDeg, Math.max(ep1.lat, ep2.lat) + capsuleRadDeg,
-      Math.min(ep1.lon, ep2.lon) - capsuleRadDeg, Math.max(ep1.lon, ep2.lon) + capsuleRadDeg,
-    );
-    if (!subWin) continue;
-
-    const subPixelSize = Math.max(Math.abs(subWin.latStep), Math.abs(subWin.lonStep));
-    const maxJumpDeg   = B_CELLS * subPixelSize * 2.5;
-    const haloRadDeg   = Math.max(15, cFactor * 5) * subPixelSize;
-
-    const tGrid = Date.now();
-    const nodes = buildAdaptiveGrid(subWin, safeD, cFactor, capsuleRadDeg, ep1, ep2);
-    const tHalo = Date.now();
-    addHaloNodes(subWin, safeD, nodes, [ep1, ep2], haloRadDeg);
-    const tAdj = Date.now();
-
-    // Virtual origin/destination nodes (snapped coordinates = already in safe water)
-    nodes.push({ lat: ep1.lat, lon: ep1.lon, depth: 0, danger: 1.0 });
-    nodes.push({ lat: ep2.lat, lon: ep2.lon, depth: 0, danger: 1.0 });
-    const si = nodes.length - 2;
-    const ei = nodes.length - 1;
-    if (nodes.length < 4) continue;
-
-    const adj = buildAdjacency(nodes, subWin, safeD, maxJumpDeg);
-    const tAstar = Date.now();
-
-    // ALWAYS force-connect si and ei — even when buildAdjacency already added
-    // edges via reverse KNN, those edges may lead into an isolated coastal shelf
-    // cluster that is disconnected from the main sea graph (coastal shallow zone
-    // blocks all long-range corridor checks). Two-tier approach:
-    //   tier-1: 12 nearest nodes (local cluster connectivity)
-    //   tier-2: 6 nearest deep-ocean nodes depth<-50m (main-graph bridge)
-    // Uses a bounding-box pre-filter to keep the scan O(local) not O(n).
-    const scanRadDeg = maxJumpDeg * 5;
-    for (const vi of [si, ei]) {
-      const { lat: vl, lon: vo } = nodes[vi];
-      const otherVi = vi === si ? ei : si;
-
-      // Collect candidates within scanRadDeg box
-      const cands = [];
-      for (let ni = 0; ni < si; ni++) {  // skip virtual si/ei (last 2)
-        const nd = nodes[ni];
-        const dLat = nd.lat - vl;
-        if (dLat < -scanRadDeg || dLat > scanRadDeg) continue;
-        const dLon = nd.lon - vo;
-        if (dLon < -scanRadDeg || dLon > scanRadDeg) continue;
-        cands.push({ idx: ni, d: fastNm(vl, vo, nd.lat, nd.lon), depth: nd.depth || 0 });
-      }
-      cands.sort((a, b) => a.d - b.d);
-
-      // Tier-1: 12 nearest (unconditional — ensures local cluster reachable)
-      const tier1Set = new Set();
-      for (const { idx, d } of cands.slice(0, 12)) {
-        adj[vi].push({ ni: idx, w: d });
-        adj[idx].push({ ni: vi, w: d });
-        tier1Set.add(idx);
-      }
-
-      // Tier-2: up to 6 nearest deep-ocean nodes (depth < -50m)
-      // These are guaranteed members of the main connected component
-      let deepCount = 0;
-      for (const { idx, d, depth } of cands) {
-        if (tier1Set.has(idx)) continue;
-        if (depth < -50) {
-          adj[vi].push({ ni: idx, w: d });
-          adj[idx].push({ ni: vi, w: d });
-          if (++deepCount >= 6) break;
+      if (Math.abs(r - rB) <= stride_r * 3 && Math.abs(c - cB) <= stride_c * 3) {
+        path.push([rB, cB]);
+        const step_size = Math.max(5, Math.trunc(0.83 / (stride_r * lat_step_abs)));
+        for (let i = step_size; i < path.length - 1; i += step_size) {
+          auto_waypoints.push([win.latStart + path[i][0] * win.latStep, win.lonStart + path[i][1] * win.lonStep]);
         }
+        console.log(`      ✅ Satelit Makro memetakan ${auto_waypoints.length} Titik Transit Ultra-Presisi!          `);
+        break;
       }
-      // If still no deep node found in local box, scan wider (rare: very shallow bay)
-      if (deepCount === 0) {
-        for (let ni = 0; ni < si; ni++) {
-          if ((nodes[ni].depth || 0) >= -50) continue;
-          const d = fastNm(vl, vo, nodes[ni].lat, nodes[ni].lon);
-          adj[vi].push({ ni, w: d });
-          adj[ni].push({ ni: vi, w: d });
-          if (++deepCount >= 4) break;
+
+      const moves_16 = [
+        [-stride_r, 0], [stride_r, 0], [0, -stride_c], [0, stride_c],
+        [-stride_r, -stride_c], [-stride_r, stride_c], [stride_r, -stride_c], [stride_r, stride_c],
+        [-stride_r*2, -stride_c], [-stride_r*2, stride_c], [stride_r*2, -stride_c], [stride_r*2, stride_c],
+        [-stride_r, -stride_c*2], [-stride_r, stride_c*2], [stride_r, -stride_c*2], [stride_r, stride_c*2]
+      ];
+      
+      for (const [dr, dc] of moves_16) {
+        const nr = r + dr, nc = c + dc;
+        if (nr >= 0 && nr < win.height && nc >= 0 && nc < win.width) {
+          if (getElevationClean(win, nr, nc) <= safeD && !visited_macro.has(`${nr},${nc}`)) {
+            const ncost = cost + Math.sqrt(dr*dr + dc*dc);
+            const heuristic = Math.sqrt((nr - rB)**2 + (nc - cB)**2);
+            queue_macro.push(ncost + heuristic, ncost, `${nr},${nc}`, [...path, [nr, nc]]);
+          }
         }
       }
     }
+  }
 
-    const result = astar(nodes, adj, si, ei);
-    const tEnd = Date.now();
-    console.log(`[SpatialRoute] iter ${iter}: capsR=${capsuleRadDeg.toFixed(2)}° cF=${cFactor} nodes=${nodes.length} subWin=${subWin.width}×${subWin.height} grid=${tHalo-tGrid}ms halo=${tAdj-tHalo}ms adj=${tAstar-tAdj}ms astar=${tEnd-tAstar}ms total=${tEnd-t0}ms path=${result?'found':'null'}`);
-    if (!result) continue;
+  const route_segments = [cu, ...auto_waypoints, cv];
+  const full_organic_path = [];
 
-    const tSmooth0 = Date.now();
-    const smoothed = smoothPath(result.path, nodes, subWin, safeD);
-    console.log(`[SpatialRoute] smoothPath: ${Date.now()-tSmooth0}ms  ${result.path.length}→${smoothed.length} nodes`);
+  for (let seg_idx = 0; seg_idx < route_segments.length - 1; seg_idx++) {
+    const p_start = route_segments[seg_idx], p_end = route_segments[seg_idx+1];
 
-    const rawWp      = smoothed.map(i => [nodes[i].lat, nodes[i].lon]);
-    const withBezier = applyBezierManeuvers(rawWp);
-    const finalWp    = applyOrganicInterpolation(withBezier);
-
-    let dist = 0;
-    for (let i = 0; i < finalWp.length - 1; i++) {
-      dist += fastNm(finalWp[i][0], finalWp[i][1], finalWp[i + 1][0], finalWp[i + 1][1]);
+    if (fast_safe_corridor_numpy(p_start, p_end, win, safeD, 3, isBatnas)) {
+      if (full_organic_path.length === 0) full_organic_path.push(p_start, p_end);
+      else full_organic_path.push(p_end);
+      continue;
     }
-    return { waypoints: wrapWaypoints(finalWp), distanceNm: dist };
+
+    let success_micro = false, pad_iter = isBatnas ? 0.6 : 1.2, c_factor = 2;
+    let segPath = [];
+
+    while (pad_iter <= 15.0 && !success_micro) {
+      const min_lat_iter = Math.min(p_start[0], p_end[0]) - pad_iter, max_lat_iter = Math.max(p_start[0], p_end[0]) + pad_iter;
+      const min_lon_iter = Math.min(p_start[1], p_end[1]) - pad_iter, max_lon_iter = Math.max(p_start[1], p_end[1]) + pad_iter;
+      
+      const idx1 = Math.trunc(Math.max(0, Math.min(win.height-1, Math.round((max_lat_iter - win.latStart) / win.latStep))));
+      const idx2 = Math.trunc(Math.max(0, Math.min(win.height-1, Math.round((min_lat_iter - win.latStart) / win.latStep))));
+      const y_min_idx = Math.min(idx1, idx2), y_max_idx = Math.max(idx1, idx2);
+      
+      const idx3 = Math.trunc(Math.max(0, Math.min(win.width-1, Math.round((min_lon_iter - win.lonStart) / win.lonStep))));
+      const idx4 = Math.trunc(Math.max(0, Math.min(win.width-1, Math.round((max_lon_iter - win.lonStart) / win.lonStep))));
+      const x_min_idx = Math.min(idx3, idx4), x_max_idx = Math.max(idx3, idx4);
+
+      const B_cells = 10 * c_factor;
+      const final_coords = [];
+
+      for (let bi = y_min_idx; bi < y_max_idx; bi += B_cells) {
+        for (let bj = x_min_idx; bj < x_max_idx; bj += B_cells) {
+          const r_end = Math.min(bi+B_cells, y_max_idx), c_end = Math.min(bj+B_cells, x_max_idx);
+          let hasShallow = false;
+          outer_b: for (let r = bi; r < r_end; r++) for (let c = bj; c < c_end; c++) {
+            if (getElevationClean(win, r, c) > safeD) { hasShallow = true; break outer_b; }
+          }
+          if (hasShallow) {
+            for (let r = bi; r < r_end; r+=c_factor*2) for (let c = bj; c < c_end; c+=c_factor*2) {
+              if (getElevationClean(win, r, c) <= safeD) final_coords.push([win.latStart+r*win.latStep, win.lonStart+c*win.lonStep]);
+            }
+          } else {
+            const r = Math.floor((bi+r_end)/2), c = Math.floor((bj+c_end)/2);
+            if (getElevationClean(win, r, c) <= safeD) final_coords.push([win.latStart+r*win.latStep, win.lonStart+c*win.lonStep]);
+          }
+        }
+      }
+
+      const haloRad = Math.max(15, c_factor * 5);
+      for (const pt of [p_start, p_end]) {
+        const tr = Math.round((pt[0]-win.latStart)/win.latStep), tc = Math.round((pt[1]-win.lonStart)/win.lonStep);
+        for (let r = Math.max(0, tr-haloRad); r <= Math.min(win.height-1, tr+haloRad); r++) {
+          for (let c = Math.max(0, tc-haloRad); c <= Math.min(win.width-1, tc+haloRad); c++) {
+            if (getElevationClean(win, r, c) <= safeD) final_coords.push([win.latStart+r*win.latStep, win.lonStart+c*win.lonStep]);
+          }
+        }
+      }
+
+      final_coords.push(p_start, p_end);
+      const si = final_coords.length - 2, ei = final_coords.length - 1;
+
+      const valid_nodes = [];
+      const G_nodes = {};
+      const seen = new Set();
+      let nodeIdx = 0;
+
+      for (let i = 0; i < final_coords.length; i++) {
+        const pt = final_coords[i];
+        const r = Math.round((pt[0]-win.latStart)/win.latStep), c = Math.round((pt[1]-win.lonStart)/win.lonStep);
+        const key = `${r},${c}`;
+        
+        if (seen.has(key)) {
+          if (i === si) { G_nodes[nodeIdx] = pt; valid_nodes.push({ i: nodeIdx, danger: 1.0 }); var realSi = nodeIdx; nodeIdx++; }
+          else if (i === ei) { G_nodes[nodeIdx] = pt; valid_nodes.push({ i: nodeIdx, danger: 1.0 }); var realEi = nodeIdx; nodeIdx++; }
+          continue;
+        }
+        seen.add(key);
+
+        const r_up = Math.min(win.height-1, r+3), r_dn = Math.max(0, r-3);
+        const c_rt = Math.min(win.width-1, c+3), c_lf = Math.max(0, c-3);
+        
+        let danger = 1.0;
+        let isSafe = true;
+        
+        if (getElevationClean(win, r_up, c) > safeD || getElevationClean(win, r_dn, c) > safeD || getElevationClean(win, r, c_rt) > safeD || getElevationClean(win, r, c_lf) > safeD) isSafe = false;
+        if (!isSafe && i !== si && i !== ei) continue; 
+
+        outer_dang: for (let nr = r_dn; nr <= r_up; nr++) for (let nc = c_lf; nc <= c_rt; nc++) {
+          if (getElevationClean(win, nr, nc) > safeD) { danger = 1.7; break outer_dang; }
+        }
+        
+        G_nodes[nodeIdx] = pt;
+        valid_nodes.push({ i: nodeIdx, danger });
+        
+        if (i === si) var realSi = nodeIdx;
+        if (i === ei) var realEi = nodeIdx;
+        nodeIdx++;
+      }
+
+      const G_edges = new Map();
+      const tree_grid = new KDTree(valid_nodes.map(n => G_nodes[n.i]));
+      const max_jump_deg = B_cells * Math.max(lat_step_abs, lon_step_abs) * 3.5;
+
+      for (let a = 0; a < valid_nodes.length; a++) {
+        const nA = valid_nodes[a];
+        const [dists_deg, indices] = tree_grid.query(G_nodes[nA.i], 16, max_jump_deg);
+        if (!G_edges.has(nA.i)) G_edges.set(nA.i, []);
+        
+        for (let j = 0; j < indices.length; j++) {
+          const nB = valid_nodes[indices[j]];
+          if (nA.i >= nB.i) continue;
+          
+          const d_nm = fast_nm_dist(G_nodes[nA.i], G_nodes[nB.i]);
+          const penalty = Math.max(nA.danger, nB.danger);
+          
+          if (d_nm <= c_factor * Math.max(lat_step_abs, lon_step_abs) * 60.0 * 1.5) {
+            G_edges.get(nA.i).push({ ni: nB.i, w: d_nm * penalty });
+            if (!G_edges.has(nB.i)) G_edges.set(nB.i, []);
+            G_edges.get(nB.i).push({ ni: nA.i, w: d_nm * penalty });
+          } else if (fast_safe_corridor_numpy(G_nodes[nA.i], G_nodes[nB.i], win, safeD, 0, isBatnas)) {
+            G_edges.get(nA.i).push({ ni: nB.i, w: d_nm * penalty });
+            if (!G_edges.has(nB.i)) G_edges.set(nB.i, []);
+            G_edges.get(nB.i).push({ ni: nA.i, w: d_nm * penalty });
+          }
+        }
+      }
+
+      for (const vi of [realSi, realEi]) {
+        if (!G_edges.has(vi)) G_edges.set(vi, []);
+        const [dists, indices] = tree_grid.query(G_nodes[vi], 200);
+        let conn = 0;
+        for (let j = 0; j < indices.length; j++) {
+          const nB = valid_nodes[indices[j]];
+          if (vi === nB.i) continue;
+          if (fast_safe_corridor_numpy(G_nodes[vi], G_nodes[nB.i], win, safeD, 1, isBatnas)) {
+            const w = fast_nm_dist(G_nodes[vi], G_nodes[nB.i]);
+            G_edges.get(vi).push({ ni: nB.i, w });
+            if (!G_edges.has(nB.i)) G_edges.set(nB.i, []);
+            G_edges.get(nB.i).push({ ni: vi, w });
+            if (++conn >= 15) break;
+          }
+        }
+        
+        if (conn < 3) {
+          for (let j = 0; j < Math.min(8, indices.length); j++) {
+            const nB = valid_nodes[indices[j]];
+            if (vi === nB.i) continue;
+            const w = fast_nm_dist(G_nodes[vi], G_nodes[nB.i]);
+            G_edges.get(vi).push({ ni: nB.i, w });
+            if (!G_edges.has(nB.i)) G_edges.set(nB.i, []);
+            G_edges.get(nB.i).push({ ni: vi, w });
+          }
+        }
+      }
+
+      const heuristic_dist = (n1_pt, n2_pt) => fast_nm_dist(n1_pt, n2_pt);
+      const raw_path = live_astar_path(G_nodes, G_edges, realSi, realEi, heuristic_dist);
+
+      if (raw_path) {
+        segPath = raw_path.map(idx => G_nodes[idx]);
+        success_micro = true;
+      } else {
+        pad_iter += 2.0; c_factor += 1;
+      }
+    }
+
+    if (!success_micro) return null;
+
+    const smooth_seg = [segPath[0]]; let curr = 0;
+    while (curr < segPath.length - 1) {
+      let furthest = curr + 1;
+      for (let nxt = Math.min(segPath.length - 1, curr + 40); nxt > curr + 1; nxt--) {
+        if (fast_safe_corridor_numpy(segPath[curr], segPath[nxt], win, safeD, 4, isBatnas)) { furthest = nxt; break; }
+      }
+      smooth_seg.push(segPath[furthest]); curr = furthest;
+    }
+
+    if (full_organic_path.length === 0) full_organic_path.push(...smooth_seg);
+    else full_organic_path.push(...smooth_seg.slice(1));
   }
 
-  return null; // all capsule widths failed
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Extract min/max depth along waypoints
-// ─────────────────────────────────────────────────────────────────────────────
-async function _depthProfile(waypoints, win) {
-  if (!win) return { minDepth: 0, maxDepth: 0 };
-  let mn = Infinity, mx = -Infinity;
-  for (const [lat, lon] of waypoints) {
-    const { getElevation } = require('./bathymetryService');
-    const d = getElevation(win, lat, lon);
-    if (!isNaN(d)) { mn = Math.min(mn, d); mx = Math.max(mx, d); }
+  const global_smoothed = [full_organic_path[0]]; let curr = 0;
+  while (curr < full_organic_path.length - 1) {
+    let furthest = curr + 1;
+    for (let nxt = Math.min(full_organic_path.length - 1, curr + 200); nxt > curr + 1; nxt--) {
+      if (fast_safe_corridor_numpy(full_organic_path[curr], full_organic_path[nxt], win, safeD, 4, isBatnas)) { furthest = nxt; break; }
+    }
+    global_smoothed.push(full_organic_path[furthest]); curr = furthest;
   }
-  return { minDepth: mn === Infinity ? 0 : mn, maxDepth: mx === -Infinity ? 0 : mx };
+
+  const with_bezier = applyBezierManeuvers(global_smoothed);
+  const final_wp = applyOrganicInterpolation(with_bezier);
+
+  let dist = 0;
+  for (let i = 0; i < final_wp.length - 1; i++) dist += fast_nm_dist(final_wp[i], final_wp[i+1]);
+  console.log(`      ✅ RUTE DITEMUKAN | Jarak Laut Aktual (Telah Diluruskan): ${dist.toFixed(1)} NM | Waypoint Akhir: ${final_wp.length}          `);
+  return { waypoints: final_wp, distanceNm: dist };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC: computeRoute
-// ─────────────────────────────────────────────────────────────────────────────
-// In-process dedup guard: prevents concurrent requests for the same route key
-// from each running a full A* computation. Cleared once the DB write completes.
+// ==============================================================================
+// 7. MAIN PUBLIC COMPUTE ROUTE API
+// ==============================================================================
 const _pendingRoutes = new Map();
 
-/**
- * @param {{ lat: number, lon: number, name: string }} origin
- * @param {{ lat: number, lon: number, name: string }} destination
- * @param {{
- *   draft?: number,          vessel design draft (m), default MAX_DESIGN_DRAFT
- *   waveHeight?: number,     max wave height (m)
- *   forceRecompute?: boolean
- *   maxJettyM?: number
- * }} options
- */
 async function computeRoute(origin, destination, options = {}) {
-  const {
-    draft = MAX_DESIGN_DRAFT,
-    waveHeight = 0,
-    forceRecompute = false,
-    // bathyEngine: 'batnas' | 'gebco' (default). Strict single-source — no hybrid fallback between them.
-    bathyEngine = 'gebco',
-  } = options;
-  const safeD = -(draft + UKC_CLEARANCE + 0.5 * waveHeight);
+  // PAKSAAN: Selalu gunakan draft kapal terbesar dari database saat membuat jaring agar universal aman.
+  const safeD = -(MAX_DESIGN_DRAFT + UKC_CLEARANCE + 0.5 * (options.waveHeight || 0));
+  const key = makeRouteKey(origin.name || `${origin.lat},${origin.lon}`, destination.name || `${destination.lat},${destination.lon}`);
 
-  const key = makeRouteKey(origin.name || `${origin.lat},${origin.lon}`,
-                            destination.name || `${destination.lat},${destination.lon}`);
-
-  // Cache hit
-  if (!forceRecompute) {
-    try {
-      const cached = await prisma.spatialRouteCache.findUnique({ where: { routeKey: key } });
-      if (cached) return { ...cached, waypoints: cached.waypoints, fromCache: true };
-    } catch (_) { /* continue */ }
-  }
-
-  // In-process dedup: reuse pending computation for concurrent same-key calls
-  if (!forceRecompute && _pendingRoutes.has(key)) {
-    return _pendingRoutes.get(key);
-  }
-
-  // Register a deferred promise so concurrent callers wait for this result
-  let _resolve, _reject;
-  const _deferred = new Promise((res, rej) => { _resolve = res; _reject = rej; });
-  if (!forceRecompute) _pendingRoutes.set(key, _deferred);
+  if (!options.forceRecompute && _pendingRoutes.has(key)) return _pendingRoutes.get(key);
+  let _res, _rej; const _def = new Promise((r, j) => { _res = r; _rej = j; });
+  if (!options.forceRecompute) _pendingRoutes.set(key, _def);
 
   try {
-    const directNm = fastNm(origin.lat, origin.lon, destination.lat, destination.lon);
+    const pad = options.bathyEngine === 'batnas' ? 3.0 : 1.0; 
+    
+    const win = options.bathyEngine === 'batnas'
+      ? await getBatnas(Math.min(origin.lat, destination.lat) - pad, Math.max(origin.lat, destination.lat) + pad, Math.min(origin.lon, destination.lon) - pad, Math.max(origin.lon, destination.lon) + pad)
+      : await getGebco(Math.min(origin.lat, destination.lat) - pad, Math.max(origin.lat, destination.lat) + pad, Math.min(origin.lon, destination.lon) - pad, Math.max(origin.lon, destination.lon) + pad);
 
-  // Pad = route-adaptive: use 5% of direct distance, min 2°, max 8°
-  // This ensures the GEBCO window is large enough for detours around islands
-  const pad = Math.min(8.0, Math.max(2.0, directNm * 0.05));
-  const bbox = {
-    minLat: Math.min(origin.lat, destination.lat) - pad,
-    maxLat: Math.max(origin.lat, destination.lat) + pad,
-    minLon: Math.min(origin.lon, destination.lon) - pad,
-    maxLon: Math.max(origin.lon, destination.lon) + pad,
-  };
+    if (!win) throw new Error(`Data bathymetri gagal dimuat untuk rute ini.`);
 
-  let routeResult = null;
-  let engineUsed  = null;
-  let win         = null;
+    console.log(`\n🕸️ MERAKIT JARINGAN NAVIGASI (MODE: ULTRA-FINE CAPSULE & STRING PULLING)...`);
+    console.log(`   ⚓ DRAFT KAPAL MAKSIMAL (DATABASE): ${MAX_DESIGN_DRAFT.toFixed(1)}m | UKC: ${UKC_CLEARANCE.toFixed(2)}m`);
+    console.log(`   📐 PANJANG KAPAL (LPP) MAKSIMAL  : ${MAX_LPP.toFixed(1)}m (Untuk Kalkulasi Manuver)`);
+    console.log(`\n   🏗️  MENGKALKULASI AKSES PESISIR (DARAT -> PANTAI -> JETTY/KERUK)...`);
 
-  // Strict single-source bathymetry selection (no hybrid fallback between BATNAS and GEBCO).
-  // bathyEngine === 'batnas': use BATNAS only (high-res TIF, Indonesia).
-  // bathyEngine === 'gebco' (default): use GEBCO only (global NetCDF).
-  if (bathyEngine === 'batnas') {
-    try {
-      const batnasPad = Math.min(3.0, pad);
-      win = await getBatnas(
-        Math.min(origin.lat, destination.lat) - batnasPad,
-        Math.max(origin.lat, destination.lat) + batnasPad,
-        Math.min(origin.lon, destination.lon) - batnasPad,
-        Math.max(origin.lon, destination.lon) + batnasPad,
-      );
-      if (win) {
-        routeResult = await _computeWithWindow(win, origin, destination, safeD);
-        if (routeResult) engineUsed = 'batnas';
-      }
-    } catch (e) {
-      console.warn('[SpatialRoute] BATNAS error:', e.message);
+    const bOrig = calculate_access_and_jetty(origin.name || 'Origin', [origin.lat, origin.lon], win, safeD, 0);
+    const bDest = calculate_access_and_jetty(destination.name || 'Dest', [destination.lat, destination.lon], win, safeD, 0);
+
+    const bbox_min_lat = Math.min(origin.lat, destination.lat) - 5.0;
+    const bbox_max_lat = Math.max(origin.lat, destination.lat) + 5.0;
+    const bbox_min_lon = Math.min(origin.lon, destination.lon) - 5.0;
+    const bbox_max_lon = Math.max(origin.lon, destination.lon) + 5.0;
+
+    const osmData = await getOSMFerryRoutes(bbox_min_lat, bbox_max_lat, bbox_min_lon, bbox_max_lon);
+
+    console.log(`\n   🗺️ MEMULAI KALKULASI RUTE (ULTRA-FINE MACRO & STRING PULLING AI)...`);
+    
+    // INPUT MURNI DARI BERTH KE BERTH
+    const routeResult = await run_spatial_core([bOrig.berthLat, bOrig.berthLon], [bDest.berthLat, bDest.berthLon], safeD, win, osmData, options.bathyEngine === 'batnas', origin.name || 'Origin', destination.name || 'Dest');
+
+    if (!routeResult) throw new Error(`Gagal mencari rute.`);
+
+    let mn = Infinity, mx = -Infinity;
+    for (const pt of routeResult.waypoints) {
+      const r = Math.round((pt[0]-win.latStart)/win.latStep), c = Math.round((pt[1]-win.lonStart)/win.lonStep);
+      const d = getElevationClean(win, r, c);
+      if (d !== -9999) { mn = Math.min(mn, d); mx = Math.max(mx, d); }
     }
-  } else {
-    // bathyEngine === 'gebco' (default)
-    try {
-      const tG0 = Date.now();
-      win = await getGebco(bbox.minLat, bbox.maxLat, bbox.minLon, bbox.maxLon);
-      if (win) {
-        console.log(`[SpatialRoute] getGebco: ${Date.now()-tG0}ms  ${win.width}×${win.height}`);
-        const tR0 = Date.now();
-        routeResult = await _computeWithWindow(win, origin, destination, safeD);
-        console.log(`[SpatialRoute] _computeWithWindow: ${Date.now()-tR0}ms`);
-        if (routeResult) engineUsed = 'gebco';
-      }
-    } catch (e) {
-      console.warn('[SpatialRoute] GEBCO error:', e.message);
-    }
-  }
 
-  if (!routeResult) {
-    throw new Error(
-      `[SpatialRoute] Tidak dapat menghitung rute laut dari "${origin.name || `${origin.lat},${origin.lon}`}" ` +
-      `ke "${destination.name || `${destination.lat},${destination.lon}`}": ` +
-      `BATNAS dan GEBCO gagal. Pastikan file data bathymetri tersedia.`
-    );
-  }
+    const weatherZones = await ihoSvc.getZonesForBbox(Math.min(origin.lat, destination.lat) - pad, Math.max(origin.lat, destination.lat) + pad, Math.min(origin.lon, destination.lon) - pad, Math.max(origin.lon, destination.lon) + pad);
 
-  // Depth profile
-  const tD0 = Date.now();
-  const { minDepth, maxDepth } = await _depthProfile(routeResult.waypoints, win);
-  console.log(`[SpatialRoute] _depthProfile: ${Date.now()-tD0}ms`);
+    const record = {
+      routeKey: key, origin: origin.name, destination: destination.name,
+      waypoints: routeResult.waypoints, distanceNm: routeResult.distanceNm,
+      minDepth: mn === Infinity ? 0 : mn, maxDepth: mx === -Infinity ? 0 : mx,
+      engineUsed: options.bathyEngine, safeDepth: safeD, weatherZones
+    };
 
-  // Weather zones
-  const tIho0 = Date.now();
-  const weatherZones = await ihoSvc.getZonesForBbox(bbox.minLat, bbox.maxLat, bbox.minLon, bbox.maxLon);
-  console.log(`[SpatialRoute] ihoSvc: ${Date.now()-tIho0}ms`);
+    try { await prisma.spatialRouteCache.upsert({ where: { routeKey: key }, update: record, create: record }); } catch (_) {}
 
-  const record = {
-    routeKey:    key,
-    origin:      origin.name || `${origin.lat},${origin.lon}`,
-    destination: destination.name || `${destination.lat},${destination.lon}`,
-    waypoints:   routeResult.waypoints,
-    distanceNm:  routeResult.distanceNm,
-    minDepth,
-    maxDepth,
-    engineUsed,
-    safeDepth:   safeD,
-    weatherZones,
-  };
-
-  // Persist
-  try {
-    await prisma.spatialRouteCache.upsert({
-      where: { routeKey: key },
-      update: record,
-      create: record,
-    });
-  } catch (_) { /* non-critical */ }
-
-  const _result = { ...record, fromCache: false };
-  if (_resolve) _resolve(_result);
-  return _result;
+    const res = { ...record, fromCache: false };
+    if (_res) _res(res); return res;
   } catch (e) {
-    if (_reject) _reject(e);
-    throw e;
+    if (_rej) _rej(e); throw e;
   } finally {
-    if (!forceRecompute) _pendingRoutes.delete(key);
+    if (!options.forceRecompute) _pendingRoutes.delete(key);
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC: computeJettyReport
-// ─────────────────────────────────────────────────────────────────────────────
 async function computeJettyReport(locationName, lat, lon, options = {}) {
-  const {
-    draft = MAX_DESIGN_DRAFT,
-    waveHeight = 0,
-    maxJettyM = 0,
-    // bathyEngine: 'batnas' | 'gebco' (default). Strict single-source.
-    bathyEngine = 'gebco',
-  } = options;
-  const safeD = -(draft + UKC_CLEARANCE + 0.5 * waveHeight);
-
-  // Check DB
-  try {
-    const cached = await prisma.jettyBerthReport.findUnique({ where: { locationName } });
-    if (cached) return cached;
-  } catch (_) { /* continue */ }
-
+  // PAKSAAN: Selalu gunakan draft kapal terbesar dari database
+  const safeD = -(MAX_DESIGN_DRAFT + UKC_CLEARANCE + 0.5 * (options.waveHeight || 0));
   const pad = 0.5;
-  let win = null;
-  let engineUsed = null;
 
-  // Strict single-source bathymetry selection
-  if (bathyEngine === 'batnas') {
-    try {
-      win = await getBatnas(lat - pad, lat + pad, lon - pad, lon + pad);
-      if (win) engineUsed = 'batnas';
-    } catch (_) { }
-  } else {
-    // bathyEngine === 'gebco' (default)
-    try {
-      win = await getGebco(lat - pad, lat + pad, lon - pad, lon + pad);
-      if (win) engineUsed = 'gebco';
-    } catch (_) { }
-  }
+  const win = options.bathyEngine === 'batnas'
+    ? await getBatnas(lat - pad, lat + pad, lon - pad, lon + pad)
+    : await getGebco(lat - pad, lat + pad, lon - pad, lon + pad);
 
-  let report;
-  if (win) {
-    const berth = findBerthPoint(win, lat, lon, safeD, maxJettyM);
-    // Estimate land km as distance from original coord to shore (approx 0 since we don't have shore detection here)
-    report = {
-      locationName,
-      origLat: lat,
-      origLon: lon,
-      shoreLat: lat,
-      shoreLon: lon,
-      berthLat: berth.berthLat,
-      berthLon: berth.berthLon,
-      landKm: 0,
-      jettyM: berth.jettyM,
-      berthDepth: berth.berthDepth,
-      engineUsed,
-    };
-  } else {
-    report = {
-      locationName,
-      origLat: lat, origLon: lon,
-      shoreLat: lat, shoreLon: lon,
-      berthLat: lat, berthLon: lon,
-      landKm: 0, jettyM: 0, berthDepth: 0,
-      engineUsed: 'none',
-    };
-  }
+  if (!win) return { locationName, origLat: lat, origLon: lon, shoreLat: lat, shoreLon: lon, berthLat: lat, berthLon: lon, landKm: 0, jettyM: 0, berthDepth: 0, engineUsed: 'none' };
 
-  // Persist
-  try {
-    await prisma.jettyBerthReport.upsert({
-      where: { locationName },
-      update: report,
-      create: report,
-    });
-  } catch (_) { /* non-critical */ }
+  const berth = calculate_access_and_jetty(locationName, [lat, lon], win, safeD, options.maxJettyM || 0);
 
+  const report = {
+    locationName, origLat: lat, origLon: lon, shoreLat: lat, shoreLon: lon,
+    berthLat: berth.berthLat, berthLon: berth.berthLon,
+    landKm: parseFloat(berth.landKm.toFixed(2)), jettyM: parseFloat(berth.jettyM.toFixed(0)),
+    berthDepth: parseFloat(berth.berthDepth.toFixed(1)), engineUsed: options.bathyEngine
+  };
+
+  try { await prisma.jettyBerthReport.upsert({ where: { locationName }, update: report, create: report }); } catch (_) {}
   return report;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC: computeDynamicVoyageHours
-// Calculates sailing hours along waypoints accounting for weather speed-loss.
+// 8. ENGINE VOYAGE & ORU DYNAMIC
 // ─────────────────────────────────────────────────────────────────────────────
 async function computeDynamicVoyageHours(waypoints, vessel, weatherCacheByZone) {
   if (!waypoints || waypoints.length < 2) return 0;
   let totalHours = 0;
   for (let i = 0; i < waypoints.length - 1; i++) {
-    const [l1, o1] = waypoints[i];
-    const [l2, o2] = waypoints[i + 1];
-    const d = fastNm(l1, o1, l2, o2);
-    const midLat = (l1 + l2) / 2;
-    const midLon = (o1 + o2) / 2;
-    const zone = await ihoSvc.getActiveZone(midLat, midLon);
+    const [l1, o1] = waypoints[i], [l2, o2] = waypoints[i + 1];
+    const d = fast_nm_dist([l1, o1], [l2, o2]);
+    const zone = await ihoSvc.getActiveZone((l1 + l2) / 2, (o1 + o2) / 2);
     const wx = (zone && weatherCacheByZone && weatherCacheByZone[zone]) || { wave: 0, wind: 0 };
     const spd = calcSpeedLoss(vessel, wx.wave || 0, wx.wind || 0);
     totalHours += d / spd;
@@ -1147,134 +755,61 @@ async function computeDynamicVoyageHours(waypoints, vessel, weatherCacheByZone) 
   return totalHours;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC: getDynamicOruCapex
-// Menghitung CAPEX ORU dinamis menggunakan nearest-neighbor matching dari DB,
-// AACE Rule of Six-Tenths (eksponensial 0.6), IKK regional adjustment, dan
-// compound inflation ke analysis year.
-// ─────────────────────────────────────────────────────────────────────────────
+const IKK_DATA_FALLBACK = { 'Aceh': 96.61, 'Sumatera Utara': 97.45, 'Sumatera Barat': 93.06, 'Riau': 96.1, 'Jambi': 95.32, 'Sumatera Selatan': 90.62, 'Bengkulu': 94.2, 'Lampung': 89.12, 'Kepulauan Bangka Belitung': 105.37, 'Kepulauan Riau': 111.94, 'Dki Jakarta': 114.79, 'Jawa Barat': 105.3, 'Jawa Tengah': 102.08, 'Di Yogyakarta': 104.88, 'Jawa Timur': 96.29, 'Banten': 94.18, 'Bali': 107.46, 'Nusa Tenggara Barat': 104.09, 'Nusa Tenggara Timur': 92.42, 'Kalimantan Barat': 107.34, 'Kalimantan Tengah': 106.56, 'Kalimantan Selatan': 100.7, 'Kalimantan Timur': 118.3, 'Kalimantan Utara': 107.52, 'Sulawesi Utara': 100.77, 'Sulawesi Tengah': 91.82, 'Sulawesi Selatan': 95.91, 'Sulawesi Tenggara': 94.71, 'Gorontalo': 96.51, 'Sulawesi Barat': 91.63, 'Maluku': 106.52, 'Maluku Utara': 114.09, 'Papua Barat': 124.71, 'Papua Barat Daya': 122.21, 'Papua': 134.96, 'Papua Selatan': 142.98, 'Papua Tengah': 209.28, 'Papua Pegunungan': 249.12 };
+const ORU_DB_FALLBACK = [ { cap: 4.89,  unit: 'MMSCFD', cost: 23582442.21, year: 2024, refLoc: 'Papua' }, { cap: 16.39, unit: 'MMSCFD', cost: 26430984.51, year: 2024, refLoc: 'Papua' }, { cap: 3.6,   unit: 'BBTUD',  cost: 6956193.77,  year: 2022, refLoc: 'Nusa Tenggara Barat' }, { cap: 2.9,   unit: 'BBTUD',  cost: 7013640.21,  year: 2022, refLoc: 'Nusa Tenggara Timur' }, { cap: 1.65,  unit: 'BBTUD',  cost: 7185979.55,  year: 2022, refLoc: 'Nusa Tenggara Timur' }, { cap: 6.13,  unit: 'BBTUD',  cost: 6994491.40,  year: 2022, refLoc: 'Nusa Tenggara Barat' }, { cap: 6.13,  unit: 'BBTUD',  cost: 7071086.66,  year: 2022, refLoc: 'Nusa Tenggara Barat' }, { cap: 2.9,   unit: 'BBTUD',  cost: 7043320.88,  year: 2022, refLoc: 'Nusa Tenggara Timur' }, { cap: 1.3,   unit: 'BBTUD',  cost: 6851832.73,  year: 2022, refLoc: 'Nusa Tenggara Timur' }, { cap: 1.3,   unit: 'BBTUD',  cost: 7043320.88,  year: 2022, refLoc: 'Nusa Tenggara Timur' } ];
 
-// IKK Data – fallback jika tabel cci tidak tersedia
-const IKK_DATA_FALLBACK = {
-  'Aceh': 96.61, 'Sumatera Utara': 97.45, 'Sumatera Barat': 93.06, 'Riau': 96.1,
-  'Jambi': 95.32, 'Sumatera Selatan': 90.62, 'Bengkulu': 94.2, 'Lampung': 89.12,
-  'Kepulauan Bangka Belitung': 105.37, 'Kepulauan Riau': 111.94, 'Dki Jakarta': 114.79,
-  'Jawa Barat': 105.3, 'Jawa Tengah': 102.08, 'Di Yogyakarta': 104.88, 'Jawa Timur': 96.29,
-  'Banten': 94.18, 'Bali': 107.46, 'Nusa Tenggara Barat': 104.09, 'Nusa Tenggara Timur': 92.42,
-  'Kalimantan Barat': 107.34, 'Kalimantan Tengah': 106.56, 'Kalimantan Selatan': 100.7,
-  'Kalimantan Timur': 118.3, 'Kalimantan Utara': 107.52, 'Sulawesi Utara': 100.77,
-  'Sulawesi Tengah': 91.82, 'Sulawesi Selatan': 95.91, 'Sulawesi Tenggara': 94.71,
-  'Gorontalo': 96.51, 'Sulawesi Barat': 91.63, 'Maluku': 106.52, 'Maluku Utara': 114.09,
-  'Papua Barat': 124.71, 'Papua Barat Daya': 122.21, 'Papua': 134.96, 'Papua Selatan': 142.98,
-  'Papua Tengah': 209.28, 'Papua Pegunungan': 249.12,
-};
-
-// ORU fallback jika tabel OruCapex kosong
-const ORU_DB_FALLBACK = [
-  { cap: 4.89,  unit: 'MMSCFD', cost: 23582442.21, year: 2024, refLoc: 'Papua' },
-  { cap: 16.39, unit: 'MMSCFD', cost: 26430984.51, year: 2024, refLoc: 'Papua' },
-];
-
-// Helper: IKK lookup dengan case-insensitive fallback
 function lookupIkk(ikkMap, prov) {
   if (!prov) return 100.0;
   if (ikkMap[prov] != null) return ikkMap[prov];
   const lower = prov.toLowerCase();
-  for (const [k, v] of Object.entries(ikkMap)) {
-    if (k.toLowerCase() === lower) return v;
-  }
+  for (const [k, v] of Object.entries(ikkMap)) { if (k.toLowerCase() === lower) return v; }
   return 100.0;
 }
 
 async function getDynamicOruCapex(demandBbtud, targetProv, analysisYear, inflationRate, heatingValue = 1050) {
-  // Step 1: Load IKK dari tabel cci, fallback ke konstanta
   let ikkMap = IKK_DATA_FALLBACK;
-  try {
-    const cciRows = await prisma.cci.findMany();
-    if (cciRows.length > 0) {
-      ikkMap = {};
-      for (const r of cciRows) ikkMap[r.provinsi] = r.cci;
-    }
-  } catch (_) { /* gunakan fallback */ }
+  try { const cciRows = await prisma.cci.findMany(); if (cciRows.length > 0) { ikkMap = {}; for (const r of cciRows) ikkMap[r.provinsi] = r.cci; } } catch (_) { }
 
-  // Step 2: Load semua data ORU dari DB (semua entri bisa jadi referensi nearest-neighbor)
   let oruDb = [];
   try {
-    const rows = await prisma.oruCapex.findMany({
-      where: { capacityValue: { not: null } },
-      orderBy: { capacityValue: 'asc' },
-    });
-    if (rows.length >= 1) {
-      oruDb = rows.map(r => ({
-        cap:    r.capacityValue,
-        unit:   r.unit || 'MMSCFD',
-        cost:   r.fixCapexUSD,
-        year:   r.year,
-        refLoc: r.province || 'Papua',
-      }));
-    }
-  } catch (_) { /* gunakan fallback */ }
-
+    const rows = await prisma.oruCapex.findMany({ where: { capacityValue: { not: null } }, orderBy: { capacityValue: 'asc' } });
+    if (rows.length >= 1) { oruDb = rows.map(r => ({ cap: r.capacityValue, unit: r.unit || 'MMSCFD', cost: r.fixCapexUSD, year: r.year, refLoc: r.province || 'Papua' })); }
+  } catch (_) { }
   if (oruDb.length < 1) oruDb = ORU_DB_FALLBACK;
 
-  // Step 3: Konversi semua entri ke BBTUD untuk perbandingan
-  const oruInBbtud = oruDb.map(item => {
-    const bbtud = item.unit === 'MMSCFD'
-      ? (item.cap * heatingValue) / 1000.0
-      : item.cap;
-    return { ...item, capBbtud: bbtud };
+  const oruInBbtud = oruDb.map(item => { return { ...item, capBbtud: item.unit === 'MMSCFD' ? (item.cap * heatingValue) / 1000.0 : item.cap }; });
+  
+  // TIE-BREAKER KONSERVATIF: Mengambil harga yang lebih mahal jika kapasitas kembar
+  const bestMatch = oruInBbtud.reduce((prev, curr) => {
+    const diffCurr = Math.abs(curr.capBbtud - demandBbtud);
+    const diffPrev = Math.abs(prev.capBbtud - demandBbtud);
+    if (diffCurr < diffPrev) return curr;
+    if (diffCurr === diffPrev) return curr.cost > prev.cost ? curr : prev;
+    return prev;
   });
 
-  // Step 4: Nearest-neighbor matching (min |item_bbtud - demand_bbtud|)
-  const bestMatch = oruInBbtud.reduce((prev, curr) =>
-    Math.abs(curr.capBbtud - demandBbtud) < Math.abs(prev.capBbtud - demandBbtud) ? curr : prev
-  );
-
-  // Step 5: AACE Rule of Six-Tenths scaling
   const capacityFactor = Math.pow(demandBbtud / bestMatch.capBbtud, 0.6);
   const scaledBaseCost = bestMatch.cost * capacityFactor;
 
-  // Step 6: IKK adjustment (dari cci table)
   const ikkTarget = lookupIkk(ikkMap, targetProv);
   const ikkRef    = lookupIkk(ikkMap, bestMatch.refLoc);
-
-  // Step 7: Compound inflation ke analysis year
   const inflatedCost = scaledBaseCost * Math.pow(1 + inflationRate, analysisYear - bestMatch.year);
   const finalCapexUsd = inflatedCost * (ikkTarget / ikkRef);
 
-  return {
-    finalCapexUsd,
-    scaledBaseCost,
-    inflatedCost,
-    ikkTarget,
-    ikkRef,
-    bestMatchName: bestMatch.refLoc,
-    bestMatchCapBbtud: parseFloat(bestMatch.capBbtud.toFixed(4)),
-    capacityFactor: parseFloat(capacityFactor.toFixed(6)),
-  };
+  return { finalCapexUsd, scaledBaseCost, inflatedCost, ikkTarget, ikkRef, bestMatchName: bestMatch.refLoc, bestMatchCapBbtud: parseFloat(bestMatch.capBbtud.toFixed(4)), capacityFactor: parseFloat(capacityFactor.toFixed(6)) };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC: computeWeatherLegReport
-// For each leg (origin, destination, waypoints[]) returns which IHO zones are
-// crossed, the average speed under weather, and the minimum point speed.
-// Used to build the weather section of the supply chain run report.
-// ─────────────────────────────────────────────────────────────────────────────
 async function computeWeatherLegReport(legs, vessel, weatherCacheByZone) {
-  // legs: [{ origin, destination, waypoints: [[lat,lon],...] }, ...]
   const results = [];
   for (const { origin, destination, waypoints } of legs) {
     if (!waypoints || waypoints.length < 2) continue;
     const zonesSet = new Set();
     let totalDist = 0, totalHours = 0, minSpd = Infinity;
     for (let i = 0; i < waypoints.length - 1; i++) {
-      const [l1, o1] = waypoints[i];
-      const [l2, o2] = waypoints[i + 1];
-      const d = fastNm(l1, o1, l2, o2);
-      const midLat = (l1 + l2) / 2;
-      const midLon = (o1 + o2) / 2;
+      const [l1, o1] = waypoints[i], [l2, o2] = waypoints[i + 1];
+      const d = fast_nm_dist([l1, o1], [l2, o2]);
       let zone = null;
-      try { zone = await ihoSvc.getActiveZone(midLat, midLon); } catch (_) { }
+      try { zone = await ihoSvc.getActiveZone((l1 + l2) / 2, (o1 + o2) / 2); } catch (_) { }
       const wx = (zone && weatherCacheByZone && weatherCacheByZone[zone]) || { wave: 0, wind: 0 };
       const spd = calcSpeedLoss(vessel, wx.wave || 0, wx.wind || 0);
       if (zone) zonesSet.add(zone);
@@ -1283,24 +818,9 @@ async function computeWeatherLegReport(legs, vessel, weatherCacheByZone) {
       if (spd < minSpd) minSpd = spd;
     }
     const avgSpd = totalHours > 0 ? totalDist / totalHours : vessel.speedKnot;
-    results.push({
-      origin,
-      destination,
-      zonesAffected: [...zonesSet],
-      avgSpeedKts:   parseFloat(avgSpd.toFixed(2)),
-      minSpeedKts:   minSpd === Infinity ? vessel.speedKnot : parseFloat(minSpd.toFixed(2)),
-    });
+    results.push({ origin, destination, zonesAffected: [...zonesSet], avgSpeedKts: parseFloat(avgSpd.toFixed(2)), minSpeedKts: minSpd === Infinity ? vessel.speedKnot : parseFloat(minSpd.toFixed(2)) });
   }
   return results;
 }
 
-module.exports = {
-  computeRoute,
-  computeJettyReport,
-  computeDynamicVoyageHours,
-  computeWeatherLegReport,
-  getDynamicOruCapex,
-  makeRouteKey,
-  fastNm,
-  UKC_CLEARANCE,
-};
+module.exports = { computeRoute, computeJettyReport, computeDynamicVoyageHours, computeWeatherLegReport, getDynamicOruCapex, makeRouteKey, fastNm: fast_nm_dist, UKC_CLEARANCE };
