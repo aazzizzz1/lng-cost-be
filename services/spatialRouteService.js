@@ -14,6 +14,7 @@ const prisma = require('../config/db');
 const ihoSvc = require('./ihoService');
 const { getBatnas, getGebco } = require('./bathymetryService');
 
+
 const UKC_CLEARANCE = 2.85;
 const MAX_DESIGN_DRAFT = 8.0;
 const MAX_LPP = 175.0;
@@ -936,26 +937,135 @@ async function getDynamicOruCapex(demandBbtud, targetProv, analysisYear, inflati
 
 async function computeWeatherLegReport(legs, vessel, weatherCacheByZone) {
   const results = [];
-  for (const { origin, destination, waypoints } of legs) {
-    if (!waypoints || waypoints.length < 2) continue;
-    const zonesSet = new Set();
-    let totalDist = 0, totalHours = 0, minSpd = Infinity;
-    for (let i = 0; i < waypoints.length - 1; i++) {
-      const [l1, o1] = waypoints[i], [l2, o2] = waypoints[i + 1];
-      const d = fast_nm_dist([l1, o1], [l2, o2]);
-      let zone = null;
-      try { zone = await ihoSvc.getActiveZone((l1 + l2) / 2, (o1 + o2) / 2); } catch (_) { }
-      const wx = (zone && weatherCacheByZone && weatherCacheByZone[zone]) || { wave: 0, wind: 0 };
-      const spd = calcSpeedLoss(vessel, wx.wave || 0, wx.wind || 0);
-      if (zone) zonesSet.add(zone);
-      totalDist += d;
-      totalHours += d / spd;
-      if (spd < minSpd) minSpd = spd;
+  try {
+    for (const { origin, destination, waypoints } of legs) {
+      if (!waypoints || waypoints.length < 2) continue;
+      const zonesSet = new Set();
+      let totalDist = 0, totalHours = 0, minSpd = Infinity;
+      
+      console.log(`\n   📊 LOG KECEPATAN KAPAL: ${origin} ➔ ${destination}`);
+      
+      // 🚨 CEK PERTAMA: Apakah data Kapal ada?
+      if (!vessel || vessel.speedKnot === undefined) {
+        throw new Error("Data kapal (vessel) kosong atau tidak memiliki 'speedKnot'!");
+      }
+
+      let currentZone = "Lautan Normal";
+      let currentSpeed = vessel.speedKnot;
+      let segmentStartDist = 0;
+
+      for (let i = 0; i < waypoints.length - 1; i++) {
+        const [l1, o1] = waypoints[i], [l2, o2] = waypoints[i + 1];
+        const d = fast_nm_dist([l1, o1], [l2, o2]);
+        let zone = null;
+        try { zone = await ihoSvc.getActiveZone((l1 + l2) / 2, (o1 + o2) / 2); } catch (_) { }
+        const wx = (zone && weatherCacheByZone && weatherCacheByZone[zone]) || { wave: 0, wind: 0 };
+        
+        // 🚨 CEK KEDUA: Apakah fungsi perhitungan ombak ada?
+        if (typeof calcSpeedLoss !== 'function') {
+           throw new Error("Fungsi 'calcSpeedLoss' HILANG! Pastikan sudah di-require/import di bagian paling atas file.");
+        }
+        
+        const spd = calcSpeedLoss(vessel, wx.wave || 0, wx.wind || 0);
+        const zoneName = zone ? zone : "Lautan Normal";
+
+        if (Math.abs(spd - currentSpeed) > 0.05 || zoneName !== currentZone) {
+          if (totalDist > segmentStartDist) {
+            const status = currentSpeed < vessel.speedKnot ? '⚠️ Kecepatan Turun' : '✅ Kecepatan Normal';
+            const zLabel = currentZone.replace('_', ' ');
+            console.log(`      ➤ Jarak ${segmentStartDist.toFixed(0)} - ${totalDist.toFixed(0)} NM: ${status} (${currentSpeed.toFixed(1)} Kts) melintasi ${zLabel}`);
+          }
+          currentZone = zoneName;
+          currentSpeed = spd;
+          segmentStartDist = totalDist;
+        }
+
+        if (zone) zonesSet.add(zone);
+        totalDist += d;
+        totalHours += d / spd;
+        if (spd < minSpd) minSpd = spd;
+      }
+      
+      if (totalDist > segmentStartDist) {
+        const status = currentSpeed < vessel.speedKnot ? '⚠️ Kecepatan Turun' : '✅ Kecepatan Normal';
+        const zLabel = currentZone.replace('_', ' ');
+        console.log(`      ➤ Jarak ${segmentStartDist.toFixed(0)} - ${totalDist.toFixed(0)} NM: ${status} (${currentSpeed.toFixed(1)} Kts) melintasi ${zLabel}`);
+      }
+
+      const avgSpd = totalHours > 0 ? totalDist / totalHours : vessel.speedKnot;
+      console.log(`      🏁 RATA-RATA AKHIR: ${avgSpd.toFixed(1)} Kts | TOTAL WAKTU: ${totalHours.toFixed(1)} Jam\n`);
+
+      results.push({ origin, destination, zonesAffected: [...zonesSet], avgSpeedKts: parseFloat(avgSpd.toFixed(2)), minSpeedKts: minSpd === Infinity ? vessel.speedKnot : parseFloat(minSpd.toFixed(2)) });
     }
-    const avgSpd = totalHours > 0 ? totalDist / totalHours : vessel.speedKnot;
-    results.push({ origin, destination, zonesAffected: [...zonesSet], avgSpeedKts: parseFloat(avgSpd.toFixed(2)), minSpeedKts: minSpd === Infinity ? vessel.speedKnot : parseFloat(minSpd.toFixed(2)) });
+  } catch (err) {
+    // 🔥 Jika terjadi Error, terminal akan teriak warna merah!
+    console.error(`\n   ❌ [SYSTEM CRASH] GAGAL MEMPROSES LOG KECEPATAN: ${err.message}\n`);
   }
   return results;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODEL FISIKA: HOLTROP & MENNEN SPEED-LOSS
+// ─────────────────────────────────────────────────────────────────────────────
+function calcSpeedLoss(vessel, waveH, windKt) {
+  const Vs_knot = vessel.speedKnot || vessel.Kecepatan || 14;
+  if (waveH === 0 && windKt === 0) return Vs_knot;
+
+  const Vs   = Vs_knot * 0.5144;       // m/s
+  const LPP  = vessel.lpp   || vessel.LPP  || 120;
+  const B    = vessel.breadth || vessel.B  || 22;
+  const T    = vessel.draft  || vessel.T   || 7;
+  const D    = vessel.depth  || vessel.D   || 14;
+  const withBulb = vessel.withBulb !== undefined ? vessel.withBulb : true;
+
+  const g           = 9.81;
+  const rho_sea_ton = 1.025;
+  const rho_sea_kg  = 1025.0;
+  const rho_air     = 1.225;
+  const nu          = 1.18831e-6;
+
+  if (Vs <= 0.1) return Vs_knot;
+
+  const LWL = 1.04 * LPP;
+  const Fn  = Vs / Math.sqrt(g * LWL);
+  const Cb  = Math.max(0.4, Math.min(0.9, -4.22 + 27.8 * Math.sqrt(Fn) - 39.1 * Fn + 46.6 * Fn ** 3));
+  const Cm  = 0.977 + 0.085 * (Cb - 0.60);
+  const Cp  = Cb / Cm;
+  const CWP = Cb / (0.471 + 0.551 * Cb);
+
+  const lcb_min = 9.7 - (45 * Fn) - 0.8;
+  const Vol_Disp = LWL * B * T * Cb;
+  const Rn  = LWL * (Vs / nu);
+  const Cf0 = 0.075 / (Math.log10(Rn) - 2) ** 2;
+
+  const Lr_L = Math.max(0.01, 1 - Cp + 0.06 * Cp * lcb_min / (4 * Cp - 1));
+  const Cp_safe = Math.max(0.01, Math.min(0.99, Cp));
+  const k1_base = 0.93 + 0.4871 * 1.0 * Math.pow(B / LPP, 1.0681) * Math.pow(T / LPP, 0.4611) * Math.pow(1 / Lr_L, 0.1216) * Math.pow(LPP ** 3 / Vol_Disp, 0.3649) * Math.pow(1 - Cp_safe, -0.6042);
+
+  const S_main = LWL * (2 * T + B) * Math.sqrt(Cm) * (0.4530 + 0.4425 * Cb - 0.2862 * Cm - 0.003467 * (B / T) + 0.3696 * CWP) + (withBulb ? (2.38 * (0.10 * B * T * Cm) / Cb) : 0);
+  const S_tot = S_main + (1.75 * LPP * T) / 100 + 0.6 * Cb * LPP * 0.18 / Math.max(Cb - 0.2, 0.01) * 4;
+
+  const iE_safe = Math.max(0.1, Math.min(89.9, 125.67 * (B / LPP) - 162.25 * Cp ** 2 + 234.32 * Cp ** 3 + 0.1551 * lcb_min ** 3));
+  const C11 = 2223105 * Math.pow(B / LPP, 3.7861) * Math.pow(T / B, 1.0796) * Math.pow(90 - iE_safe, -1.3757);
+
+  const m1 = 0.01404 * (LPP / T) - 1.7525 * Math.pow(Vol_Disp, 1 / 3) / LPP - 4.7932 * (B / LPP) - (8.0789 * Cp - 13.8673 * Cp ** 2 + 6.9844 * Cp ** 3);
+
+  const bulbABT = withBulb ? 0.10 * B * T * Cm : 0;
+  const r_b = 0.56 * Math.sqrt(bulbABT);
+  const h_b = 0.5 * T;
+  const i_val = T - h_b - 0.4464 * r_b;
+  let C12 = 1.0;
+  if (withBulb && r_b > 0 && (r_b + i_val) > 0) C12 = (Math.exp(1.89) * bulbABT * r_b) / (B * T * (r_b + i_val));
+  const C13 = 1.0;
+
+  const Rw_W = Math.max(0.0, C11 * C12 * C13 * Math.exp(m1 * Math.pow(Fn, -0.9) + (-1.69385 * 0.4 * Math.exp(-0.034 * Math.pow(Fn, -3.29)) * Math.cos((1.446 * Cp - 0.03 * (LPP / B)) * Math.pow(Fn, -2)))));
+
+  const R_calm_kN = Math.max(0.1, 0.5 * rho_sea_ton * Vs ** 2 * S_tot * (Cf0 * k1_base + (0.006 * Math.pow(LWL + 100, -0.16) - 0.00205)) + Rw_W * (rho_sea_ton * g * Vol_Disp));
+  const R_wave_kN = (0.64 * waveH ** 2 * B ** 2 * Cb * rho_sea_kg * g / LPP) / 1000.0;
+  const R_wind_kN = (0.5 * rho_air * (LPP * (D - T) + 0.6 * LPP * B) * 0.9 * (windKt * 0.5144) ** 2) / 1000.0;
+
+  const speed_loss_pct = 1 - Math.pow(1 / (1 + (R_wave_kN + R_wind_kN) / R_calm_kN), 1 / 3);
+  return Math.max(0.1, Vs_knot - Vs_knot * speed_loss_pct);
 }
 
 module.exports = { computeRoute, computeJettyReport, computeDynamicVoyageHours, computeWeatherLegReport, getDynamicOruCapex, makeRouteKey, fastNm: fast_nm_dist, UKC_CLEARANCE };
