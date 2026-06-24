@@ -799,7 +799,25 @@ async function computeRoute(origin, destination, options = {}) {
       if (d !== 9999) { mn = Math.min(mn, d); mx = Math.max(mx, d); }
     }
 
-    const weatherZones = await ihoSvc.getZonesForBbox(Math.min(origin.lat, destination.lat) - pad, Math.max(origin.lat, destination.lat) + pad, Math.min(origin.lon, destination.lon) - pad, Math.max(origin.lon, destination.lon) + pad);
+    // Pencarian Zona Laut Akurat Berdasarkan Garis Rute (Waypoint)
+    const exactZones = new Set();
+    if (routeResult.waypoints && routeResult.waypoints.length > 0) {
+      // Kita ambil sampel setiap 5 titik agar proses komputasi tetap kilat
+      for (let i = 0; i < routeResult.waypoints.length; i += 5) {
+        const pt = routeResult.waypoints[i];
+        try {
+          const zone = await ihoSvc.getActiveZone(pt[0], pt[1]);
+          if (zone) exactZones.add(zone);
+        } catch (e) {}
+      }
+      // Pastikan titik pelabuhan tujuan (terakhir) juga selalu terdata
+      const lastPt = routeResult.waypoints[routeResult.waypoints.length - 1];
+      try {
+        const zone = await ihoSvc.getActiveZone(lastPt[0], lastPt[1]);
+        if (zone) exactZones.add(zone);
+      } catch (e) {}
+    }
+    const weatherZones = Array.from(exactZones);
 
     const status = (mx <= finalSafeD) ? 'Aman' : 'Rawan Kandas';
     const dbRecord = {
