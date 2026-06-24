@@ -492,6 +492,8 @@ model JettyBerthReport {
   landKm       Float    @default(0)
   jettyM       Float    @default(0)
   berthDepth   Float    @default(0)
+  safeDepth    Float    @default(-11.35)
+  status       String   @default("")
   engineUsed   String   @default("gebco")
   updatedAt    DateTime @updatedAt
 }

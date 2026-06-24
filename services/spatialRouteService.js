@@ -1,12 +1,11 @@
 /**
  * Spatial Route Service – A* Sea-Route Engine
  * ─────────────────────────────────────────────────────────────────────────────
- * REPLIKA 100% MURNI GOOGLE COLAB V3 (ULTIMATE LOGGED & FULL)
- * - Tampilan Log Terminal disamakan persis dengan format Python Colab
- * - Geodesic Vincenty ditambahkan untuk akurasi Jarak Lurus WGS-84 (Match 511.5 NM)
- * - Pencarian Jetty murni KDTree (Tanpa Linspace) agar Match dengan Colab (943 M)
- * - Start rute murni ditarik HANYA dari Berth (Titik Sandar), bukan daratan
- * - FULL VERSION: Semua fungsi ekonomi, cuaca, dan IKK terpasang utuh.
+ * STRICT DEPTH AUDIT UPDATE:
+ * - FIX 1: Menghapus "Skip Pixel" di fast_safe_corridor_numpy. Pengecekan 100% dari pangkal ke ujung.
+ * - FIX 2: Engine Micro A* sekarang murni menggunakan `safeD` (bukan 0.0) di seluruh pengecekan node dan edge.
+ * - FIX 3: Validasi mutlak pada Bezier Curve. Jika kurva memotong area dangkal, manuver dibatalkan.
+ * - FIX 4: Macro Satellite diwajibkan mengecek koridor lurus bebas dangkal agar tidak melompati pulau.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -14,7 +13,6 @@ const crypto = require('crypto');
 const prisma = require('../config/db');
 const ihoSvc = require('./ihoService');
 const { getBatnas, getGebco } = require('./bathymetryService');
-const { calcSpeedLoss } = require('./weatherService');
 
 const UKC_CLEARANCE = 2.85;
 const MAX_DESIGN_DRAFT = 8.0;
@@ -23,6 +21,12 @@ const MAX_LPP = 175.0;
 // ==============================================================================
 // 1. REPLIKA PUSTAKA PYTHON (MinHeap, KDTree Scipy & Geodesic)
 // ==============================================================================
+
+function pyRound(x) {
+  const r = Math.round(x);
+  return Math.abs(x % 1) === 0.5 ? (r % 2 === 0 ? r : r - 1) : r;
+}
+
 class MinHeap {
   constructor() { this.h = []; }
   push(priority, cost, item, path) { this.h.push({ priority, cost, item, path }); this._up(this.h.length - 1); }
@@ -54,22 +58,30 @@ class KDTree {
   query(point, k = 1, distance_upper_bound = Infinity) {
     let cands = [];
     const rSq = distance_upper_bound === Infinity ? Infinity : distance_upper_bound * distance_upper_bound;
-    const rC = Math.floor(point[0] / this.cellSize), cC = Math.floor(point[1] / this.cellSize);
-    const rad = distance_upper_bound === Infinity ? 10 : Math.ceil(distance_upper_bound / this.cellSize);
     
-    for (let r = rC - rad; r <= rC + rad; r++) {
-      for (let c = cC - rad; c <= cC + rad; c++) {
-        const bucket = this.grid.get(`${r},${c}`);
-        if (bucket) {
-          for (let i = 0; i < bucket.length; i++) {
-            const idx = bucket[i];
-            const dlat = point[0] - this.coords[idx][0], dlon = point[1] - this.coords[idx][1];
-            const d2 = dlat*dlat + dlon*dlon;
-            if (d2 <= rSq) cands.push({ d: Math.sqrt(d2), idx });
+    if (distance_upper_bound === Infinity) {
+      for (let i = 0; i < this.coords.length; i++) {
+        const dlat = point[0] - this.coords[i][0], dlon = point[1] - this.coords[i][1];
+        cands.push({ d: Math.sqrt(dlat*dlat + dlon*dlon), idx: i });
+      }
+    } else {
+      const rC = Math.floor(point[0] / this.cellSize), cC = Math.floor(point[1] / this.cellSize);
+      const rad = Math.ceil(distance_upper_bound / this.cellSize);
+      for (let r = rC - rad; r <= rC + rad; r++) {
+        for (let c = cC - rad; c <= cC + rad; c++) {
+          const bucket = this.grid.get(`${r},${c}`);
+          if (bucket) {
+            for (let i = 0; i < bucket.length; i++) {
+              const idx = bucket[i];
+              const dlat = point[0] - this.coords[idx][0], dlon = point[1] - this.coords[idx][1];
+              const d2 = dlat*dlat + dlon*dlon;
+              if (d2 <= rSq) cands.push({ d: Math.sqrt(d2), idx });
+            }
           }
         }
       }
     }
+    
     cands.sort((a, b) => a.d - b.d);
     if (k === 1) {
       if (cands.length === 0) return [[Infinity], [-1]];
@@ -85,7 +97,6 @@ function makeRouteKey(origin, destination) {
   return crypto.createHash('sha256').update(canonical).digest('hex');
 }
 
-// Rumus Vincenty Elipsoid WGS-84 (Akurasi Tinggi untuk Jarak Lurus 511.5 NM)
 function geodesic_nm(c1, c2) {
   const a = 6378137.0, b = 6356752.314245, f = 1 / 298.257223563;
   const L = (c2[1] - c1[1]) * Math.PI / 180;
@@ -117,7 +128,6 @@ function geodesic_nm(c1, c2) {
   return s / 1852.0; 
 }
 
-// Replika fast_nm_dist murni (Untuk Heuristic A-Star & Looping)
 function fast_nm_dist(c1, c2) {
   const dlat = c2[0] - c1[0];
   const dlon = (c2[1] - c1[1]) * Math.cos(((c1[0] + c2[0]) / 2) * (Math.PI / 180));
@@ -125,60 +135,14 @@ function fast_nm_dist(c1, c2) {
 }
 
 function getElevationClean(win, r, c) {
-  if (r < 0 || r >= win.height || c < 0 || c >= win.width) return -9999;
+  if (r < 0 || r >= win.height || c < 0 || c >= win.width) return 9999.0;
   let v = win.data[r * win.width + c];
-  if (isNaN(v) || v > 8000 || v < -11000) return -9999;
+  if (isNaN(v) || v > 8000 || v < -11000) return 9999.0;
   return v;
 }
 
 // ==============================================================================
-// 2. OSM FETCHING
-// ==============================================================================
-let globalOSMCache = null;
-let isFetchingOSM = false;
-
-async function getOSMFerryRoutes(b_min_lat, b_max_lat, b_min_lon, b_max_lon) {
-  if (globalOSMCache) return globalOSMCache;
-  if (isFetchingOSM) {
-    while (isFetchingOSM) await new Promise(r => setTimeout(r, 500));
-    return globalOSMCache || { nodes: {}, edges: [] };
-  }
-  isFetchingOSM = true;
-  
-  console.log(`   📡 Menghisap Data Jalan Tol OSM (Harbor Exit Guide)...`);
-  console.log(`      🔍 Memindai Bounding Box OSM: Lat (${b_min_lat.toFixed(1)} s/d ${b_max_lat.toFixed(1)}), Lon (${b_min_lon.toFixed(1)} s/d ${b_max_lon.toFixed(1)})`);
-  
-  const query = `[out:json][timeout:60]; way["route"~"ferry"](${b_min_lat}, ${b_min_lon}, ${b_max_lat}, ${b_max_lon}); out body; >; out skel qt;`;
-  const urls = ["https://lz4.overpass-api.de/api/interpreter", "https://overpass-api.de/api/interpreter"];
-  let data = null;
-
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `data=${encodeURIComponent(query)}` });
-      if (res.ok) { data = await res.json(); break; }
-    } catch (e) {}
-  }
-
-  const nodes = {}, edges = [];
-  if (data && data.elements) {
-    for (const e of data.elements) if (e.type === 'node') nodes[`OSM_${e.id}`] = [e.lat, e.lon];
-    for (const e of data.elements) {
-      if (e.type === 'way' && e.nodes) {
-        for (let i = 0; i < e.nodes.length - 1; i++) {
-          const u_id = `OSM_${e.nodes[i]}`, v_id = `OSM_${e.nodes[i+1]}`;
-          if (nodes[u_id] && nodes[v_id]) edges.push([u_id, v_id]);
-        }
-      }
-    }
-  }
-  console.log(`      ✅ Berhasil mengunduh jalur Tol Laut OSM!                                        \n`);
-  globalOSMCache = { nodes, edges };
-  isFetchingOSM = false;
-  return globalOSMCache;
-}
-
-// ==============================================================================
-// 3. FAST SAFE CORRIDOR NUMPY PORTING
+// 2. FAST SAFE CORRIDOR NUMPY PORTING (STRICT DEPTH AUDIT)
 // ==============================================================================
 function fast_safe_corridor_numpy(p1, p2, win, limit_depth, buffer_px = 0, isBatnas = true) {
   const dlat = Math.abs(p2[0] - p1[0]), dlon = Math.abs(p2[1] - p1[1]);
@@ -188,13 +152,13 @@ function fast_safe_corridor_numpy(p1, p2, win, limit_depth, buffer_px = 0, isBat
   const pixel_steps = Math.trunc(Math.max(dlat / lat_step_abs, dlon / lon_step_abs) * factor);
   const steps = Math.max(isBatnas ? 5 : 10, pixel_steps);
 
-  for (let i = 0; i < steps; i++) {
-    const t = i / (steps - 1 || 1);
+  for (let i = 0; i <= steps; i++) {
+    const t = steps === 0 ? 0 : i / steps;
     const sLat = p1[0] + t * (p2[0] - p1[0]);
     const sLon = p1[1] + t * (p2[1] - p1[1]);
 
-    const r = Math.trunc(Math.max(0, Math.min(win.height - 1, Math.round((sLat - win.latStart) / win.latStep))));
-    const c = Math.trunc(Math.max(0, Math.min(win.width - 1, Math.round((sLon - win.lonStart) / win.lonStep))));
+    const r = Math.trunc(Math.max(0, Math.min(win.height - 1, pyRound((sLat - win.latStart) / win.latStep))));
+    const c = Math.trunc(Math.max(0, Math.min(win.width - 1, pyRound((sLon - win.lonStart) / win.lonStep))));
     
     if (getElevationClean(win, r, c) > limit_depth) return false;
 
@@ -222,7 +186,7 @@ function live_astar_path(G_nodes, G_edges, source, target, heuristic) {
   const start_dist = heuristic(G_nodes[source], G_nodes[target]);
   let nodes_explored = 0;
 
-  process.stdout.write(`         🧭 Memulai inisiasi AI Navigasi...\r`);
+  process.stdout.write(`        🧭 Memulai inisiasi AI Navigasi...\r`);
 
   while (queue.size) {
     const { cost, item: curr, path } = queue.pop();
@@ -234,12 +198,12 @@ function live_astar_path(G_nodes, G_edges, source, target, heuristic) {
       const curr_dist = heuristic(G_nodes[curr], G_nodes[target]);
       const pct = Math.max(0.0, Math.min(99.9, 100.0 - (curr_dist / start_dist * 100.0)));
       const elapsed = (Date.now() - start_time) / 1000;
-      process.stdout.write(`         🧭 Navigasi AI: ${pct.toFixed(1)}% Selesai | Titik Diproses: ${nodes_explored} | Waktu: ${elapsed.toFixed(1)}s          \r`);
+      process.stdout.write(`        🧭 Navigasi AI: ${pct.toFixed(1)}% Selesai | Titik Diproses: ${nodes_explored} | Waktu: ${elapsed.toFixed(1)}s          \r`);
     }
 
     if (curr === target) {
       const elapsed = (Date.now() - start_time) / 1000;
-      console.log(`         🧭 Navigasi AI: 100.0% Selesai | Titik Diproses: ${nodes_explored} | Berhasil dalam ${elapsed.toFixed(1)}s          `);
+      console.log(`        🧭 Navigasi AI: 100.0% Selesai | Titik Diproses: ${nodes_explored} | Berhasil dalam ${elapsed.toFixed(1)}s          `);
       return path;
     }
 
@@ -252,96 +216,154 @@ function live_astar_path(G_nodes, G_edges, source, target, heuristic) {
       }
     }
   }
-  console.log(`         ❌ [FATAL] A-Star GAGAL! Jalur terputus (NetworkXNoPath). Titik buntu di nodes ke-${nodes_explored}`);
   return null;
 }
 
 // ==============================================================================
-// 4. FIND BERTH LOGIC (MURNI KDTREE TANPA LINSPACE OVERRIDE)
+// 3. FIND BERTH LOGIC (MURNI KDTREE + BFS ANTI-TRAP)
 // ==============================================================================
-function calculate_access_and_jetty(pt_name, pt_pos, win, PORT_SAFE_DEPTH, max_jetty_m_limit) {
+async function calculate_access_and_jetty(pt_name, pt_pos, win, weatherCacheByZone, overrideSafeD = null) {
   const ptNameDisp = pt_name.charAt(0).toUpperCase() + pt_name.slice(1);
-  const valid_deep_coords = [];
-  const shore_coords = [];
+  console.log(`  🏗️ Menganalisis akses pesisir untuk [${pt_name}] di koordinat ${pt_pos[0].toFixed(4)}, ${pt_pos[1].toFixed(4)}`);
   
-  for (let r = 0; r < win.height; r++) {
-    for (let c = 0; c < win.width; c++) {
-      const v = getElevationClean(win, r, c);
-      const lat = win.latStart + r * win.latStep;
-      const lon = win.lonStart + c * win.lonStep;
-      
-      if (Math.abs(lat - pt_pos[0]) > 0.5 || Math.abs(lon - pt_pos[1]) > 0.5) continue;
-      
-      if (v <= PORT_SAFE_DEPTH) valid_deep_coords.push([lat, lon, v]);
-      if (v >= -1.0 && v <= 1.5) shore_coords.push([lat, lon]);
+  let PORT_SAFE_DEPTH;
+  if (overrideSafeD !== null) {
+    PORT_SAFE_DEPTH = overrideSafeD; 
+  } else {
+    let local_max_wave = 0.0;
+    if (weatherCacheByZone) {
+      try {
+        const zone = await ihoSvc.getActiveZone(pt_pos[0], pt_pos[1]);
+        if (zone && weatherCacheByZone[zone]) {
+           local_max_wave = weatherCacheByZone[zone].wave || 0.0;
+        }
+      } catch (e) {}
     }
+    PORT_SAFE_DEPTH = -(MAX_DESIGN_DRAFT + UKC_CLEARANCE + (0.5 * local_max_wave));
   }
 
-  let berth_pos = pt_pos, land_km = 0, jetty_m = 0, berth_depth = 0;
+  // 1. Pemetaan Area Laut Dalam (Validasi Anti-Terkurung via BFS / Connected Components)
+  const numPixels = win.width * win.height;
+  const isDeep = new Uint8Array(numPixels);
+  for (let i = 0; i < numPixels; i++) {
+    if (win.data[i] !== 9999 && win.data[i] <= PORT_SAFE_DEPTH) isDeep[i] = 1;
+  }
 
-  if (valid_deep_coords.length > 0 && shore_coords.length > 0) {
-    const tree_deep = new KDTree(valid_deep_coords.map(x => [x[0], x[1]]));
-    const tree_shore = new KDTree(shore_coords);
+  const componentLabels = new Int32Array(numPixels);
+  let currentLabel = 1;
+  const oceanLabels = new Set(); // <-- KUNCI PERBAIKAN: Menyimpan BANYAK lautan, bukan cuma 1
+  const q = new Int32Array(numPixels);
 
-    if (max_jetty_m_limit > 0) {
-      const shore_cands = [];
-      for (let i = 0; i < shore_coords.length; i++) {
-        const [d_deg, d_idx] = tree_deep.query(shore_coords[i], 1);
-        if (d_deg.length && d_deg[0] * 111000 <= max_jetty_m_limit) { 
-          shore_cands.push({ shore_pt: shore_coords[i], deep_idx: d_idx[0], jetty: d_deg[0] * 111000 });
+  for (let i = 0; i < numPixels; i++) {
+    if (isDeep[i] === 1 && componentLabels[i] === 0) {
+      let size = 0;
+      let touchesBorder = false; // <-- Deteksi apakah laut ini terhubung ke samudera luar
+      q[0] = i;
+      componentLabels[i] = currentLabel;
+      let head = 0, tail = 1;
+      
+      while (head < tail) {
+        const curr = q[head++];
+        size++;
+        const r = Math.floor(curr / win.width);
+        const c = curr % win.width;
+        
+        // Jika menyentuh batas tepi peta, ini dipastikan bukan "danau terkurung"
+        if (r === 0 || r === win.height - 1 || c === 0 || c === win.width - 1) {
+            touchesBorder = true;
+        }
+        
+        // BFS 8-Arah (Diagonal) untuk mencegah buntu di selat sempit/miring
+        for (let dr = -1; dr <= 1; dr++) {
+          for (let dc = -1; dc <= 1; dc++) {
+            if (dr === 0 && dc === 0) continue;
+            const nr = r + dr, nc = c + dc;
+            if (nr >= 0 && nr < win.height && nc >= 0 && nc < win.width) {
+              const n = nr * win.width + nc;
+              if (isDeep[n] && !componentLabels[n]) {
+                componentLabels[n] = currentLabel;
+                q[tail++] = n;
+              }
+            }
+          }
         }
       }
-      if (shore_cands.length > 0) {
-        const tree_valid_shore = new KDTree(shore_cands.map(x => x.shore_pt));
-        const [d_p2vs_deg, valid_idx_match] = tree_valid_shore.query(pt_pos, 1);
-        const best = shore_cands[valid_idx_match[0]];
-        
-        berth_pos = [valid_deep_coords[best.deep_idx][0], valid_deep_coords[best.deep_idx][1]];
-        berth_depth = valid_deep_coords[best.deep_idx][2];
-        land_km = d_p2vs_deg[0] * 111.0;
-        jetty_m = best.jetty;
-      } else {
-        const [d_p2s_deg, best_shore_idx] = tree_shore.query(pt_pos, 1);
-        const shore_pt = shore_coords[best_shore_idx[0]];
-        const [d_s2d_deg, best_deep_idx] = tree_deep.query(shore_pt, 1);
-
-        berth_pos = [valid_deep_coords[best_deep_idx[0]][0], valid_deep_coords[best_deep_idx[0]][1]];
-        berth_depth = valid_deep_coords[best_deep_idx[0]][2];
-        land_km = d_p2s_deg[0] * 111.0;
-        jetty_m = d_s2d_deg[0] * 111000;
+      
+      // Jika lautan menyentuh pinggir peta ATAU ukurannya super masif, masukkan ke daftar Laut Valid
+      if (touchesBorder || size > (numPixels * 0.05)) {
+        oceanLabels.add(currentLabel);
       }
-    } else {
-      const [d_p2s_deg, best_shore_idx] = tree_shore.query(pt_pos, 1);
-      const shore_pt = shore_coords[best_shore_idx[0]];
-      const [d_s2d_deg, best_deep_idx] = tree_deep.query(shore_pt, 1);
-
-      berth_pos = [valid_deep_coords[best_deep_idx[0]][0], valid_deep_coords[best_deep_idx[0]][1]];
-      berth_depth = valid_deep_coords[best_deep_idx[0]][2];
-      land_km = d_p2s_deg[0] * 111.0;
-      jetty_m = d_s2d_deg[0] * 111000;
+      currentLabel++;
     }
-  } else if (valid_deep_coords.length > 0) {
-    const tree = new KDTree(valid_deep_coords.map(x => [x[0], x[1]]));
+  }
+
+  // Ekstraksi Koordinat Murni dari Seluruh Laut Valid
+  const ocean_coords = [];
+  for (let r = 0; r < win.height; r++) {
+    for (let c = 0; c < win.width; c++) {
+      if (oceanLabels.has(componentLabels[r * win.width + c])) {
+        
+        const lat = win.latStart + r * win.latStep;
+        const lon = win.lonStart + c * win.lonStep;
+        
+        // Pembatas radius pencarian agar komputasi kilat (Radius 0.5 derajat / ~55 KM)
+        if (Math.abs(lat - pt_pos[0]) > 0.5 || Math.abs(lon - pt_pos[1]) > 0.5) continue;
+        
+        ocean_coords.push([lat, lon, win.data[r * win.width + c]]);
+      }
+    }
+  }
+
+  let berthLat = pt_pos[0], berthLon = pt_pos[1], berthDepth = PORT_SAFE_DEPTH - 1;
+  let dist_nm_total = 0;
+
+  // 2. Pencarian Jarak Terdekat Tanpa Batas (KDTree)
+  if (ocean_coords.length > 0) {
+    const tree = new KDTree(ocean_coords.map(x => [x[0], x[1]]));
     const [d_deg, idx] = tree.query(pt_pos, 1);
-    berth_pos = [valid_deep_coords[idx[0]][0], valid_deep_coords[idx[0]][1]];
-    berth_depth = valid_deep_coords[idx[0]][2];
-    jetty_m = d_deg[0] * 111000;
-  } else {
-    berth_depth = PORT_SAFE_DEPTH - 1; 
+    berthLat = ocean_coords[idx[0]][0];
+    berthLon = ocean_coords[idx[0]][1];
+    berthDepth = ocean_coords[idx[0]][2];
+    dist_nm_total = fast_nm_dist(pt_pos, [berthLat, berthLon]);
+  }
+
+  // 3. Kalkulasi Porsi Darat vs Laut Dangkal
+  const total_dist_m = dist_nm_total * 1852.0;
+  const dist_km_total = total_dist_m / 1000.0;
+  const steps = Math.max(5, Math.trunc(dist_km_total * 10)); 
+  let landCount = 0;
+  
+  for (let i = 0; i < steps; i++) {
+    const t = i / (steps - 1 || 1);
+    const sLat = pt_pos[0] + t * (berthLat - pt_pos[0]);
+    const sLon = pt_pos[1] + t * (berthLon - pt_pos[1]);
+    const r = Math.trunc(Math.max(0, Math.min(win.height - 1, pyRound((sLat - win.latStart) / win.latStep))));
+    const c = Math.trunc(Math.max(0, Math.min(win.width - 1, pyRound((sLon - win.lonStart) / win.lonStep))));
+    if (getElevationClean(win, r, c) > 0.0) landCount++;
   }
   
-  console.log(`      ✅ ${ptNameDisp}: Akses Darat ${(land_km/1000).toFixed(1)} KM | Jetty ${jetty_m.toFixed(0)} M | Sandar ${berth_depth.toFixed(1)} m | Syarat: ${PORT_SAFE_DEPTH.toFixed(1)} m`);
-  return { berthLat: berth_pos[0], berthLon: berth_pos[1], berthDepth: berth_depth, landKm: land_km/1000, jettyM: jetty_m };
+  const darat_pct = steps > 0 ? (landCount / steps) : 0;
+  const land_km = dist_km_total * darat_pct;
+  const land_m = land_km * 1000;
+  const jetty_m = Math.max(0, total_dist_m - land_m);
+
+  if (total_dist_m > 50) {
+     console.log(`      ⚠️ Kapal terkurung dangkal. Menggeser titik Berth sejauh ${(dist_km_total).toFixed(2)} KM menuju laut lepas.`);
+  }
+  console.log(`      ✅ ${ptNameDisp}: Total kebutuhan Jetty/Alur Keruk: ${total_dist_m.toFixed(0)} M (Darat: ${land_m.toFixed(0)} M | Laut Dangkal: ${jetty_m.toFixed(0)} M) | Kedalaman Sandar: ${berthDepth.toFixed(1)} m`);
+  
+  return { berthLat, berthLon, berthDepth, landKm: land_km, jettyM: jetty_m, safeD: PORT_SAFE_DEPTH };
 }
 
 // ==============================================================================
-// 5. BEZIER & ORGANIC POST-PROCESSING
+// 4. BEZIER & ORGANIC POST-PROCESSING (STRICT AUDIT)
 // ==============================================================================
-function applyBezierManeuvers(pathCoords) {
+function applyBezierManeuvers(pathCoords, win, safeD, isBatnas) {
   if (pathCoords.length < 3) return pathCoords;
   const turn_radius_m = 5.0 * MAX_LPP;
   const R_nm = turn_radius_m / 1852.0;
   const result = [pathCoords[0]];
+  
   for (let k = 1; k < pathCoords.length - 1; k++) {
     const pPrev = pathCoords[k - 1], pCurr = pathCoords[k], pNext = pathCoords[k + 1];
     const dPrevNm = fast_nm_dist(pPrev, pCurr), dNextNm = fast_nm_dist(pCurr, pNext);
@@ -358,8 +380,24 @@ function applyBezierManeuvers(pathCoords) {
     const p0 = dist_prev_deg > 0 ? [pCurr[0] + vPrev[0]*(cut_deg_prev/dist_prev_deg), pCurr[1] + vPrev[1]*(cut_deg_prev/dist_prev_deg)] : pCurr;
     const p2 = dist_next_deg > 0 ? [pCurr[0] + vNext[0]*(cut_deg_next/dist_next_deg), pCurr[1] + vNext[1]*(cut_deg_next/dist_next_deg)] : pCurr;
     
+    const curvePts = [];
     for (const t of [0.0, 0.25, 0.5, 0.75, 1.0]) {
-      result.push([(1-t)**2 * p0[0] + 2*(1-t)*t * pCurr[0] + t**2 * p2[0], (1-t)**2 * p0[1] + 2*(1-t)*t * pCurr[1] + t**2 * p2[1]]);
+      curvePts.push([(1-t)**2 * p0[0] + 2*(1-t)*t * pCurr[0] + t**2 * p2[0], (1-t)**2 * p0[1] + 2*(1-t)*t * pCurr[1] + t**2 * p2[1]]);
+    }
+    
+    // STRICT AUDIT BEZIER: Pastikan hasil curve tidak memotong ujung daratan (corner cutting)
+    let isValidCurve = true;
+    for (let i = 0; i < curvePts.length - 1; i++) {
+      if (!fast_safe_corridor_numpy(curvePts[i], curvePts[i+1], win, safeD, 0, isBatnas)) {
+        isValidCurve = false;
+        break;
+      }
+    }
+
+    if (isValidCurve) {
+      result.push(...curvePts.slice(1));
+    } else {
+      result.push(pCurr); // Kembalikan ke sudut patah patah asli jika kurva memakan daratan
     }
   }
   result.push(pathCoords[pathCoords.length - 1]);
@@ -385,24 +423,28 @@ function applyOrganicInterpolation(pathCoords) {
 }
 
 // ==============================================================================
-// 6. CORE: A-STAR ROUTER (BATNAS & GEBCO) - 100% COLAB COMPLIANT
+// 5. CORE: A-STAR ROUTER (BATNAS & GEBCO) - 100% STRICT SAFE DEPTH
 // ==============================================================================
-async function run_spatial_core(cu, cv, safeD, win, osmData, isBatnas, u, v) {
+async function run_spatial_core(cu, cv, safeD, win, isBatnas, u, v) {
   const dist_nm_total_log = geodesic_nm(cu, cv); 
-  const lat_step_abs = Math.abs(win.latStep), lon_step_abs = Math.abs(win.lonStep);
+  const lat_step_abs = Math.abs(win.latStep);
+  const lon_step_abs = Math.abs(win.lonStep);
 
   console.log(`   --------------------------------------------------------`);
   console.log(`   🚦 Memproses Rute: ${u} <--> ${v} (Jarak Lurus: ${dist_nm_total_log.toFixed(1)} NM)`);
 
   let auto_waypoints = [];
   
+  // =========================================================================
+  // STRICT MACRO SATELLITE
+  // =========================================================================
   if (isBatnas && dist_nm_total_log > 150.0) {
     const stride_r = Math.max(1, Math.trunc(0.025 / lat_step_abs));
     const stride_c = Math.max(1, Math.trunc(0.025 / lon_step_abs));
-    const rA = Math.trunc(Math.max(0, Math.min(win.height-1, Math.round((cu[0] - win.latStart) / win.latStep))));
-    const cA = Math.trunc(Math.max(0, Math.min(win.width-1, Math.round((cu[1] - win.lonStart) / win.lonStep))));
-    const rB = Math.trunc(Math.max(0, Math.min(win.height-1, Math.round((cv[0] - win.latStart) / win.latStep))));
-    const cB = Math.trunc(Math.max(0, Math.min(win.width-1, Math.round((cv[1] - win.lonStart) / win.lonStep))));
+    const rA = Math.trunc(Math.max(0, Math.min(win.height-1, pyRound((cu[0] - win.latStart) / win.latStep))));
+    const cA = Math.trunc(Math.max(0, Math.min(win.width-1, pyRound((cu[1] - win.lonStart) / win.lonStep))));
+    const rB = Math.trunc(Math.max(0, Math.min(win.height-1, pyRound((cv[0] - win.latStart) / win.latStep))));
+    const cB = Math.trunc(Math.max(0, Math.min(win.width-1, pyRound((cv[1] - win.lonStart) / win.lonStep))));
 
     const queue_macro = new MinHeap();
     const visited_macro = new Set();
@@ -433,10 +475,18 @@ async function run_spatial_core(cu, cv, safeD, win, osmData, isBatnas, u, v) {
       for (const [dr, dc] of moves_16) {
         const nr = r + dr, nc = c + dc;
         if (nr >= 0 && nr < win.height && nc >= 0 && nc < win.width) {
-          if (getElevationClean(win, nr, nc) <= safeD && !visited_macro.has(`${nr},${nc}`)) {
-            const ncost = cost + Math.sqrt(dr*dr + dc*dc);
-            const heuristic = Math.sqrt((nr - rB)**2 + (nc - cB)**2);
-            queue_macro.push(ncost + heuristic, ncost, `${nr},${nc}`, [...path, [nr, nc]]);
+          if (!visited_macro.has(`${nr},${nc}`)) {
+            const elev_next = getElevationClean(win, nr, nc);
+            const ptR = [win.latStart + r * win.latStep, win.lonStart + c * win.lonStep];
+            const ptNr = [win.latStart + nr * win.latStep, win.lonStart + nc * win.lonStep];
+            
+            // STRICT AUDIT: Satelit makro wajib mematuhi safeD dan koridor tembus lurus
+            if (elev_next <= safeD && fast_safe_corridor_numpy(ptR, ptNr, win, safeD, 0, isBatnas)) {
+              const penalty = 1.0;
+              const ncost = cost + (Math.sqrt(dr*dr + dc*dc) * penalty);
+              const heuristic = Math.sqrt((nr - rB)**2 + (nc - cB)**2);
+              queue_macro.push(ncost + heuristic, ncost, `${nr},${nc}`, [...path, [nr, nc]]);
+            }
           }
         }
       }
@@ -446,6 +496,9 @@ async function run_spatial_core(cu, cv, safeD, win, osmData, isBatnas, u, v) {
   const route_segments = [cu, ...auto_waypoints, cv];
   const full_organic_path = [];
 
+  // =========================================================================
+  // STRICT MICRO CAPSULE ROUTING
+  // =========================================================================
   for (let seg_idx = 0; seg_idx < route_segments.length - 1; seg_idx++) {
     const p_start = route_segments[seg_idx], p_end = route_segments[seg_idx+1];
 
@@ -455,19 +508,19 @@ async function run_spatial_core(cu, cv, safeD, win, osmData, isBatnas, u, v) {
       continue;
     }
 
-    let success_micro = false, pad_iter = isBatnas ? 0.6 : 1.2, c_factor = 2;
+    let success_micro = false, pad_iter = isBatnas ? 0.6 : 1.2, c_factor = 1;
     let segPath = [];
 
     while (pad_iter <= 15.0 && !success_micro) {
       const min_lat_iter = Math.min(p_start[0], p_end[0]) - pad_iter, max_lat_iter = Math.max(p_start[0], p_end[0]) + pad_iter;
       const min_lon_iter = Math.min(p_start[1], p_end[1]) - pad_iter, max_lon_iter = Math.max(p_start[1], p_end[1]) + pad_iter;
       
-      const idx1 = Math.trunc(Math.max(0, Math.min(win.height-1, Math.round((max_lat_iter - win.latStart) / win.latStep))));
-      const idx2 = Math.trunc(Math.max(0, Math.min(win.height-1, Math.round((min_lat_iter - win.latStart) / win.latStep))));
+      const idx1 = Math.trunc(Math.max(0, Math.min(win.height-1, pyRound((max_lat_iter - win.latStart) / win.latStep))));
+      const idx2 = Math.trunc(Math.max(0, Math.min(win.height-1, pyRound((min_lat_iter - win.latStart) / win.latStep))));
       const y_min_idx = Math.min(idx1, idx2), y_max_idx = Math.max(idx1, idx2);
       
-      const idx3 = Math.trunc(Math.max(0, Math.min(win.width-1, Math.round((min_lon_iter - win.lonStart) / win.lonStep))));
-      const idx4 = Math.trunc(Math.max(0, Math.min(win.width-1, Math.round((max_lon_iter - win.lonStart) / win.lonStep))));
+      const idx3 = Math.trunc(Math.max(0, Math.min(win.width-1, pyRound((min_lon_iter - win.lonStart) / win.lonStep))));
+      const idx4 = Math.trunc(Math.max(0, Math.min(win.width-1, pyRound((max_lon_iter - win.lonStart) / win.lonStep))));
       const x_min_idx = Math.min(idx3, idx4), x_max_idx = Math.max(idx3, idx4);
 
       const B_cells = 10 * c_factor;
@@ -477,12 +530,18 @@ async function run_spatial_core(cu, cv, safeD, win, osmData, isBatnas, u, v) {
         for (let bj = x_min_idx; bj < x_max_idx; bj += B_cells) {
           const r_end = Math.min(bi+B_cells, y_max_idx), c_end = Math.min(bj+B_cells, x_max_idx);
           let hasShallow = false;
-          outer_b: for (let r = bi; r < r_end; r++) for (let c = bj; c < c_end; c++) {
-            if (getElevationClean(win, r, c) > safeD) { hasShallow = true; break outer_b; }
+          
+          outer_b: for (let r = bi; r < r_end; r++) {
+              for (let c = bj; c < c_end; c++) {
+                  if (getElevationClean(win, r, c) > safeD) { hasShallow = true; break outer_b; } // Patokan Dangkal = safeD
+              }
           }
+          
           if (hasShallow) {
-            for (let r = bi; r < r_end; r+=c_factor*2) for (let c = bj; c < c_end; c+=c_factor*2) {
-              if (getElevationClean(win, r, c) <= safeD) final_coords.push([win.latStart+r*win.latStep, win.lonStart+c*win.lonStep]);
+            for (let r = bi; r < r_end; r += c_factor) {
+              for (let c = bj; c < c_end; c += c_factor) {
+                if (getElevationClean(win, r, c) <= safeD) final_coords.push([win.latStart+r*win.latStep, win.lonStart+c*win.lonStep]);
+              }
             }
           } else {
             const r = Math.floor((bi+r_end)/2), c = Math.floor((bj+c_end)/2);
@@ -491,7 +550,7 @@ async function run_spatial_core(cu, cv, safeD, win, osmData, isBatnas, u, v) {
         }
       }
 
-      const haloRad = Math.max(15, c_factor * 5);
+      const haloRad = Math.max(25, c_factor * 6);
       for (const pt of [p_start, p_end]) {
         const tr = Math.round((pt[0]-win.latStart)/win.latStep), tc = Math.round((pt[1]-win.lonStart)/win.lonStep);
         for (let r = Math.max(0, tr-haloRad); r <= Math.min(win.height-1, tr+haloRad); r++) {
@@ -508,15 +567,18 @@ async function run_spatial_core(cu, cv, safeD, win, osmData, isBatnas, u, v) {
       const G_nodes = {};
       const seen = new Set();
       let nodeIdx = 0;
+      let realSi = -1;
+      let realEi = -1;
 
       for (let i = 0; i < final_coords.length; i++) {
         const pt = final_coords[i];
-        const r = Math.round((pt[0]-win.latStart)/win.latStep), c = Math.round((pt[1]-win.lonStart)/win.lonStep);
+        
+        const r = pyRound((pt[0]-win.latStart)/win.latStep), c = pyRound((pt[1]-win.lonStart)/win.lonStep);
         const key = `${r},${c}`;
         
         if (seen.has(key)) {
-          if (i === si) { G_nodes[nodeIdx] = pt; valid_nodes.push({ i: nodeIdx, danger: 1.0 }); var realSi = nodeIdx; nodeIdx++; }
-          else if (i === ei) { G_nodes[nodeIdx] = pt; valid_nodes.push({ i: nodeIdx, danger: 1.0 }); var realEi = nodeIdx; nodeIdx++; }
+          if (i === si) { G_nodes[nodeIdx] = pt; valid_nodes.push({ i: nodeIdx, danger: 1.0 }); realSi = nodeIdx; nodeIdx++; }
+          else if (i === ei) { G_nodes[nodeIdx] = pt; valid_nodes.push({ i: nodeIdx, danger: 1.0 }); realEi = nodeIdx; nodeIdx++; }
           continue;
         }
         seen.add(key);
@@ -525,20 +587,27 @@ async function run_spatial_core(cu, cv, safeD, win, osmData, isBatnas, u, v) {
         const c_rt = Math.min(win.width-1, c+3), c_lf = Math.max(0, c-3);
         
         let danger = 1.0;
-        let isSafe = true;
-        
-        if (getElevationClean(win, r_up, c) > safeD || getElevationClean(win, r_dn, c) > safeD || getElevationClean(win, r, c_rt) > safeD || getElevationClean(win, r, c_lf) > safeD) isSafe = false;
-        if (!isSafe && i !== si && i !== ei) continue; 
+        let el = getElevationClean(win, r, c);
 
-        outer_dang: for (let nr = r_dn; nr <= r_up; nr++) for (let nc = c_lf; nc <= c_rt; nc++) {
-          if (getElevationClean(win, nr, nc) > safeD) { danger = 1.7; break outer_dang; }
+        // PENALTY SYSTEM
+        if (el > safeD) {
+            danger = 5.0; // Seharusnya tidak terjadi karena sudah di-filter safeD
+        } else {
+            outer_dang: for (let nr = r_dn; nr <= r_up; nr++) {
+                for (let nc = c_lf; nc <= c_rt; nc++) {
+                    if (getElevationClean(win, nr, nc) > safeD) { 
+                        danger = 1.7; // Kapal menjauh dari dinding laut dangkal
+                        break outer_dang; 
+                    }
+                }
+            }
         }
         
         G_nodes[nodeIdx] = pt;
         valid_nodes.push({ i: nodeIdx, danger });
         
-        if (i === si) var realSi = nodeIdx;
-        if (i === ei) var realEi = nodeIdx;
+        if (i === si) realSi = nodeIdx;
+        if (i === ei) realEi = nodeIdx;
         nodeIdx++;
       }
 
@@ -555,14 +624,12 @@ async function run_spatial_core(cu, cv, safeD, win, osmData, isBatnas, u, v) {
           const nB = valid_nodes[indices[j]];
           if (nA.i >= nB.i) continue;
           
-          const d_nm = fast_nm_dist(G_nodes[nA.i], G_nodes[nB.i]);
+          const ptA = G_nodes[nA.i], ptB = G_nodes[nB.i];
+          const d_nm = fast_nm_dist(ptA, ptB);
           const penalty = Math.max(nA.danger, nB.danger);
-          
-          if (d_nm <= c_factor * Math.max(lat_step_abs, lon_step_abs) * 60.0 * 1.5) {
-            G_edges.get(nA.i).push({ ni: nB.i, w: d_nm * penalty });
-            if (!G_edges.has(nB.i)) G_edges.set(nB.i, []);
-            G_edges.get(nB.i).push({ ni: nA.i, w: d_nm * penalty });
-          } else if (fast_safe_corridor_numpy(G_nodes[nA.i], G_nodes[nB.i], win, safeD, 0, isBatnas)) {
+
+          // STRICT AUDIT: Hubungan Edge Wajib Lulus safeD
+          if (fast_safe_corridor_numpy(ptA, ptB, win, safeD, 0, isBatnas)) {
             G_edges.get(nA.i).push({ ni: nB.i, w: d_nm * penalty });
             if (!G_edges.has(nB.i)) G_edges.set(nB.i, []);
             G_edges.get(nB.i).push({ ni: nA.i, w: d_nm * penalty });
@@ -571,29 +638,51 @@ async function run_spatial_core(cu, cv, safeD, win, osmData, isBatnas, u, v) {
       }
 
       for (const vi of [realSi, realEi]) {
+        if (vi === -1) continue;
         if (!G_edges.has(vi)) G_edges.set(vi, []);
-        const [dists, indices] = tree_grid.query(G_nodes[vi], 200);
+        const [dists, indices] = tree_grid.query(G_nodes[vi], 500, Infinity);
         let conn = 0;
+        
         for (let j = 0; j < indices.length; j++) {
           const nB = valid_nodes[indices[j]];
           if (vi === nB.i) continue;
-          if (fast_safe_corridor_numpy(G_nodes[vi], G_nodes[nB.i], win, safeD, 1, isBatnas)) {
-            const w = fast_nm_dist(G_nodes[vi], G_nodes[nB.i]);
-            G_edges.get(vi).push({ ni: nB.i, w });
+          
+          const pt_A = G_nodes[vi], pt_B = G_nodes[nB.i];
+
+          // STRICT AUDIT: Menghubungkan Terminal (Pusat ke Edge) dgn safeD mutlak
+          if (fast_safe_corridor_numpy(pt_A, pt_B, win, safeD, 1, isBatnas)) {
+            const w = fast_nm_dist(pt_A, pt_B);
+            let d_vi = 1.0;
+            for(let k=0; k<valid_nodes.length; k++) if(valid_nodes[k].i === vi) { d_vi = valid_nodes[k].danger; break; }
+            const penalty = Math.max(d_vi, nB.danger);
+
+            G_edges.get(vi).push({ ni: nB.i, w: w * penalty });
             if (!G_edges.has(nB.i)) G_edges.set(nB.i, []);
-            G_edges.get(nB.i).push({ ni: vi, w });
+            G_edges.get(nB.i).push({ ni: vi, w: w * penalty });
             if (++conn >= 15) break;
           }
         }
         
-        if (conn < 3) {
-          for (let j = 0; j < Math.min(8, indices.length); j++) {
+        if (conn === 0) {
+          for (let j = 0; j < indices.length; j++) {
             const nB = valid_nodes[indices[j]];
             if (vi === nB.i) continue;
-            const w = fast_nm_dist(G_nodes[vi], G_nodes[nB.i]);
-            G_edges.get(vi).push({ ni: nB.i, w });
-            if (!G_edges.has(nB.i)) G_edges.set(nB.i, []);
-            G_edges.get(nB.i).push({ ni: vi, w });
+            
+            if (G_edges.has(nB.i) && G_edges.get(nB.i).length >= 1) {
+               const pt_A = G_nodes[vi], pt_B = G_nodes[nB.i];
+
+               if (fast_safe_corridor_numpy(pt_A, pt_B, win, safeD, 0, isBatnas)) {
+                   const w = fast_nm_dist(pt_A, pt_B);
+                   let d_vi = 1.0;
+                   for(let k=0; k<valid_nodes.length; k++) if(valid_nodes[k].i === vi) { d_vi = valid_nodes[k].danger; break; }
+                   const penalty = Math.max(d_vi, nB.danger);
+
+                   G_edges.get(vi).push({ ni: nB.i, w: w * penalty });
+                   if (!G_edges.has(nB.i)) G_edges.set(nB.i, []);
+                   G_edges.get(nB.i).push({ ni: vi, w: w * penalty });
+                   if (++conn >= 3) break; 
+               }
+            }
           }
         }
       }
@@ -605,16 +694,21 @@ async function run_spatial_core(cu, cv, safeD, win, osmData, isBatnas, u, v) {
         segPath = raw_path.map(idx => G_nodes[idx]);
         success_micro = true;
       } else {
-        pad_iter += 2.0; c_factor += 1;
+        pad_iter += 2.0; 
+        c_factor += 1; 
       }
     }
 
-    if (!success_micro) return null;
+    if (!success_micro) {
+      console.log(`      ❌ SEGMEN GAGAL (KANDAS MUTLAK): Terhalang perairan dangkal yang tidak dapat ditembus pada syarat ${safeD.toFixed(1)}m.`);
+      return null; // Return null akan otomatis menggagalkan rute secara jujur (berth terjebak total)
+    }
 
     const smooth_seg = [segPath[0]]; let curr = 0;
     while (curr < segPath.length - 1) {
       let furthest = curr + 1;
       for (let nxt = Math.min(segPath.length - 1, curr + 40); nxt > curr + 1; nxt--) {
+        // STRICT AUDIT: Smoothing wajb mematuhi safeD
         if (fast_safe_corridor_numpy(segPath[curr], segPath[nxt], win, safeD, 4, isBatnas)) { furthest = nxt; break; }
       }
       smooth_seg.push(segPath[furthest]); curr = furthest;
@@ -628,12 +722,14 @@ async function run_spatial_core(cu, cv, safeD, win, osmData, isBatnas, u, v) {
   while (curr < full_organic_path.length - 1) {
     let furthest = curr + 1;
     for (let nxt = Math.min(full_organic_path.length - 1, curr + 200); nxt > curr + 1; nxt--) {
+      // STRICT AUDIT: Global Smoothing wajib mematuhi safeD
       if (fast_safe_corridor_numpy(full_organic_path[curr], full_organic_path[nxt], win, safeD, 4, isBatnas)) { furthest = nxt; break; }
     }
     global_smoothed.push(full_organic_path[furthest]); curr = furthest;
   }
 
-  const with_bezier = applyBezierManeuvers(global_smoothed);
+  // Inject win dan safeD ke Bezier agar sudut lengkungan tervalidasi
+  const with_bezier = applyBezierManeuvers(global_smoothed, win, safeD, isBatnas);
   const final_wp = applyOrganicInterpolation(with_bezier);
 
   let dist = 0;
@@ -643,13 +739,11 @@ async function run_spatial_core(cu, cv, safeD, win, osmData, isBatnas, u, v) {
 }
 
 // ==============================================================================
-// 7. MAIN PUBLIC COMPUTE ROUTE API
+// 6. MAIN PUBLIC COMPUTE ROUTE API
 // ==============================================================================
 const _pendingRoutes = new Map();
 
 async function computeRoute(origin, destination, options = {}) {
-  // PAKSAAN: Selalu gunakan draft kapal terbesar dari database saat membuat jaring agar universal aman.
-  const safeD = -(MAX_DESIGN_DRAFT + UKC_CLEARANCE + 0.5 * (options.waveHeight || 0));
   const key = makeRouteKey(origin.name || `${origin.lat},${origin.lon}`, destination.name || `${destination.lat},${destination.lon}`);
 
   if (!options.forceRecompute && _pendingRoutes.has(key)) return _pendingRoutes.get(key);
@@ -665,47 +759,61 @@ async function computeRoute(origin, destination, options = {}) {
 
     if (!win) throw new Error(`Data bathymetri gagal dimuat untuk rute ini.`);
 
-    console.log(`\n🕸️ MERAKIT JARINGAN NAVIGASI (MODE: ULTRA-FINE CAPSULE & STRING PULLING)...`);
+    for (let i = 0; i < win.data.length; i++) {
+      if (win.data[i] > 8000 || win.data[i] < -11000 || isNaN(win.data[i])) {
+        win.data[i] = -9999; 
+      }
+    }
+
+    let route_max_wave = 0;
+    if (options.weatherCacheByZone) {
+       for (const z of Object.values(options.weatherCacheByZone)) {
+           route_max_wave = Math.max(route_max_wave, z.wave || 0);
+       }
+    }
+    const finalSafeD = -(MAX_DESIGN_DRAFT + UKC_CLEARANCE + 0.5 * route_max_wave);
+
+    console.log(`\n🕸️ MERAKIT JARINGAN NAVIGASI (STRICT AUDIT DEPTH PARITY)...`);
     console.log(`   ⚓ DRAFT KAPAL MAKSIMAL (DATABASE): ${MAX_DESIGN_DRAFT.toFixed(1)}m | UKC: ${UKC_CLEARANCE.toFixed(2)}m`);
-    console.log(`   📐 PANJANG KAPAL (LPP) MAKSIMAL  : ${MAX_LPP.toFixed(1)}m (Untuk Kalkulasi Manuver)`);
+    console.log(`   📐 PANJANG KAPAL (LPP) MAKSIMAL  : ${MAX_LPP.toFixed(1)}m`);
     console.log(`\n   🏗️  MENGKALKULASI AKSES PESISIR (DARAT -> PANTAI -> JETTY/KERUK)...`);
+    console.log(`      (Memaksa pencarian Jetty hingga kedalaman laut ekstrem rute: ${finalSafeD.toFixed(1)}m)`);
 
-    const bOrig = calculate_access_and_jetty(origin.name || 'Origin', [origin.lat, origin.lon], win, safeD, 0);
-    const bDest = calculate_access_and_jetty(destination.name || 'Dest', [destination.lat, destination.lon], win, safeD, 0);
+    const bOrig = await calculate_access_and_jetty(origin.name || 'Origin', [origin.lat, origin.lon], win, options.weatherCacheByZone, finalSafeD);
+    const bDest = await calculate_access_and_jetty(destination.name || 'Dest', [destination.lat, destination.lon], win, options.weatherCacheByZone, finalSafeD);
 
-    const bbox_min_lat = Math.min(origin.lat, destination.lat) - 5.0;
-    const bbox_max_lat = Math.max(origin.lat, destination.lat) + 5.0;
-    const bbox_min_lon = Math.min(origin.lon, destination.lon) - 5.0;
-    const bbox_max_lon = Math.max(origin.lon, destination.lon) + 5.0;
-
-    const osmData = await getOSMFerryRoutes(bbox_min_lat, bbox_max_lat, bbox_min_lon, bbox_max_lon);
-
-    console.log(`\n   🗺️ MEMULAI KALKULASI RUTE (ULTRA-FINE MACRO & STRING PULLING AI)...`);
+    console.log(`\n   🗺️ MEMULAI KALKULASI RUTE (SMART A-STAR ENGINE)...`);
     
-    // INPUT MURNI DARI BERTH KE BERTH
-    const routeResult = await run_spatial_core([bOrig.berthLat, bOrig.berthLon], [bDest.berthLat, bDest.berthLon], safeD, win, osmData, options.bathyEngine === 'batnas', origin.name || 'Origin', destination.name || 'Dest');
+    let routeResult = await run_spatial_core([bOrig.berthLat, bOrig.berthLon], [bDest.berthLat, bDest.berthLon], finalSafeD, win, options.bathyEngine === 'batnas', origin.name || 'Origin', destination.name || 'Dest');
 
-    if (!routeResult) throw new Error(`Gagal mencari rute.`);
+    if (!routeResult || routeResult.waypoints.length < 2) {
+        console.log(`      ⚠️ RUTE ALAMI BUNTU: Tidak ada jalur murni air yang memenuhi syarat kedalaman ${finalSafeD.toFixed(1)}m.`);
+        console.log(`      ⚠️ Mengirimkan data kosong agar rute dicoret dari sistem.`);
+        routeResult = { waypoints: [], distanceNm: -1.0 }; 
+    }
 
     let mn = Infinity, mx = -Infinity;
     for (const pt of routeResult.waypoints) {
       const r = Math.round((pt[0]-win.latStart)/win.latStep), c = Math.round((pt[1]-win.lonStart)/win.lonStep);
       const d = getElevationClean(win, r, c);
-      if (d !== -9999) { mn = Math.min(mn, d); mx = Math.max(mx, d); }
+      if (d !== 9999) { mn = Math.min(mn, d); mx = Math.max(mx, d); }
     }
 
     const weatherZones = await ihoSvc.getZonesForBbox(Math.min(origin.lat, destination.lat) - pad, Math.max(origin.lat, destination.lat) + pad, Math.min(origin.lon, destination.lon) - pad, Math.max(origin.lon, destination.lon) + pad);
 
-    const record = {
+    const status = (mx <= finalSafeD) ? 'Aman' : 'Rawan Kandas';
+    const dbRecord = {
       routeKey: key, origin: origin.name, destination: destination.name,
       waypoints: routeResult.waypoints, distanceNm: routeResult.distanceNm,
       minDepth: mn === Infinity ? 0 : mn, maxDepth: mx === -Infinity ? 0 : mx,
-      engineUsed: options.bathyEngine, safeDepth: safeD, weatherZones
+      engineUsed: options.bathyEngine,
+      safeDepth: parseFloat(finalSafeD.toFixed(1)),
+      weatherZones
     };
 
-    try { await prisma.spatialRouteCache.upsert({ where: { routeKey: key }, update: record, create: record }); } catch (_) {}
+    try { await prisma.spatialRouteCache.upsert({ where: { routeKey: key }, update: dbRecord, create: dbRecord }); } catch (e) { console.error('[SpatialRoute] DB upsert error:', e.message); }
 
-    const res = { ...record, fromCache: false };
+    const res = { ...dbRecord, status, fromCache: false };
     if (_res) _res(res); return res;
   } catch (e) {
     if (_rej) _rej(e); throw e;
@@ -715,8 +823,6 @@ async function computeRoute(origin, destination, options = {}) {
 }
 
 async function computeJettyReport(locationName, lat, lon, options = {}) {
-  // PAKSAAN: Selalu gunakan draft kapal terbesar dari database
-  const safeD = -(MAX_DESIGN_DRAFT + UKC_CLEARANCE + 0.5 * (options.waveHeight || 0));
   const pad = 0.5;
 
   const win = options.bathyEngine === 'batnas'
@@ -725,21 +831,33 @@ async function computeJettyReport(locationName, lat, lon, options = {}) {
 
   if (!win) return { locationName, origLat: lat, origLon: lon, shoreLat: lat, shoreLon: lon, berthLat: lat, berthLon: lon, landKm: 0, jettyM: 0, berthDepth: 0, engineUsed: 'none' };
 
-  const berth = calculate_access_and_jetty(locationName, [lat, lon], win, safeD, options.maxJettyM || 0);
+  for (let i = 0; i < win.data.length; i++) {
+    if (win.data[i] > 8000 || win.data[i] < -11000 || isNaN(win.data[i])) win.data[i] = -9999;
+  }
 
-  const report = {
+  const berth = await calculate_access_and_jetty(locationName, [lat, lon], win, options.weatherCacheByZone, null);
+
+  const safeDepth = parseFloat(berth.safeD.toFixed(1));
+  const berthStatus = berth.berthDepth <= berth.safeD ? 'Aman' : 'Rawan Kandas';
+  
+  const dbReport = {
     locationName, origLat: lat, origLon: lon, shoreLat: lat, shoreLon: lon,
     berthLat: berth.berthLat, berthLon: berth.berthLon,
-    landKm: parseFloat(berth.landKm.toFixed(2)), jettyM: parseFloat(berth.jettyM.toFixed(0)),
-    berthDepth: parseFloat(berth.berthDepth.toFixed(1)), engineUsed: options.bathyEngine
+    landKm: parseFloat(berth.landKm.toFixed(2)),
+    jettyM: parseFloat(berth.jettyM.toFixed(0)),
+    berthDepth: parseFloat(berth.berthDepth.toFixed(1)),
+    safeDepth,
+    status: berthStatus,
+    engineUsed: options.bathyEngine
   };
 
-  try { await prisma.jettyBerthReport.upsert({ where: { locationName }, update: report, create: report }); } catch (_) {}
-  return report;
+  try { await prisma.jettyBerthReport.upsert({ where: { locationName }, update: dbReport, create: dbReport }); } catch (e) { console.error('[JettyReport] DB upsert error:', e.message); }
+  
+  return { ...dbReport, landM: parseFloat((berth.landKm * 1000).toFixed(0)) };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 8. ENGINE VOYAGE & ORU DYNAMIC
+// 7. ENGINE VOYAGE & ORU DYNAMIC
 // ─────────────────────────────────────────────────────────────────────────────
 async function computeDynamicVoyageHours(waypoints, vessel, weatherCacheByZone) {
   if (!waypoints || waypoints.length < 2) return 0;
@@ -779,7 +897,6 @@ async function getDynamicOruCapex(demandBbtud, targetProv, analysisYear, inflati
 
   const oruInBbtud = oruDb.map(item => { return { ...item, capBbtud: item.unit === 'MMSCFD' ? (item.cap * heatingValue) / 1000.0 : item.cap }; });
   
-  // TIE-BREAKER KONSERVATIF: Mengambil harga yang lebih mahal jika kapasitas kembar
   const bestMatch = oruInBbtud.reduce((prev, curr) => {
     const diffCurr = Math.abs(curr.capBbtud - demandBbtud);
     const diffPrev = Math.abs(prev.capBbtud - demandBbtud);
