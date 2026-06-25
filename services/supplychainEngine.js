@@ -539,36 +539,40 @@ async function runSupplyChainModel(input) {
       const opex_usd_mmbtu = total_opex / (dem_tot_BBTUD * 1000 * 365);
       const total_cost = capex_usd_mmbtu + opex_usd_mmbtu;
 
-      globalScenarioId += 1;
-      results.push({
-        'No. Skenario': globalScenarioId,
-        'Nama Kapal': vessel.name,
-        'Rute': fullRoute.join(' - '),
-        'Total Jarak (NM)': totalDistance,
-        'RTD': RTD,
-        'Demand LNG/day (m3)': demand_m3_day,
-        'Nominal Capacity (m3)': nominal_capacity,
-        'Kapasitas Kapal (m3)': kapasitas_kapal,
-        'Speed (knot)': sailingTime > 0 ? totalDistance / sailingTime : vessel.speedKnot,
-        'buffer day': buffer_day,
-        'days_stock': days_stock,
-        'voyages_year': voyages_year,
-        'Utilitasi_Factor_LNGC': Utilitasi_Factor_LNGC,
-        'Batas_Maksimum_Utilisasi_LNGC': Batas_Maksimum_Utilisasi_LNGC,
-        'selected_storage Total': selected_storage_total,
-        'fuel_voyage': fuel_voyage,
-        'fuel_ballast': fuel_ballast,
-        'fuel_berth': fuel_berth,
-        'lng_fuel_cost': lng_fuel_cost,
-        'port_cost': port_cost,
-        'rent_cost': rent_cost,
-        'Total CAPEX (USD)': total_capex,
-        'Total CAPEX USD/MMBTU': capex_usd_mmbtu,
-        'Total OPEX (USD/year)': total_opex,
-        'Total OPEX (USD/MMBTU)': opex_usd_mmbtu,
-        'Total Cost (USD/MMBTU)': total_cost,
-        'Spokes': route.join(', '),
-      });
+      globalScenarioId += 1;
+      results.push({
+        'No. Skenario': globalScenarioId,
+        scenarioId: globalScenarioId,                 // <--- DATABASE KEY
+        'Nama Kapal': vessel.name,
+        'Rute': fullRoute.join(' - '),
+        route: fullRoute.join(' - '),                 // <--- DATABASE KEY
+        reuseCount: Math.floor(voyages_year),         // <--- DATABASE KEY (diambil dari utilitasi kapal)
+        
+        'Total Jarak (NM)': totalDistance,
+        'RTD': RTD,
+        'Demand LNG/day (m3)': demand_m3_day,
+        'Nominal Capacity (m3)': nominal_capacity,
+        'Kapasitas Kapal (m3)': kapasitas_kapal,
+        'Speed (knot)': sailingTime > 0 ? totalDistance / sailingTime : vessel.speedKnot,
+        'buffer day': buffer_day,
+        'days_stock': days_stock,
+        'voyages_year': voyages_year,
+        'Utilitasi_Factor_LNGC': Utilitasi_Factor_LNGC,
+        'Batas_Maksimum_Utilisasi_LNGC': Batas_Maksimum_Utilisasi_LNGC,
+        'selected_storage Total': selected_storage_total,
+        'fuel_voyage': fuel_voyage,
+        'fuel_ballast': fuel_ballast,
+        'fuel_berth': fuel_berth,
+        'lng_fuel_cost': lng_fuel_cost,
+        'port_cost': port_cost,
+        'rent_cost': rent_cost,
+        'Total CAPEX (USD)': total_capex,
+        'Total CAPEX USD/MMBTU': capex_usd_mmbtu,
+        'Total OPEX (USD/year)': total_opex,
+        'Total OPEX (USD/MMBTU)': opex_usd_mmbtu,
+        'Total Cost (USD/MMBTU)': total_cost,
+        'Spokes': route.join(', '),
+      });
     }
   }
 
@@ -757,36 +761,40 @@ async function runSupplyChainModelRisk(input) {
       const opex_usd_mmbtu = total_opex / (dem_tot_BBTUD * 1000 * 365);
       const total_cost = capex_usd_mmbtu + opex_usd_mmbtu;
 
-      globalScenarioId += 1;
-      results.push({
-        'No. Skenario': globalScenarioId,
-        'Nama Kapal': vessel.name,
-        'Rute': fullRoute.join(' - '),
-        'Total Jarak (NM)': totalDistance,
-        'RTD': RTD,
-        'Demand LNG/day (m3)': demand_m3_day,
-        'Nominal Capacity (m3)': nominal_capacity,
-        'Kapasitas Kapal (m3)': kapasitas_kapal,
-        'Speed (knot)': sailingTime > 0 ? totalDistance / sailingTime : vessel.speedKnot,
-        'buffer day': buffer_day,
-        'days_stock': days_stock,
-        'voyages_year': voyages_year,
-        'Utilitasi_Factor_LNGC': Utilitasi_Factor_LNGC,
-        'Batas_Maksimum_Utilisasi_LNGC': Batas_Maksimum_Utilisasi_LNGC,
-        'selected_storage Total': selected_storage_total,
-        'fuel_voyage': fuel_voyage,
-        'fuel_ballast': fuel_ballast,
-        'fuel_berth': fuel_berth,
-        'lng_fuel_cost': lng_fuel_cost,
-        'port_cost': port_cost,
-        'rent_cost': rent_cost,
-        'Total CAPEX (USD)': total_capex,
-        'Total CAPEX USD/MMBTU': capex_usd_mmbtu,
-        'Total OPEX (USD/year)': total_opex,
-        'Total OPEX (USD/MMBTU)': opex_usd_mmbtu,
-        'Total Cost (USD/MMBTU)': total_cost,
-        'Spokes': route.join(', '),
-      });
+      globalScenarioId += 1;
+      results.push({
+        'No. Skenario': globalScenarioId,
+        scenarioId: globalScenarioId,                 // <--- DATABASE KEY
+        'Nama Kapal': vessel.name,
+        'Rute': fullRoute.join(' - '),
+        route: fullRoute.join(' - '),                 // <--- DATABASE KEY
+        reuseCount: Math.floor(voyages_year),         // <--- DATABASE KEY (diambil dari utilitasi kapal)
+        
+        'Total Jarak (NM)': totalDistance,
+        'RTD': RTD,
+        'Demand LNG/day (m3)': demand_m3_day,
+        'Nominal Capacity (m3)': nominal_capacity,
+        'Kapasitas Kapal (m3)': kapasitas_kapal,
+        'Speed (knot)': sailingTime > 0 ? totalDistance / sailingTime : vessel.speedKnot,
+        'buffer day': buffer_day,
+        'days_stock': days_stock,
+        'voyages_year': voyages_year,
+        'Utilitasi_Factor_LNGC': Utilitasi_Factor_LNGC,
+        'Batas_Maksimum_Utilisasi_LNGC': Batas_Maksimum_Utilisasi_LNGC,
+        'selected_storage Total': selected_storage_total,
+        'fuel_voyage': fuel_voyage,
+        'fuel_ballast': fuel_ballast,
+        'fuel_berth': fuel_berth,
+        'lng_fuel_cost': lng_fuel_cost,
+        'port_cost': port_cost,
+        'rent_cost': rent_cost,
+        'Total CAPEX (USD)': total_capex,
+        'Total CAPEX USD/MMBTU': capex_usd_mmbtu,
+        'Total OPEX (USD/year)': total_opex,
+        'Total OPEX (USD/MMBTU)': opex_usd_mmbtu,
+        'Total Cost (USD/MMBTU)': total_cost,
+        'Spokes': route.join(', '),
+      });
     }
   }
 
@@ -872,67 +880,76 @@ async function runTwoVesselProbabilityModel(input) {
             (k2['Total Cost (USD/MMBTU)'] * vol_k2 * 1000 * 365 - k2['Total CAPEX (USD)'] / Pyears);
           const sys_cost = (c_usd + (cost_numerator * Pyears)) / (totalDemandBBTUD * 1000 * 365 * Pyears);
 
-          globalScenarioId += 1;
-          total.push({
-            'No. Skenario': globalScenarioId,
-            'Probability': label,
-            'Nama Kapal': k1['Nama Kapal'],
-            'Kapasitas Kapal (m3)': k1['Kapasitas Kapal (m3)'],
-            // Kapal 1 details
-            'Rute Kapal 1': k1['Rute'],
-            'Total Jarak Kapal 1 (NM)': k1['Total Jarak (NM)'],
-            'RTD Kapal 1': k1['RTD'],
-            'Demand LNG/day Kapal 1 (m3)': k1['Demand LNG/day (m3)'],
-            'Nominal Capacity Kapal 1 (m3)': k1['Nominal Capacity (m3)'],
-            'Speed Kapal 1 (knot)': k1['Speed (knot)'],
-            'buffer day Kapal 1': k1['buffer day'],
-            'days_stock Kapal 1': k1['days_stock'],
-            'voyages_year Kapal 1': k1['voyages_year'],
-            'Utilitasi_Factor_LNGC Kapal 1': k1['Utilitasi_Factor_LNGC'],
-            'Batas_Maksimum_Utilisasi_LNGC Kapal 1': k1['Batas_Maksimum_Utilisasi_LNGC'],
-            'selected_storage Total Kapal 1': k1['selected_storage Total'],
-            'fuel_voyage Kapal 1': k1['fuel_voyage'],
-            'fuel_ballast Kapal 1': k1['fuel_ballast'],
-            'fuel_berth Kapal 1': k1['fuel_berth'],
-            'lng_fuel_cost Kapal 1': k1['lng_fuel_cost'],
-            'port_cost Kapal 1': k1['port_cost'],
-            'rent_cost Kapal 1': k1['rent_cost'],
-            'CAPEX Kapal 1': k1['Total CAPEX (USD)'],
-            'CAPEX USD/MMBTU Kapal 1': k1['Total CAPEX USD/MMBTU'],
-            'OPEX Kapal 1': k1['Total OPEX (USD/year)'],
-            'OPEX USD/MMBTU Kapal 1': k1['Total OPEX (USD/MMBTU)'],
-            'Cost Kapal 1': k1['Total Cost (USD/MMBTU)'],
-            'Spokes Kapal 1': k1['Spokes'],
-            // Kapal 2 details
-            'Rute Kapal 2': k2['Rute'],
-            'Total Jarak Kapal 2 (NM)': k2['Total Jarak (NM)'],
-            'RTD Kapal 2': k2['RTD'],
-            'Demand LNG/day Kapal 2 (m3)': k2['Demand LNG/day (m3)'],
-            'Nominal Capacity Kapal 2 (m3)': k2['Nominal Capacity (m3)'],
-            'Speed Kapal 2 (knot)': k2['Speed (knot)'],
-            'buffer day Kapal 2': k2['buffer day'],
-            'days_stock Kapal 2': k2['days_stock'],
-            'voyages_year Kapal 2': k2['voyages_year'],
-            'Utilitasi_Factor_LNGC Kapal 2': k2['Utilitasi_Factor_LNGC'],
-            'Batas_Maksimum_Utilisasi_LNGC Kapal 2': k2['Batas_Maksimum_Utilisasi_LNGC'],
-            'selected_storage Total Kapal 2': k2['selected_storage Total'],
-            'fuel_voyage Kapal 2': k2['fuel_voyage'],
-            'fuel_ballast Kapal 2': k2['fuel_ballast'],
-            'fuel_berth Kapal 2': k2['fuel_berth'],
-            'lng_fuel_cost Kapal 2': k2['lng_fuel_cost'],
-            'port_cost Kapal 2': k2['port_cost'],
-            'rent_cost Kapal 2': k2['rent_cost'],
-            'CAPEX Kapal 2': k2['Total CAPEX (USD)'],
-            'CAPEX USD/MMBTU Kapal 2': k2['Total CAPEX USD/MMBTU'],
-            'OPEX Kapal 2': k2['Total OPEX (USD/year)'],
-            'OPEX USD/MMBTU Kapal 2': k2['Total OPEX (USD/MMBTU)'],
-            'Cost Kapal 2': k2['Total Cost (USD/MMBTU)'],
-            'Spokes Kapal 2': k2['Spokes'],
-            // System totals
-            'System CAPEX (USD)': c_usd,
-            'System OPEX (USD/year)': o_usd_year,
-            'System Cost (USD/MMBTU)': sys_cost,
-          });
+          globalScenarioId += 1;
+          total.push({
+            'No. Skenario': globalScenarioId,
+            scenarioId: globalScenarioId,               // <--- DATABASE KEY
+            'Probability': label,
+            probability: label,                         // <--- DATABASE KEY
+            'Nama Kapal': k1['Nama Kapal'],
+            'Kapasitas Kapal (m3)': k1['Kapasitas Kapal (m3)'],
+            
+            // Kapal 1 details
+            'Rute Kapal 1': k1['Rute'],
+            route1: k1['Rute'],                         // <--- DATABASE KEY
+            reuseCount1: Math.floor(k1['voyages_year']),// <--- DATABASE KEY
+            'Total Jarak Kapal 1 (NM)': k1['Total Jarak (NM)'],
+            'RTD Kapal 1': k1['RTD'],
+            'Demand LNG/day Kapal 1 (m3)': k1['Demand LNG/day (m3)'],
+            'Nominal Capacity Kapal 1 (m3)': k1['Nominal Capacity (m3)'],
+            'Speed Kapal 1 (knot)': k1['Speed (knot)'],
+            'buffer day Kapal 1': k1['buffer day'],
+            'days_stock Kapal 1': k1['days_stock'],
+            'voyages_year Kapal 1': k1['voyages_year'],
+            'Utilitasi_Factor_LNGC Kapal 1': k1['Utilitasi_Factor_LNGC'],
+            'Batas_Maksimum_Utilisasi_LNGC Kapal 1': k1['Batas_Maksimum_Utilisasi_LNGC'],
+            'selected_storage Total Kapal 1': k1['selected_storage Total'],
+            'fuel_voyage Kapal 1': k1['fuel_voyage'],
+            'fuel_ballast Kapal 1': k1['fuel_ballast'],
+            'fuel_berth Kapal 1': k1['fuel_berth'],
+            'lng_fuel_cost Kapal 1': k1['lng_fuel_cost'],
+            'port_cost Kapal 1': k1['port_cost'],
+            'rent_cost Kapal 1': k1['rent_cost'],
+            'CAPEX Kapal 1': k1['Total CAPEX (USD)'],
+            'CAPEX USD/MMBTU Kapal 1': k1['Total CAPEX USD/MMBTU'],
+            'OPEX Kapal 1': k1['Total OPEX (USD/year)'],
+            'OPEX USD/MMBTU Kapal 1': k1['Total OPEX (USD/MMBTU)'],
+            'Cost Kapal 1': k1['Total Cost (USD/MMBTU)'],
+            'Spokes Kapal 1': k1['Spokes'],
+            
+            // Kapal 2 details
+            'Rute Kapal 2': k2['Rute'],
+            route2: k2['Rute'],                         // <--- DATABASE KEY
+            reuseCount2: Math.floor(k2['voyages_year']),// <--- DATABASE KEY
+            'Total Jarak Kapal 2 (NM)': k2['Total Jarak (NM)'],
+            'RTD Kapal 2': k2['RTD'],
+            'Demand LNG/day Kapal 2 (m3)': k2['Demand LNG/day (m3)'],
+            'Nominal Capacity Kapal 2 (m3)': k2['Nominal Capacity (m3)'],
+            'Speed Kapal 2 (knot)': k2['Speed (knot)'],
+            'buffer day Kapal 2': k2['buffer day'],
+            'days_stock Kapal 2': k2['days_stock'],
+            'voyages_year Kapal 2': k2['voyages_year'],
+            'Utilitasi_Factor_LNGC Kapal 2': k2['Utilitasi_Factor_LNGC'],
+            'Batas_Maksimum_Utilisasi_LNGC Kapal 2': k2['Batas_Maksimum_Utilisasi_LNGC'],
+            'selected_storage Total Kapal 2': k2['selected_storage Total'],
+            'fuel_voyage Kapal 2': k2['fuel_voyage'],
+            'fuel_ballast Kapal 2': k2['fuel_ballast'],
+            'fuel_berth Kapal 2': k2['fuel_berth'],
+            'lng_fuel_cost Kapal 2': k2['lng_fuel_cost'],
+            'port_cost Kapal 2': k2['port_cost'],
+            'rent_cost Kapal 2': k2['rent_cost'],
+            'CAPEX Kapal 2': k2['Total CAPEX (USD)'],
+            'CAPEX USD/MMBTU Kapal 2': k2['Total CAPEX USD/MMBTU'],
+            'OPEX Kapal 2': k2['Total OPEX (USD/year)'],
+            'OPEX USD/MMBTU Kapal 2': k2['Total OPEX (USD/MMBTU)'],
+            'Cost Kapal 2': k2['Total Cost (USD/MMBTU)'],
+            'Spokes Kapal 2': k2['Spokes'],
+            
+            // System totals
+            'System CAPEX (USD)': c_usd,
+            'System OPEX (USD/year)': o_usd_year,
+            'System Cost (USD/MMBTU)': sys_cost,
+          });
         }
       }
     }
@@ -1102,67 +1119,76 @@ async function runTwoVesselProbabilityModelRisk(input) {
             (k2['Total Cost (USD/MMBTU)'] * vol_k2 * 1000 * 365 - k2['Total CAPEX (USD)'] / Pyears);
           const sys_cost = (c_usd + (cost_numerator * Pyears)) / (totalDemandBBTUD * 1000 * 365 * Pyears);
 
-          globalScenarioId += 1;
-          total.push({
-            'No. Skenario': globalScenarioId,
-            'Probability': label,
-            'Nama Kapal': k1['Nama Kapal'],
-            'Kapasitas Kapal (m3)': k1['Kapasitas Kapal (m3)'],
-            // Kapal 1 full details
-            'Rute Kapal 1': k1['Rute'],
-            'Total Jarak Kapal 1 (NM)': k1['Total Jarak (NM)'],
-            'RTD Kapal 1': k1['RTD'],
-            'Demand LNG/day Kapal 1 (m3)': k1['Demand LNG/day (m3)'],
-            'Nominal Capacity Kapal 1 (m3)': k1['Nominal Capacity (m3)'],
-            'Speed Kapal 1 (knot)': k1['Speed (knot)'],
-            'buffer day Kapal 1': k1['buffer day'],
-            'days_stock Kapal 1': k1['days_stock'],
-            'voyages_year Kapal 1': k1['voyages_year'],
-            'Utilitasi_Factor_LNGC Kapal 1': k1['Utilitasi_Factor_LNGC'],
-            'Batas_Maksimum_Utilisasi_LNGC Kapal 1': k1['Batas_Maksimum_Utilisasi_LNGC'],
-            'selected_storage Total Kapal 1': k1['selected_storage Total'],
-            'fuel_voyage Kapal 1': k1['fuel_voyage'],
-            'fuel_ballast Kapal 1': k1['fuel_ballast'],
-            'fuel_berth Kapal 1': k1['fuel_berth'],
-            'lng_fuel_cost Kapal 1': k1['lng_fuel_cost'],
-            'port_cost Kapal 1': k1['port_cost'],
-            'rent_cost Kapal 1': k1['rent_cost'],
-            'CAPEX Kapal 1': k1['Total CAPEX (USD)'],
-            'CAPEX USD/MMBTU Kapal 1': k1['Total CAPEX USD/MMBTU'],
-            'OPEX Kapal 1': k1['Total OPEX (USD/year)'],
-            'OPEX USD/MMBTU Kapal 1': k1['Total OPEX (USD/MMBTU)'],
-            'Cost Kapal 1': k1['Total Cost (USD/MMBTU)'],
-            'Spokes Kapal 1': k1['Spokes'],
-            // Kapal 2 full details
-            'Rute Kapal 2': k2['Rute'],
-            'Total Jarak Kapal 2 (NM)': k2['Total Jarak (NM)'],
-            'RTD Kapal 2': k2['RTD'],
-            'Demand LNG/day Kapal 2 (m3)': k2['Demand LNG/day (m3)'],
-            'Nominal Capacity Kapal 2 (m3)': k2['Nominal Capacity (m3)'],
-            'Speed Kapal 2 (knot)': k2['Speed (knot)'],
-            'buffer day Kapal 2': k2['buffer day'],
-            'days_stock Kapal 2': k2['days_stock'],
-            'voyages_year Kapal 2': k2['voyages_year'],
-            'Utilitasi_Factor_LNGC Kapal 2': k2['Utilitasi_Factor_LNGC'],
-            'Batas_Maksimum_Utilisasi_LNGC Kapal 2': k2['Batas_Maksimum_Utilisasi_LNGC'],
-            'selected_storage Total Kapal 2': k2['selected_storage Total'],
-            'fuel_voyage Kapal 2': k2['fuel_voyage'],
-            'fuel_ballast Kapal 2': k2['fuel_ballast'],
-            'fuel_berth Kapal 2': k2['fuel_berth'],
-            'lng_fuel_cost Kapal 2': k2['lng_fuel_cost'],
-            'port_cost Kapal 2': k2['port_cost'],
-            'rent_cost Kapal 2': k2['rent_cost'],
-            'CAPEX Kapal 2': k2['Total CAPEX (USD)'],
-            'CAPEX USD/MMBTU Kapal 2': k2['Total CAPEX USD/MMBTU'],
-            'OPEX Kapal 2': k2['Total OPEX (USD/year)'],
-            'OPEX USD/MMBTU Kapal 2': k2['Total OPEX (USD/MMBTU)'],
-            'Cost Kapal 2': k2['Total Cost (USD/MMBTU)'],
-            'Spokes Kapal 2': k2['Spokes'],
-            // System totals
-            'System CAPEX (USD)': c_usd,
-            'System OPEX (USD/year)': o_usd_year,
-            'System Cost (USD/MMBTU)': sys_cost,
-          });
+          globalScenarioId += 1;
+          total.push({
+            'No. Skenario': globalScenarioId,
+            scenarioId: globalScenarioId,               // <--- DATABASE KEY
+            'Probability': label,
+            probability: label,                         // <--- DATABASE KEY
+            'Nama Kapal': k1['Nama Kapal'],
+            'Kapasitas Kapal (m3)': k1['Kapasitas Kapal (m3)'],
+            
+            // Kapal 1 details
+            'Rute Kapal 1': k1['Rute'],
+            route1: k1['Rute'],                         // <--- DATABASE KEY
+            reuseCount1: Math.floor(k1['voyages_year']),// <--- DATABASE KEY
+            'Total Jarak Kapal 1 (NM)': k1['Total Jarak (NM)'],
+            'RTD Kapal 1': k1['RTD'],
+            'Demand LNG/day Kapal 1 (m3)': k1['Demand LNG/day (m3)'],
+            'Nominal Capacity Kapal 1 (m3)': k1['Nominal Capacity (m3)'],
+            'Speed Kapal 1 (knot)': k1['Speed (knot)'],
+            'buffer day Kapal 1': k1['buffer day'],
+            'days_stock Kapal 1': k1['days_stock'],
+            'voyages_year Kapal 1': k1['voyages_year'],
+            'Utilitasi_Factor_LNGC Kapal 1': k1['Utilitasi_Factor_LNGC'],
+            'Batas_Maksimum_Utilisasi_LNGC Kapal 1': k1['Batas_Maksimum_Utilisasi_LNGC'],
+            'selected_storage Total Kapal 1': k1['selected_storage Total'],
+            'fuel_voyage Kapal 1': k1['fuel_voyage'],
+            'fuel_ballast Kapal 1': k1['fuel_ballast'],
+            'fuel_berth Kapal 1': k1['fuel_berth'],
+            'lng_fuel_cost Kapal 1': k1['lng_fuel_cost'],
+            'port_cost Kapal 1': k1['port_cost'],
+            'rent_cost Kapal 1': k1['rent_cost'],
+            'CAPEX Kapal 1': k1['Total CAPEX (USD)'],
+            'CAPEX USD/MMBTU Kapal 1': k1['Total CAPEX USD/MMBTU'],
+            'OPEX Kapal 1': k1['Total OPEX (USD/year)'],
+            'OPEX USD/MMBTU Kapal 1': k1['Total OPEX (USD/MMBTU)'],
+            'Cost Kapal 1': k1['Total Cost (USD/MMBTU)'],
+            'Spokes Kapal 1': k1['Spokes'],
+            
+            // Kapal 2 details
+            'Rute Kapal 2': k2['Rute'],
+            route2: k2['Rute'],                         // <--- DATABASE KEY
+            reuseCount2: Math.floor(k2['voyages_year']),// <--- DATABASE KEY
+            'Total Jarak Kapal 2 (NM)': k2['Total Jarak (NM)'],
+            'RTD Kapal 2': k2['RTD'],
+            'Demand LNG/day Kapal 2 (m3)': k2['Demand LNG/day (m3)'],
+            'Nominal Capacity Kapal 2 (m3)': k2['Nominal Capacity (m3)'],
+            'Speed Kapal 2 (knot)': k2['Speed (knot)'],
+            'buffer day Kapal 2': k2['buffer day'],
+            'days_stock Kapal 2': k2['days_stock'],
+            'voyages_year Kapal 2': k2['voyages_year'],
+            'Utilitasi_Factor_LNGC Kapal 2': k2['Utilitasi_Factor_LNGC'],
+            'Batas_Maksimum_Utilisasi_LNGC Kapal 2': k2['Batas_Maksimum_Utilisasi_LNGC'],
+            'selected_storage Total Kapal 2': k2['selected_storage Total'],
+            'fuel_voyage Kapal 2': k2['fuel_voyage'],
+            'fuel_ballast Kapal 2': k2['fuel_ballast'],
+            'fuel_berth Kapal 2': k2['fuel_berth'],
+            'lng_fuel_cost Kapal 2': k2['lng_fuel_cost'],
+            'port_cost Kapal 2': k2['port_cost'],
+            'rent_cost Kapal 2': k2['rent_cost'],
+            'CAPEX Kapal 2': k2['Total CAPEX (USD)'],
+            'CAPEX USD/MMBTU Kapal 2': k2['Total CAPEX USD/MMBTU'],
+            'OPEX Kapal 2': k2['Total OPEX (USD/year)'],
+            'OPEX USD/MMBTU Kapal 2': k2['Total OPEX (USD/MMBTU)'],
+            'Cost Kapal 2': k2['Total Cost (USD/MMBTU)'],
+            'Spokes Kapal 2': k2['Spokes'],
+            
+            // System totals
+            'System CAPEX (USD)': c_usd,
+            'System OPEX (USD/year)': o_usd_year,
+            'System Cost (USD/MMBTU)': sys_cost,
+          });
         }
       }
     }
