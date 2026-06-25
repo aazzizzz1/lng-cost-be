@@ -746,11 +746,23 @@ const _pendingRoutes = new Map();
 
 async function computeRoute(origin, destination, options = {}) {
   const key = makeRouteKey(origin.name || `${origin.lat},${origin.lon}`, destination.name || `${destination.lat},${destination.lon}`);
-
+  // Cek apakah rute sedang diproses server lain
   if (!options.forceRecompute && _pendingRoutes.has(key)) return _pendingRoutes.get(key);
+  // ⚡ [TAMBAHKAN BLOK INI] MEMBACA CACHE DARI DATABASE POSTGRESQL ⚡
+  if (!options.forceRecompute) {
+    try {
+      const cachedRoute = await prisma.spatialRouteCache.findUnique({ where: { routeKey: key } });
+      if (cachedRoute && cachedRoute.waypoints && cachedRoute.waypoints.length > 0) {
+        console.log(`      ⚡ CACHE DITEMUKAN | Memuat Rute: ${origin.name || 'Origin'} <--> ${destination.name || 'Dest'} dalam 0.0s`);
+        return { ...cachedRoute, status: cachedRoute.maxDepth <= cachedRoute.safeDepth ? 'Aman' : 'Rawan Kandas', fromCache: true };
+      }
+    } catch (e) {
+      console.error('[Cache Error] Gagal membaca rute dari database:', e.message);
+    }
+  }
+  // ⚡ [AKHIR BLOK TAMBAHAN] ⚡
   let _res, _rej; const _def = new Promise((r, j) => { _res = r; _rej = j; });
   if (!options.forceRecompute) _pendingRoutes.set(key, _def);
-
   try {
     const pad = options.bathyEngine === 'batnas' ? 3.0 : 1.0; 
     
@@ -842,8 +854,21 @@ async function computeRoute(origin, destination, options = {}) {
 }
 
 async function computeJettyReport(locationName, lat, lon, options = {}) {
+  
+  // ⚡ [TAMBAHKAN BLOK INI] MEMBACA CACHE PELABUHAN ⚡
+  if (!options.forceRecompute) {
+    try {
+      const cachedJetty = await prisma.jettyBerthReport.findUnique({ where: { locationName } });
+      if (cachedJetty) {
+        return { ...cachedJetty, landM: parseFloat((cachedJetty.landKm * 1000).toFixed(0)), fromCache: true };
+      }
+    } catch (e) {
+      console.error('[Cache Error] Gagal membaca Jetty:', e.message);
+    }
+  }
+  // ⚡ [AKHIR BLOK TAMBAHAN] ⚡
   const pad = 0.5;
-
+  
   const win = options.bathyEngine === 'batnas'
     ? await getBatnas(lat - pad, lat + pad, lon - pad, lon + pad)
     : await getGebco(lat - pad, lat + pad, lon - pad, lon + pad);
