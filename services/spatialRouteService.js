@@ -204,7 +204,7 @@ function live_astar_path(G_nodes, G_edges, source, target, heuristic) {
 
     if (curr === target) {
       const elapsed = (Date.now() - start_time) / 1000;
-      console.log(`        🧭 Navigasi AI: 100.0% Selesai | Titik Diproses: ${nodes_explored} | Berhasil dalam ${elapsed.toFixed(1)}s          `);
+      // console.log(`        🧭 Navigasi AI: 100.0% Selesai | Titik Diproses: ${nodes_explored} | Berhasil dalam ${elapsed.toFixed(1)}s          `);
       return path;
     }
 
@@ -225,7 +225,7 @@ function live_astar_path(G_nodes, G_edges, source, target, heuristic) {
 // ==============================================================================
 async function calculate_access_and_jetty(pt_name, pt_pos, win, weatherCacheByZone, overrideSafeD = null) {
   const ptNameDisp = pt_name.charAt(0).toUpperCase() + pt_name.slice(1);
-  console.log(`  🏗️ Menganalisis akses pesisir untuk [${pt_name}] di koordinat ${pt_pos[0].toFixed(4)}, ${pt_pos[1].toFixed(4)}`);
+  // console.log(`  🏗️ Menganalisis akses pesisir untuk [${pt_name}] di koordinat ${pt_pos[0].toFixed(4)}, ${pt_pos[1].toFixed(4)}`);
   
   let PORT_SAFE_DEPTH;
   if (overrideSafeD !== null) {
@@ -349,9 +349,9 @@ async function calculate_access_and_jetty(pt_name, pt_pos, win, weatherCacheByZo
   const jetty_m = Math.max(0, total_dist_m - land_m);
 
   if (total_dist_m > 50) {
-     console.log(`      ⚠️ Kapal terkurung dangkal. Menggeser titik Berth sejauh ${(dist_km_total).toFixed(2)} KM menuju laut lepas.`);
+    //  console.log(`      ⚠️ Kapal terkurung dangkal. Menggeser titik Berth sejauh ${(dist_km_total).toFixed(2)} KM menuju laut lepas.`);
   }
-  console.log(`      ✅ ${ptNameDisp}: Total kebutuhan Jetty/Alur Keruk: ${total_dist_m.toFixed(0)} M (Darat: ${land_m.toFixed(0)} M | Laut Dangkal: ${jetty_m.toFixed(0)} M) | Kedalaman Sandar: ${berthDepth.toFixed(1)} m`);
+  // console.log(`      ✅ ${ptNameDisp}: Total kebutuhan Jetty/Alur Keruk: ${total_dist_m.toFixed(0)} M (Darat: ${land_m.toFixed(0)} M | Laut Dangkal: ${jetty_m.toFixed(0)} M) | Kedalaman Sandar: ${berthDepth.toFixed(1)} m`);
   
   return { berthLat, berthLon, berthDepth, landKm: land_km, jettyM: jetty_m, safeD: PORT_SAFE_DEPTH };
 }
@@ -431,8 +431,8 @@ async function run_spatial_core(cu, cv, safeD, win, isBatnas, u, v) {
   const lat_step_abs = Math.abs(win.latStep);
   const lon_step_abs = Math.abs(win.lonStep);
 
-  console.log(`   --------------------------------------------------------`);
-  console.log(`   🚦 Memproses Rute: ${u} <--> ${v} (Jarak Lurus: ${dist_nm_total_log.toFixed(1)} NM)`);
+  // console.log(`   --------------------------------------------------------`);
+  // console.log(`   🚦 Memproses Rute: ${u} <--> ${v} (Jarak Lurus: ${dist_nm_total_log.toFixed(1)} NM)`);
 
   let auto_waypoints = [];
   
@@ -462,7 +462,7 @@ async function run_spatial_core(cu, cv, safeD, win, isBatnas, u, v) {
         for (let i = step_size; i < path.length - 1; i += step_size) {
           auto_waypoints.push([win.latStart + path[i][0] * win.latStep, win.lonStart + path[i][1] * win.lonStep]);
         }
-        console.log(`      ✅ Satelit Makro memetakan ${auto_waypoints.length} Titik Transit Ultra-Presisi!          `);
+        // console.log(`      ✅ Satelit Makro memetakan ${auto_waypoints.length} Titik Transit Ultra-Presisi!          `);
         break;
       }
 
@@ -701,7 +701,7 @@ async function run_spatial_core(cu, cv, safeD, win, isBatnas, u, v) {
     }
 
     if (!success_micro) {
-      console.log(`      ❌ SEGMEN GAGAL (KANDAS MUTLAK): Terhalang perairan dangkal yang tidak dapat ditembus pada syarat ${safeD.toFixed(1)}m.`);
+      // console.log(`      ❌ SEGMEN GAGAL (KANDAS MUTLAK): Terhalang perairan dangkal yang tidak dapat ditembus pada syarat ${safeD.toFixed(1)}m.`);
       return null; // Return null akan otomatis menggagalkan rute secara jujur (berth terjebak total)
     }
 
@@ -735,7 +735,7 @@ async function run_spatial_core(cu, cv, safeD, win, isBatnas, u, v) {
 
   let dist = 0;
   for (let i = 0; i < final_wp.length - 1; i++) dist += fast_nm_dist(final_wp[i], final_wp[i+1]);
-  console.log(`      ✅ RUTE DITEMUKAN | Jarak Laut Aktual (Telah Diluruskan): ${dist.toFixed(1)} NM | Waypoint Akhir: ${final_wp.length}          `);
+  // console.log(`      ✅ RUTE DITEMUKAN | Jarak Laut Aktual (Telah Diluruskan): ${dist.toFixed(1)} NM | Waypoint Akhir: ${final_wp.length}          `);
   return { waypoints: final_wp, distanceNm: dist };
 }
 
@@ -753,11 +753,11 @@ async function computeRoute(origin, destination, options = {}) {
     try {
       const cachedRoute = await prisma.spatialRouteCache.findUnique({ where: { routeKey: key } });
       if (cachedRoute && cachedRoute.waypoints && cachedRoute.waypoints.length > 0) {
-        console.log(`      ⚡ CACHE DITEMUKAN | Memuat Rute: ${origin.name || 'Origin'} <--> ${destination.name || 'Dest'} dalam 0.0s`);
+        // console.log(`      ⚡ CACHE DITEMUKAN | Memuat Rute: ${origin.name || 'Origin'} <--> ${destination.name || 'Dest'} dalam 0.0s`);
         return { ...cachedRoute, status: cachedRoute.maxDepth <= cachedRoute.safeDepth ? 'Aman' : 'Rawan Kandas', fromCache: true };
       }
     } catch (e) {
-      console.error('[Cache Error] Gagal membaca rute dari database:', e.message);
+      // console.error('[Cache Error] Gagal membaca rute dari database:', e.message);
     }
   }
   // ⚡ [AKHIR BLOK TAMBAHAN] ⚡
@@ -786,22 +786,22 @@ async function computeRoute(origin, destination, options = {}) {
     }
     const finalSafeD = -(MAX_DESIGN_DRAFT + UKC_CLEARANCE + 0.5 * route_max_wave);
 
-    console.log(`\n🕸️ MERAKIT JARINGAN NAVIGASI (STRICT AUDIT DEPTH PARITY)...`);
-    console.log(`   ⚓ DRAFT KAPAL MAKSIMAL (DATABASE): ${MAX_DESIGN_DRAFT.toFixed(1)}m | UKC: ${UKC_CLEARANCE.toFixed(2)}m`);
-    console.log(`   📐 PANJANG KAPAL (LPP) MAKSIMAL  : ${MAX_LPP.toFixed(1)}m`);
-    console.log(`\n   🏗️  MENGKALKULASI AKSES PESISIR (DARAT -> PANTAI -> JETTY/KERUK)...`);
-    console.log(`      (Memaksa pencarian Jetty hingga kedalaman laut ekstrem rute: ${finalSafeD.toFixed(1)}m)`);
+    // console.log(`\n🕸️ MERAKIT JARINGAN NAVIGASI (STRICT AUDIT DEPTH PARITY)...`);
+    // console.log(`   ⚓ DRAFT KAPAL MAKSIMAL (DATABASE): ${MAX_DESIGN_DRAFT.toFixed(1)}m | UKC: ${UKC_CLEARANCE.toFixed(2)}m`);
+    // console.log(`   📐 PANJANG KAPAL (LPP) MAKSIMAL  : ${MAX_LPP.toFixed(1)}m`);
+    // console.log(`\n   🏗️  MENGKALKULASI AKSES PESISIR (DARAT -> PANTAI -> JETTY/KERUK)...`);
+    // console.log(`      (Memaksa pencarian Jetty hingga kedalaman laut ekstrem rute: ${finalSafeD.toFixed(1)}m)`);
 
     const bOrig = await calculate_access_and_jetty(origin.name || 'Origin', [origin.lat, origin.lon], win, options.weatherCacheByZone, finalSafeD);
     const bDest = await calculate_access_and_jetty(destination.name || 'Dest', [destination.lat, destination.lon], win, options.weatherCacheByZone, finalSafeD);
 
-    console.log(`\n   🗺️ MEMULAI KALKULASI RUTE (SMART A-STAR ENGINE)...`);
+    // console.log(`\n   🗺️ MEMULAI KALKULASI RUTE (SMART A-STAR ENGINE)...`);
     
     let routeResult = await run_spatial_core([bOrig.berthLat, bOrig.berthLon], [bDest.berthLat, bDest.berthLon], finalSafeD, win, options.bathyEngine === 'batnas', origin.name || 'Origin', destination.name || 'Dest');
 
     if (!routeResult || routeResult.waypoints.length < 2) {
-        console.log(`      ⚠️ RUTE ALAMI BUNTU: Tidak ada jalur murni air yang memenuhi syarat kedalaman ${finalSafeD.toFixed(1)}m.`);
-        console.log(`      ⚠️ Mengirimkan data kosong agar rute dicoret dari sistem.`);
+        // console.log(`      ⚠️ RUTE ALAMI BUNTU: Tidak ada jalur murni air yang memenuhi syarat kedalaman ${finalSafeD.toFixed(1)}m.`);
+        // console.log(`      ⚠️ Mengirimkan data kosong agar rute dicoret dari sistem.`);
         routeResult = { waypoints: [], distanceNm: -1.0 }; 
     }
 
@@ -968,7 +968,7 @@ async function computeWeatherLegReport(legs, vessel, weatherCacheByZone) {
       const zonesSet = new Set();
       let totalDist = 0, totalHours = 0, minSpd = Infinity;
       
-      console.log(`\n   📊 LOG KECEPATAN KAPAL: ${origin} ➔ ${destination}`);
+      // console.log(`\n   📊 LOG KECEPATAN KAPAL: ${origin} ➔ ${destination}`);
       
       // 🚨 CEK PERTAMA: Apakah data Kapal ada?
       if (!vessel || vessel.speedKnot === undefined) {
@@ -998,7 +998,7 @@ async function computeWeatherLegReport(legs, vessel, weatherCacheByZone) {
           if (totalDist > segmentStartDist) {
             const status = currentSpeed < vessel.speedKnot ? '⚠️ Kecepatan Turun' : '✅ Kecepatan Normal';
             const zLabel = currentZone.replace('_', ' ');
-            console.log(`      ➤ Jarak ${segmentStartDist.toFixed(0)} - ${totalDist.toFixed(0)} NM: ${status} (${currentSpeed.toFixed(1)} Kts) melintasi ${zLabel}`);
+            // console.log(`      ➤ Jarak ${segmentStartDist.toFixed(0)} - ${totalDist.toFixed(0)} NM: ${status} (${currentSpeed.toFixed(1)} Kts) melintasi ${zLabel}`);
           }
           currentZone = zoneName;
           currentSpeed = spd;
@@ -1014,17 +1014,17 @@ async function computeWeatherLegReport(legs, vessel, weatherCacheByZone) {
       if (totalDist > segmentStartDist) {
         const status = currentSpeed < vessel.speedKnot ? '⚠️ Kecepatan Turun' : '✅ Kecepatan Normal';
         const zLabel = currentZone.replace('_', ' ');
-        console.log(`      ➤ Jarak ${segmentStartDist.toFixed(0)} - ${totalDist.toFixed(0)} NM: ${status} (${currentSpeed.toFixed(1)} Kts) melintasi ${zLabel}`);
+        // console.log(`      ➤ Jarak ${segmentStartDist.toFixed(0)} - ${totalDist.toFixed(0)} NM: ${status} (${currentSpeed.toFixed(1)} Kts) melintasi ${zLabel}`);
       }
 
       const avgSpd = totalHours > 0 ? totalDist / totalHours : vessel.speedKnot;
-      console.log(`      🏁 RATA-RATA AKHIR: ${avgSpd.toFixed(1)} Kts | TOTAL WAKTU: ${totalHours.toFixed(1)} Jam\n`);
+      // console.log(`      🏁 RATA-RATA AKHIR: ${avgSpd.toFixed(1)} Kts | TOTAL WAKTU: ${totalHours.toFixed(1)} Jam\n`);
 
       results.push({ origin, destination, zonesAffected: [...zonesSet], avgSpeedKts: parseFloat(avgSpd.toFixed(2)), minSpeedKts: minSpd === Infinity ? vessel.speedKnot : parseFloat(minSpd.toFixed(2)) });
     }
   } catch (err) {
     // 🔥 Jika terjadi Error, terminal akan teriak warna merah!
-    console.error(`\n   ❌ [SYSTEM CRASH] GAGAL MEMPROSES LOG KECEPATAN: ${err.message}\n`);
+    // console.error(`\n   ❌ [SYSTEM CRASH] GAGAL MEMPROSES LOG KECEPATAN: ${err.message}\n`);
   }
   return results;
 }
